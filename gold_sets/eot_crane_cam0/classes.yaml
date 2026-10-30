@@ -1,0 +1,30 @@
+# Gold set: EOT crane, top-down camera (cam0), Roboflow project
+#   vinus-workspace-4ji2t / eot_crane-yduh1-vhu5p-ohmpg
+#
+# Descriptions written from the overhead camera's point of view, confirmed
+# against the team's example images on 2026-10-30. They are a first draft:
+# the threshold sweep will show which ones work.
+#
+# Watch out: sb and biax are both yellow horizontal bars under the hook and
+# differ mainly in length. If recall(class ignored) is much higher than recall,
+# OWLv2 is finding them but mixing them up.
+
+classes:
+  - name: person
+    description: "a worker wearing a hard hat, seen from above"
+    aliases: [Person, a_person]
+
+  - name: rb
+    # Long, narrow, beige/tan slab hanging from the crane cables,
+    # usually pointing along the cables, with a forked end.
+    description: "a long narrow beige slab hanging from crane cables"
+
+  - name: sb
+    # Very long, thin yellow steel beam with end fittings, held horizontally
+    # under the hook; spans a large part of the image.
+    description: "a long thin yellow steel lifting beam"
+
+  - name: biax
+    # Short, wide yellow/orange crossbar held horizontally right under the
+    # hook, much shorter than sb.
+    description: "a short yellow crossbar hanging from crane cables"

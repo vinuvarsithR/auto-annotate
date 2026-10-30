@@ -1,0 +1,13 @@
+# Classes in this gold set.
+#   name:        must be a canonical name from gold_sets/README.md
+#                (and must match the category names in annotations.json)
+#   description: a short plain-English phrase describing what it looks like.
+#                In Phase 1 this becomes the text prompt OWLv2 searches for,
+#                so avoid abbreviations: OWLv2 doesn't know what "rb" means.
+
+classes:
+  - name: person
+    description: "a person"
+    aliases: [Person, a_person]   # other spellings used in Roboflow
+  - name: example_class
+    description: "TODO: describe what this object looks like"

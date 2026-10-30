@@ -1,0 +1,70 @@
+# Step B: image-guided queries. Examples picked from the TRAIN split by scripts/pick_examples.py.
+classes:
+- name: person
+  description: a worker wearing a hard hat, seen from above
+  aliases:
+  - Person
+  - a_person
+- name: rb
+  description: a long narrow beige slab hanging from crane cables
+  examples:
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/rb_1__cam0_2026-09-29_16-24-22_00263_jpg.rf.4afdff8945264a421bd0c0d7f2870a85.jpg
+    bbox:
+    - 543.2
+    - 178.7
+    - 140.0
+    - 316
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/rb_1__cam0_2026-09-29_16-34-20_00218_jpg.rf.1ccf9128905363767e634797d9451add.jpg
+    bbox:
+    - 565.2
+    - 152
+    - 120.6
+    - 396.7
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/rb_load__cam0_2026-09-29_18-14-10_00196_jpg.rf.aa5f4381e67a80deeb8a672cc61dc89c.jpg
+    bbox:
+    - 538
+    - 138
+    - 194
+    - 446
+- name: sb
+  description: a long thin yellow steel lifting beam
+  examples:
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/biax__cam0_2026-09-29_18-48-25_00283_jpg.rf.d37c3dfab8270d00f73b8302f4cb2ea6.jpg
+    bbox:
+    - 53
+    - 305
+    - 866
+    - 90
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/biax__cam0_2026-09-29_18-48-25_00115_jpg.rf.bad4b223238076601ee36ddb333b54f5.jpg
+    bbox:
+    - 78
+    - 306
+    - 871
+    - 100
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/biax__cam0_2026-09-29_18-48-25_00319_jpg.rf.e2904ea7fbb022209b6f395e6158d09b.jpg
+    bbox:
+    - 74
+    - 312
+    - 867
+    - 100
+- name: biax
+  description: a short yellow crossbar hanging from crane cables
+  examples:
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/rb_load__cam0_2026-09-29_18-34-11_00173_jpg.rf.566854d2a32ab3fbc73b5202fda61d7a.jpg
+    bbox:
+    - 610
+    - 210
+    - 38
+    - 210
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/rb_load__cam0_2026-09-29_18-34-11_00199_jpg.rf.a63ffbee26c6830e4063c84e23053386.jpg
+    bbox:
+    - 579
+    - 263
+    - 37
+    - 210
+  - image: ../../data/roboflow/eot_crane-yduh1-vhu5p-ohmpg-v1/train/rb_load__cam0_2026-09-29_18-34-11_00140_jpg.rf.1723eb2820176635c231520acbeffe1b.jpg
+    bbox:
+    - 597
+    - 217
+    - 34
+    - 193

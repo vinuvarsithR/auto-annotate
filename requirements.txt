@@ -1,0 +1,18 @@
+# PyTorch is NOT listed here. Install it first with:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# (see README.md, step 4)
+
+# Arrays (PyTorch uses it to convert data; not installed automatically by the cu128 wheel)
+numpy
+
+# Phase 1: OWLv2
+transformers>=4.40   # runs OWLv2; code checked against 5.22.1
+pillow               # opens images
+pyyaml               # reads classes.yaml
+
+# Phase 1: pulling a provisional gold set from Roboflow
+roboflow             # Roboflow Python SDK; checked against 1.7.3
+python-dotenv        # reads ROBOFLOW_API_KEY from .env
+
+# Testing
+pytest>=8.0
