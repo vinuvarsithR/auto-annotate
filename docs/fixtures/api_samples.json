@@ -640,6 +640,11 @@
   "started_at": null,
   "finished_at": null
  },
+ "GET /api/models": {
+  "models": [
+   "fake"
+  ]
+ },
  "error example (404)": {
   "error": {
    "code": "not_found",

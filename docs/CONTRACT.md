@@ -110,6 +110,22 @@ Errors always look like this, with a matching HTTP status (400, 404, 409 or 500)
 {"error": {"code": "not_found", "message": "image 99 not found"}}
 ```
 
+Error codes (the UI may rely on these; `message` is for humans and may change):
+
+| HTTP | `code` | When |
+|---|---|---|
+| 400 | `bad_request` | invalid body or query (incl. FastAPI validation), empty/duplicate names, unknown `status` |
+| 400 | `unknown_model` | `model` not in `list_detectors()` |
+| 400 | `no_classes` | detect job on a project with no classes |
+| 400 | `bad_image_ids` | `image_ids` not all in this project |
+| 400 | `bad_class_id` | `class_id` not in this image's project |
+| 404 | `not_found` | unknown id, unknown path, or image file missing on disk |
+| 405 | `method_not_allowed` | wrong HTTP method for the path |
+| 409 | `name_taken` | project name already used |
+| 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
+| 409 | `conflict` | any other 409 |
+| 500 | `internal_error` | unexpected server error (details only in the server log) |
+
 | # | Method | Path | Purpose |
 |---|---|---|---|
 | 1 | POST | `/projects` | create project |
@@ -127,6 +143,7 @@ Errors always look like this, with a matching HTTP status (400, 404, 409 or 500)
 | 13 | PATCH | `/annotations/{aid}` | review / edit a box |
 | 14 | POST | `/projects/{pid}/export` | download COCO / YOLO zip |
 | 15 | POST | `/projects/{pid}/roboflow-push` | start push job |
+| 16 | GET | `/models` | detector names for POST .../jobs |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -223,7 +240,10 @@ Request:
 {"format": "coco", "statuses": ["auto_accepted", "accepted", "edited"], "include_images": false}
 ```
 `format` is `coco` or `yolo`. The response is a `application/zip` download named
-`<project>_<format>.zip`. The zip layout is defined by the export session in `autolabel/export/`
+`<project>_<format>.zip`.
+Route rule: `app/api/export.py` defines `router = APIRouter()` with the path
+`/projects/{pid}/export` (no `/api`); `app/main.py` mounts it under `/api` when the module exists.
+The zip layout is defined by the export session in `autolabel/export/`
 and documented in its notes.
 
 ### 15. POST /projects/{pid}/roboflow-push
@@ -234,6 +254,15 @@ Request:
 ```
 Response 202 is a Job with `kind: "roboflow_push"`, which you poll with #10. The push uses
 the Roboflow **Python SDK** with the `.env` key only, never the Roboflow MCP connector.
+Who runs `roboflow_push` jobs: the **export session, later**. The backend worker ignores them for now.
+
+### 16. GET /models
+Response `{"models": [...]}`, which is exactly `autolabel.models.list_detectors()`. Today:
+```json
+{"models": ["fake"]}
+```
+The UI uses it to choose the `model` for #9. The default `"pipeline"` in #9 stays; it is
+rejected with 400 `unknown_model` until the real pipeline is registered. Owner: backend.
 
 ---
 
@@ -243,7 +272,7 @@ The models session owns `autolabel/models/` and `autolabel/pipeline.py`. The typ
 `autolabel/models/base.py`. Everyone else imports them and must not redefine them.
 
 ```python
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Iterator, Protocol
 from PIL import Image
 from autolabel.evaluate import Box
@@ -257,8 +286,11 @@ class ClassSpec:
 @dataclass(frozen=True)
 class Prediction(Box):             # Box gives: image_id: str, category: str, bbox (x,y,w,h px), score
     source: str = ""               # "owlv2", "owlv2_image", "gdino", "pipeline", ...
-    mask: dict | None = None       # COCO RLE or None
-
+    mask: dict | None = field(default=None, hash=False, compare=False)   # COCO RLE or None
+```
+`mask` is left out of hashing and `==` because a dict is not hashable (a frozen dataclass
+hashes every field). Two predictions that differ only in their mask compare equal.
+```python
 class Detector(Protocol):
     name: str                      # the string used in POST .../jobs "model"
     def detect(self, image: Image.Image, image_id: str,
@@ -314,6 +346,14 @@ Rules:
   calls them.
 - No session runs anything on the GPU while the paused YOLO training (pid 3863) is holding it.
 - The `.env` key is never printed, logged or committed.
+
+---
+
+## Open questions
+
+- `get_detector` caches one instance per **name**. With real models, two jobs with different
+  `options` (e.g. another checkpoint) would share the first instance. Key the cache on
+  `(name, options)` instead? (models session; no change yet)
 
 ---
 

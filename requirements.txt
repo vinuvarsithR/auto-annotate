@@ -14,5 +14,11 @@ pyyaml               # reads classes.yaml
 roboflow             # Roboflow Python SDK; checked against 1.7.3
 python-dotenv        # reads ROBOFLOW_API_KEY from .env
 
+# Phase 2: backend (FastAPI app in app/); minimums = versions verified on Windows 2026-10-31
+fastapi>=0.162.0          # REST API
+uvicorn>=0.54.0           # runs the server: uvicorn app.main:app --port 8000
+python-multipart>=0.0.32  # multipart image upload
+httpx>=0.28.1             # FastAPI TestClient in tests
+
 # Testing
 pytest>=8.0

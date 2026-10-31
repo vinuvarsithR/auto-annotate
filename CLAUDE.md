@@ -20,20 +20,35 @@ Linux, RTX 3060 12 GB (sm_86), driver 595.99, Python 3.10.12,
 torch 2.11.0+cu128. Run everything inside `.venv` (`source .venv/bin/activate`).
 A second machine (Windows, RTX 5060 Ti 16 GB, sm_120) is not set up yet.
 
+Windows CPU machine (verified 2026-10-31): D:\autoannotate\auto-annotate, NO GPU, PowerShell,
+Python 3.14.0, torch 2.15.0+cpu, transformers 5.22.1, fastapi 0.162.0, uvicorn 0.54.0,
+Pillow 13.0.0, pytest 9.2.0. Venv: `.venv\Scripts\activate`. No dataset, gold images or
+weights here (gitignored); use generated test images (data/test_images/) for app checks.
+Used for app work (backend / UI / export), not model runs.
+
 ## Phases
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Setup, GPU check, repo, gold-set folders | Done (Linux) |
-| 1 | Standalone OWLv2 script, precision/recall vs gold, threshold sweep | **In progress** |
-| 2 | FastAPI backend: upload, class descriptions, job queue, results store | |
-| 3 | Review UI, COCO/YOLO export, Roboflow upload | |
+| 1 | Standalone OWLv2 script, precision/recall vs gold, threshold sweep | **Parked** (model comparison, see below) |
+| 2 | FastAPI backend: upload, class descriptions, job queue, results store | **Built** (endpoints 1-13, fake detector only; 16 `GET /api/models` specced, not built) |
+| 3 | Review UI, COCO/YOLO export, Roboflow upload | Review UI **built** (app/static); export + Roboflow push not started |
 | 4 | SAM masks, second model (Grounding DINO) ensemble, VLM verifier, confidence routing | |
 | 5 | Train YOLO / RF-DETR on auto-labels, compare to gold, flag label errors | |
 | 6 | Docker, login, docs, demo script | |
 
 Design: FastAPI + SQLite + simple background worker; OWLv2 baseline; favor
 recall over precision (humans delete junk faster than they draw missed boxes).
+
+## Parallel sessions (2026-10-31)
+Work is split by docs/CONTRACT.md (backend, models, ui, export + integrator on main).
+Session notes: docs/agents/*.md. Merged on main: models (fake detector, pipeline.run),
+backend (endpoints 1-13), ui (review page). Run the app: `uvicorn app.main:app --port 8000`,
+open http://localhost:8000/ (or `/?mock=1` for fixtures). The UI has no upload/classes/job
+screens yet: do those via http://localhost:8000/docs with `"model": "fake"`.
+Next: backend builds GET /api/models (contract #16); export session builds #14 and the
+roboflow_push runner (#15, later).
 
 ## Phase 1 state
 
@@ -107,7 +122,11 @@ Step B findings so far (verified 2026-10-30, transformers 5.20.2 source):
 - User confirmed 2026-10-30: NO other crane images exist; the v1 export (1649 imgs, 8 videos) is
   the whole dataset (~/Downloads/eot_crane.v1i.coco.zip is byte-identical to it).
 
-## Model comparison task (approved plan, 2026-10-30)
+## Model comparison task (approved plan, 2026-10-30) - PARKED 2026-10-31
+User: "only building the pipeline" for now; models get plugged in later. Parked, not cancelled.
+Resume point is below (YOLO paused at epoch 11/50 on the Linux machine, OWLv2/GDINO runs and
+compare_models.py not run). Don't propose resuming it until the user asks.
+
 Compare OWLv2 text, OWLv2 image-guided (= step B), Grounding DINO, YOLO on a new test set.
 Split BY TIME inside each video: [val 10%][gap][train][gap][test], gap = max(5%, 15 frames),
 unpicked test-window frames unused, train/val look-alikes of test dropped (dHash 256-bit).

@@ -82,10 +82,12 @@ def test_no_torch_imported():
     assert subprocess.run([sys.executable, "-c", code]).returncode == 0
 
 
-def test_prediction_with_mask_is_not_hashable():
-    """Documents a contract issue (see docs/agents/models.md):
-    Box is frozen -> hashable, but a dict mask makes hash() fail."""
-    p = Prediction("a", "person", (0, 0, 1, 1), 0.5, source="x", mask={"size": [1, 1], "counts": "1"})
-    with pytest.raises(TypeError):
-        hash(p)
-    hash(Prediction("a", "person", (0, 0, 1, 1), 0.5))  # without a mask it is fine
+def test_prediction_with_mask_is_hashable():
+    """mask is excluded from hash/== (contract change, see docs/agents/models.md)."""
+    rle = {"size": [1, 1], "counts": "1"}
+    p = Prediction("a", "person", (0, 0, 1, 1), 0.5, source="x", mask=rle)
+    hash(p)  # no TypeError
+    same_but_no_mask = Prediction("a", "person", (0, 0, 1, 1), 0.5, source="x")
+    assert p == same_but_no_mask
+    assert len({p, same_but_no_mask}) == 1
+    assert p.mask == rle  # the mask is still stored

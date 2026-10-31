@@ -14,7 +14,7 @@ No torch / GPU code here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from PIL import Image
@@ -32,7 +32,9 @@ class ClassSpec:
 @dataclass(frozen=True)
 class Prediction(Box):             # Box gives: image_id: str, category: str, bbox (x,y,w,h px), score
     source: str = ""               # "owlv2", "owlv2_image", "gdino", "pipeline", ...
-    mask: dict | None = None       # COCO RLE or None
+    # COCO RLE or None. Left out of hash/==, because a dict is not hashable
+    # and a frozen dataclass hashes every field (CONTRACT.md section 3).
+    mask: dict | None = field(default=None, hash=False, compare=False)
 
 
 class Detector(Protocol):
