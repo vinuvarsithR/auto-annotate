@@ -4,9 +4,66 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
 
 ## Done
 
+Sections 1 (SQLite) and 2 (REST, endpoints 1-13) of the contract. 14 and 15 skipped as asked.
+
+| File | What |
+|---|---|
+| `app/main.py` | `create_app(data_dir="data", start_worker=True, load_pipeline=None, list_detectors=None, static_dir=app/static)`; module-level `app` for `uvicorn app.main:app --port 8000`. Tables created on startup (lifespan), not on import |
+| `app/db/schema.sql`, `app/db/db.py` | contract schema verbatim; connect (foreign keys ON, WAL), row -> JSON shapes, counts |
+| `app/api/errors.py` | `ApiError`; all errors (incl. FastAPI validation -> 400 `bad_request`, unknown path -> 404) use `{"error": {code, message}}` |
+| `app/api/deps.py` | one SQLite connection per request |
+| `app/api/{projects,images,classes,jobs,annotations}.py` | endpoints 1-3, 4-6, 7-8, 9-10, 11-13 |
+| `app/worker/worker.py` | one background thread; `run_once()` for tests |
+| tests | `test_api_{projects,images,classes,jobs,annotations,fixture_keys,helpers}.py`, `test_db_schema.py`, `test_worker_status.py`: 45 new tests, 152 total pass (VERIFIED, Windows, Python 3.14.0) |
+
+Behaviour choices (approved in the plan):
+
+| Case | Behaviour |
+|---|---|
+| PATCH changes bbox/mask/class + `status: accepted` | `edited`. `status: rejected` always wins. Sending the same bbox again is not an edit |
+| PATCH `status` other than accepted/rejected | 400 |
+| Model box below class `min_score` | dropped by the worker too (safety net) |
+| Detector returns unknown class / image_id | job `failed`, that image's rows untouched |
+| Jobs still `running` at startup | marked `failed` ("server restarted while the job was running") |
+| Job with no classes / foreign image ids / unknown model | 400 `no_classes` / `bad_image_ids` / `unknown_model` |
+| Upload | PIL must open it as JPEG/PNG **and** the extension must match, else `not an image`; name reduced to basename |
+| Re-run detect | per image, when its results arrive: delete that image's non-human `auto_accepted`/`needs_review` rows, insert new ones, update progress, in one transaction. A failed job leaves images it never reached unchanged |
+| `config` stored on a job | the request body after defaults: `{"model", "image_ids", "options"}` |
+
+Worker loads the models code lazily: `from autolabel import pipeline` and
+`from autolabel.models.base import ClassSpec`, then calls
+`pipeline.run(images=[(str(image.id), path)], classes=[ClassSpec], detector=model, options=options)`
+(on_progress not passed; the worker updates progress per yielded image).
+`POST .../jobs` checks the model against `autolabel.models.list_detectors()`. Until the
+models branch is merged, this returns 400 `unknown_model` ("autolabel.models is not installed").
+Tests use their own fake (`tests/test_api_helpers.py`: FakeClassSpec/FakePrediction/FakePipeline).
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 
+| Package | Version | Why | |
+|---|---|---|---|
+| fastapi | 0.162.0 | API | VERIFIED installed (import, 2026-10-31, Windows .venv) |
+| uvicorn | 0.54.0 | server on port 8000 | VERIFIED installed |
+| python-multipart | 0.0.32 | multipart image upload | VERIFIED installed |
+| httpx | 0.28.1 | FastAPI TestClient in tests | VERIFIED installed |
+| Pillow | 13.0.0 | image size / format check on upload | VERIFIED installed (already used by autolabel) |
+
 ## Contract change requests
 
+1. **Export router hookup.** `app/main.py` includes `app.api.export.router` with prefix `/api`
+   **if the module exists**. So the export session should define `router = APIRouter()` with the path
+   `/projects/{pid}/export` (no `/api`). Please add that to section 4 or tell me another convention.
+2. Error codes the backend uses beyond the contract's examples: `bad_request`, `not_found`,
+   `name_taken`, `class_in_use`, `unknown_model`, `no_classes`, `bad_image_ids`, `bad_class_id`,
+   `internal_error`, `method_not_allowed`. Worth listing in section 2 so the UI can rely on them.
+
 ## Open questions
+
+1. Should `GET /projects/{pid}/images` reject `limit` > 1000? (currently 400 above 1000.)
+2. Jobs for `kind = roboflow_push` are ignored by this worker; the export/push session will need either
+   a hook in the worker or its own runner. Which one?
+3. The backend work was first built by mistake in the main worktree (`D:/autoannotate/auto-annotate`)
+   and then copied here. The untracked copies there (`app/api/`, `app/db/`, `app/worker/`,
+   `app/main.py`, `tests/test_api_*.py`, `tests/test_db_schema.py`, `tests/test_worker_status.py`)
+   and a smoke-test `data/` folder (project "smoke_test", 1 image) can be deleted by the user.
