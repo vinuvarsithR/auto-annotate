@@ -14,6 +14,7 @@ Sections 1 (SQLite) and 2 (REST, endpoints 1-13) of the contract. 14 and 15 skip
 | `app/api/deps.py` | one SQLite connection per request |
 | `app/api/{projects,images,classes,jobs,annotations}.py` | endpoints 1-3, 4-6, 7-8, 9-10, 11-13 |
 | `app/worker/worker.py` | one background thread; `run_once()` for tests |
+| `app/api/models.py` | endpoint 16 `GET /api/models` -> `{"models": app.state.list_detectors()}` (2026-10-31). Tests: `test_api_models.py` (2) + fixture key check; 172 total pass (VERIFIED, Windows) |
 | tests | `test_api_{projects,images,classes,jobs,annotations,fixture_keys,helpers}.py`, `test_db_schema.py`, `test_worker_status.py`: 45 new tests, 152 total pass (VERIFIED, Windows, Python 3.14.0) |
 
 Behaviour choices (approved in the plan):

@@ -81,6 +81,8 @@ def test_all_endpoints_match_fixture_keys(tmp_path):
                           json={"bbox": [810, 298, 250, 70], "reviewer": "dhyan"}).json(),
                   FIXTURES["PATCH /api/annotations/105 (edit)"])
 
+        same_keys(c.get("/api/models").json(), FIXTURES["GET /api/models"])
+
         same_keys(c.get("/api/images/99/annotations").json(), FIXTURES["error example (404)"])
 
 
