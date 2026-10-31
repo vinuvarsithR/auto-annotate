@@ -47,6 +47,9 @@ None (plain JS, no libraries).
 ## Contract change requests
 
 ## Open questions
-- Should Setup show a job that was started before a page reload? Right now the poll stops on
-  reload (no "list jobs" endpoint to find it again).
-- Run detection always sends `image_ids: null` (all images). Is a "only new images" option wanted?
+
+## Decided (user, 2026-10-31)
+- Re-attach to a running job after a page reload: NOT NOW. Only matters for long real-model
+  jobs. Later: add a "list jobs" endpoint (backend + contract), then reconnect the poll on load.
+- "Only new images" option for Run detection: NOT NOW. Re-running already keeps every
+  human-reviewed box. Revisit when OWLv2 jobs take minutes instead of seconds.
