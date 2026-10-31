@@ -8,8 +8,12 @@
 </head>
 <body>
 <header id="topbar">
-  <strong class="brand">Review</strong>
+  <strong class="brand">Auto-annotate</strong>
   <span id="mockBadge" class="badge" hidden>MOCK</span>
+  <span class="tabs">
+    <button id="tabSetup" type="button">Setup</button>
+    <button id="tabReview" type="button" class="active">Review</button>
+  </span>
   <label>Project <select id="projectSelect"></select></label>
   <label>Reviewer <input id="reviewerInput" type="text" placeholder="your name" size="10"></label>
   <span id="progress" class="progress"></span>
@@ -18,6 +22,59 @@
 </header>
 
 <div id="banner" class="banner" hidden></div>
+
+<main id="setup" hidden>
+  <section class="card">
+    <h3>1. Project</h3>
+    <form id="createForm" class="row">
+      <input id="newProjectName" type="text" placeholder="new project name, e.g. eot_crane" size="30">
+      <button type="submit">Create project</button>
+    </form>
+    <div class="muted">Pick an existing project in the top bar. Everything below applies to
+      <b id="setupProjectName">-</b> (<span id="setupImageCount">0</span> images).</div>
+  </section>
+
+  <section class="card">
+    <h3>2. Upload images</h3>
+    <div class="row">
+      <input id="fileInput" type="file" accept="image/jpeg,image/png" multiple>
+      <button id="uploadBtn" type="button" disabled>Upload</button>
+    </div>
+    <div id="uploadBox" hidden>
+      <div class="bar"><div id="uploadBar"></div></div>
+      <div id="uploadText" class="muted"></div>
+    </div>
+    <ul id="skippedList" class="skipped"></ul>
+  </section>
+
+  <section class="card">
+    <h3>3. Classes</h3>
+    <p class="muted">The description is the text prompt the model searches for. Scores are 0-1;
+      empty means: min_score = model default, accept_score = never auto-accept.</p>
+    <table id="classTable" class="grid">
+      <thead><tr><th>name</th><th>description (prompt)</th><th>min_score</th><th>accept_score</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row buttons">
+      <button id="addClassBtn" type="button">+ Add class</button>
+      <button id="saveClassesBtn" type="button" class="ok">Save classes</button>
+      <span id="classDirty" class="st-needs_review" hidden>unsaved changes</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>4. Run detection</h3>
+    <div class="row">
+      <label>Model <select id="modelSelect"></select></label>
+      <button id="runBtn" type="button" class="ok">Run on all images</button>
+    </div>
+    <div id="modelNote" class="muted" hidden></div>
+    <div id="jobBox" hidden>
+      <div class="bar"><div id="jobBar"></div></div>
+      <div id="jobText" class="muted"></div>
+    </div>
+  </section>
+</main>
 
 <main id="layout">
   <aside id="left">
@@ -95,5 +152,6 @@
 <script src="api.js"></script>
 <script src="canvas.js"></script>
 <script src="app.js"></script>
+<script src="setup.js"></script>
 </body>
 </html>
