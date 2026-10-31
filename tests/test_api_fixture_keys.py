@@ -81,9 +81,28 @@ def test_all_endpoints_match_fixture_keys(tmp_path):
                           json={"bbox": [810, 298, 250, 70], "reviewer": "dhyan"}).json(),
                   FIXTURES["PATCH /api/annotations/105 (edit)"])
 
+        same_keys(c.patch(f"/api/annotations/{aid}",
+                          json={"status": "needs_review", "reviewer": "dhyan"}).json(),
+                  FIXTURES["PATCH /api/annotations/102 (undo)"])
+
         same_keys(c.get("/api/models").json(), FIXTURES["GET /api/models"])
 
+        same_keys(c.patch(f"/api/projects/{pid}", json={"name": "eot_crane_v2"}).json(),
+                  FIXTURES["PATCH /api/projects/1"])
+
         same_keys(c.get("/api/images/99/annotations").json(), FIXTURES["error example (404)"])
+
+        # 204 endpoints: the fixture value is null, the real body is empty
+        assert FIXTURES["DELETE /api/annotations/109"] is None
+        r = c.delete(f"/api/annotations/{human['id']}")
+        assert (r.status_code, r.content) == (204, b"")
+
+        c.post(f"/api/projects/{pid}/jobs", json={"model": "pipeline"})  # stays queued
+        same_keys(c.delete(f"/api/projects/{pid}").json(), FIXTURES["error example (409 conflict)"])
+        c.app.state.worker.run_once()
+        assert FIXTURES["DELETE /api/projects/1"] is None
+        r = c.delete(f"/api/projects/{pid}")
+        assert (r.status_code, r.content) == (204, b"")
 
 
 def test_failed_job_matches_fixture_keys(tmp_path):

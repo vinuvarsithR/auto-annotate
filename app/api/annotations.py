@@ -1,13 +1,13 @@
 """
-annotations.py - endpoints 11-13: read boxes, add a human box, review / edit a box.
+annotations.py - endpoints 11-13 (read boxes, add a human box, review / edit a box)
+and 19 (hard-delete a box).
 
-Status rules (docs/CONTRACT.md section 1):
-| PATCH body                                   | new status |
-| status "rejected"                            | rejected   |
-| bbox / mask / class_id actually changed      | edited     |
-| status "accepted" (nothing else changed)     | accepted   |
-| only reviewer                                | unchanged  |
-A rejected row is kept, never deleted.
+Status rules for PATCH (docs/CONTRACT.md section 1 and #13):
+| PATCH body                                          | new status  |
+| explicit status (any of the 5)                      | that status |
+| no status; bbox / mask / class_id actually changed  | edited      |
+| no status; nothing changed (e.g. only reviewer)     | unchanged   |
+A "rejected" row is kept. Only DELETE (#19) removes a row.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 import sqlite3
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import get_conn, require_image
@@ -42,7 +42,7 @@ class AnnotationIn(BaseModel):
 
 
 class AnnotationPatch(BaseModel):
-    status: Literal["accepted", "rejected"] | None = None
+    status: Literal["auto_accepted", "needs_review", "accepted", "rejected", "edited"] | None = None
     bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
     mask: dict | None = None
     class_id: int | None = None
@@ -116,12 +116,10 @@ def patch_annotation(aid: int, body: AnnotationPatch,
     if "reviewer" in sent:
         updates["reviewer"] = body.reviewer
 
-    if body.status == "rejected":
-        updates["status"] = "rejected"
+    if body.status is not None:
+        updates["status"] = body.status  # explicit status wins; undo relies on this
     elif changed:
         updates["status"] = "edited"
-    elif body.status == "accepted":
-        updates["status"] = "accepted"
 
     if updates:
         updates["updated_at"] = db.now()
@@ -129,3 +127,12 @@ def patch_annotation(aid: int, body: AnnotationPatch,
         with conn:
             conn.execute(f"UPDATE annotations SET {cols} WHERE id=?", [*updates.values(), aid])
     return db.annotation_dict(db.get_annotation(conn, aid))
+
+
+@router.delete("/annotations/{aid}", status_code=204)
+def delete_annotation(aid: int, conn: sqlite3.Connection = Depends(get_conn)):
+    with conn:
+        cur = conn.execute("DELETE FROM annotations WHERE id=?", (aid,))
+    if cur.rowcount == 0:
+        raise not_found("annotation", aid)
+    return Response(status_code=204)

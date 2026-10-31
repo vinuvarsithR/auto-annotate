@@ -15,14 +15,15 @@ Sections 1 (SQLite) and 2 (REST, endpoints 1-13) of the contract. 14 and 15 skip
 | `app/api/{projects,images,classes,jobs,annotations}.py` | endpoints 1-3, 4-6, 7-8, 9-10, 11-13 |
 | `app/worker/worker.py` | one background thread; `run_once()` for tests |
 | `app/api/models.py` | endpoint 16 `GET /api/models` -> `{"models": app.state.list_detectors()}` (2026-10-31). Tests: `test_api_models.py` (2) + fixture key check; 172 total pass (VERIFIED, Windows) |
+| `app/api/projects.py`, `app/api/annotations.py` | 2026-10-31: #17 rename, #18 delete project (409 `conflict` if a job is queued/running; explicit child deletes in one `BEGIN IMMEDIATE` transaction, then removes `data/uploads/<pid>/`; if that removal fails after the rows are gone: warning in the log, still 204), #19 hard-delete box, #13 explicit status wins. 180 tests pass (VERIFIED, Windows) |
 | tests | `test_api_{projects,images,classes,jobs,annotations,fixture_keys,helpers}.py`, `test_db_schema.py`, `test_worker_status.py`: 45 new tests, 152 total pass (VERIFIED, Windows, Python 3.14.0) |
 
 Behaviour choices (approved in the plan):
 
 | Case | Behaviour |
 |---|---|
-| PATCH changes bbox/mask/class + `status: accepted` | `edited`. `status: rejected` always wins. Sending the same bbox again is not an edit |
-| PATCH `status` other than accepted/rejected | 400 |
+| PATCH with an explicit `status` (any of the 5) | that status, even if bbox/mask/class changed too (contract #13, 2026-10-31). Without `status`, a real change gives `edited`; sending the same bbox again is not an edit |
+| PATCH unknown `status` | 400 `bad_request` |
 | Model box below class `min_score` | dropped by the worker too (safety net) |
 | Detector returns unknown class / image_id | job `failed`, that image's rows untouched |
 | Jobs still `running` at startup | marked `failed` ("server restarted while the job was running") |

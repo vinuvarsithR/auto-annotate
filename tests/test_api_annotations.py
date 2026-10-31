@@ -75,15 +75,38 @@ def test_patch_edit_box_or_class_gives_edited(tmp_path):
         assert a["updated_at"] >= a["created_at"]
 
 
-def test_patch_edit_plus_accept_is_edited_but_reject_wins(tmp_path):
+def test_patch_explicit_status_wins_over_edit(tmp_path):
     with make_client(tmp_path)[0] as c:
         _, _, by = _setup(c)
         a = c.patch(f"/api/annotations/{by['rb']['id']}",
                     json={"bbox": [1, 2, 3, 4], "status": "accepted"}).json()
-        assert a["status"] == "edited"
+        assert a["status"] == "accepted" and a["bbox"] == [1.0, 2.0, 3.0, 4.0]
         b = c.patch(f"/api/annotations/{by['person']['id']}",
                     json={"bbox": [1, 2, 3, 4], "status": "rejected"}).json()
         assert b["status"] == "rejected"
+
+
+def test_patch_undo_accept_back_to_needs_review(tmp_path):
+    with make_client(tmp_path)[0] as c:
+        _, _, by = _setup(c)
+        aid = by["rb"]["id"]
+        assert c.patch(f"/api/annotations/{aid}", json={"status": "accepted"}).json()["status"] == "accepted"
+        a = c.patch(f"/api/annotations/{aid}", json={"status": "needs_review", "reviewer": "dhyan"}).json()
+        assert a["status"] == "needs_review"
+
+
+def test_patch_undo_move_restores_bbox_and_status(tmp_path):
+    with make_client(tmp_path)[0] as c:
+        s, _, by = _setup(c)
+        old = by["person"]  # auto_accepted model box
+        moved = c.patch(f"/api/annotations/{old['id']}",
+                        json={"bbox": [810, 298, 250, 70], "class_id": s["class_ids"]["biax"]}).json()
+        assert moved["status"] == "edited"
+        back = c.patch(f"/api/annotations/{old['id']}",
+                       json={"status": old["status"], "bbox": old["bbox"],
+                             "class_id": old["class_id"], "reviewer": "dhyan"}).json()
+        assert back["status"] == "auto_accepted"
+        assert (back["bbox"], back["class_id"]) == (old["bbox"], old["class_id"])
 
 
 def test_patch_same_bbox_is_not_an_edit(tmp_path):
@@ -107,6 +130,23 @@ def test_patch_mask_and_reviewer_only(tmp_path):
 def test_patch_bad_status_and_missing(tmp_path):
     with make_client(tmp_path)[0] as c:
         _, _, by = _setup(c)
-        r = c.patch(f"/api/annotations/{by['rb']['id']}", json={"status": "auto_accepted"})
-        assert r.status_code == 400
+        r = c.patch(f"/api/annotations/{by['rb']['id']}", json={"status": "approved"})
+        assert (r.status_code, r.json()["error"]["code"]) == (400, "bad_request")
+        for st in ("auto_accepted", "needs_review", "accepted", "rejected", "edited"):
+            r = c.patch(f"/api/annotations/{by['rb']['id']}", json={"status": st})
+            assert (r.status_code, r.json()["status"]) == (200, st)
         assert c.patch("/api/annotations/9999", json={"status": "accepted"}).status_code == 404
+
+
+def test_delete_annotation_any_source(tmp_path):
+    with make_client(tmp_path)[0] as c:
+        s, iid, by = _setup(c)
+        human = c.post(f"/api/images/{iid}/annotations",
+                       json={"class_id": s["class_ids"]["biax"], "bbox": [1, 2, 3, 4]}).json()
+        rejected = c.patch(f"/api/annotations/{by['person']['id']}", json={"status": "rejected"}).json()
+        for aid in (human["id"], by["rb"]["id"], rejected["id"]):
+            r = c.delete(f"/api/annotations/{aid}")
+            assert r.status_code == 204 and r.content == b""
+        assert c.get(f"/api/images/{iid}/annotations").json()["annotations"] == []
+        r = c.delete(f"/api/annotations/{human['id']}")
+        assert (r.status_code, r.json()["error"]["code"]) == (404, "not_found")
