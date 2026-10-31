@@ -112,14 +112,21 @@ async function refreshProgress() {
   const n = p.counts.images;
   const left = nr ? nr.total : 0;
   const c = p.counts;
-  $("progress").innerHTML =
-    `Reviewed <b>${n - left} / ${n}</b> images &nbsp;|&nbsp; boxes: ` +
-    `<span class="st-needs_review">${c.needs_review} needs_review</span>, ` +
-    `<span class="st-auto_accepted">${c.auto_accepted} auto</span>, ` +
-    `<span class="st-accepted">${c.accepted} accepted</span>, ` +
-    `<span class="st-edited">${c.edited} edited</span>, ` +
-    `<span class="st-rejected">${c.rejected} rejected</span>`;
+  const pct = n ? Math.round(((n - left) / n) * 1000) / 10 : 0;
+  const text = `${n - left} / ${n} images reviewed\n` +
+    `Boxes: ${c.needs_review} needs review, ${c.auto_accepted} auto accepted, ` +
+    `${c.accepted} accepted, ${c.edited} edited, ${c.rejected} rejected`;
+  const bar = $("progress");
+  $("progressFill").style.width = pct + "%";
+  bar.title = text;
+  bar.setAttribute("aria-valuenow", String(pct));
+  bar.setAttribute("aria-valuetext", text.replace("\n", ". "));
 }
+
+const STATUS_LABEL = {
+  needs_review: "Needs review", auto_accepted: "Auto accepted", accepted: "Accepted",
+  edited: "Edited", rejected: "Rejected",
+};
 
 function renderLegend() {
   const el = $("legend");
@@ -142,7 +149,8 @@ async function loadImages(offset, selectIndex = 0) {
   state.images = data.images;
   state.total = data.total;
   state.offset = data.offset;
-  renderImageList();
+  state.imageIndex = -1;
+  buildImageList();
   if (state.images.length) {
     const i = selectIndex < 0 ? state.images.length - 1 : Math.min(selectIndex, state.images.length - 1);
     await openImage(i);
@@ -150,34 +158,50 @@ async function loadImages(offset, selectIndex = 0) {
     state.imageIndex = -1;
     state.image = null;
     state.anns = [];
-    $("imageTitle").textContent = status ? `No images with ${status} boxes.` : "No images.";
+    $("imageTitle").textContent = status ? `No images with ${STATUS_LABEL[status].toLowerCase()} boxes.` : "No images.";
     canvas.setAnnotations([]);
     canvas.setImage(null);
     select(null);
   }
 }
 
-function renderImageList() {
+// The filmstrip is built once per page (so thumbnails are not re-fetched), then updated in place.
+function buildImageList() {
   const ul = $("imageList");
   ul.innerHTML = "";
   state.images.forEach((img, i) => {
     const li = document.createElement("li");
-    if (i === state.imageIndex) li.className = "current";
-    const name = document.createElement("span");
-    name.className = "name";
+    li.innerHTML =
+      `<button type="button" class="thumb"><span class="frame"><img alt="" loading="lazy" decoding="async">` +
+      `<span class="ph"></span><span class="dot"></span></span><span class="name"></span></button>`;
+    const frame = li.querySelector(".frame");
+    const im = li.querySelector("img");
+    im.addEventListener("error", () => frame.classList.add("missing"));
+    li.querySelector(".ph").textContent = `${img.width}×${img.height}`;
+    im.src = api.imageUrl(img);
+    const name = li.querySelector(".name");
     name.textContent = img.file_name;
-    name.title = img.file_name;
-    li.appendChild(name);
-    const nr = img.counts ? img.counts.needs_review : 0;
-    const badge = document.createElement("span");
-    if (nr > 0) { badge.className = "count"; badge.textContent = nr; badge.title = "needs_review boxes"; }
-    else { badge.className = "done"; badge.textContent = "✓"; badge.title = "nothing left to review"; }
-    li.appendChild(badge);
-    li.addEventListener("click", () => openImage(i));
+    li.querySelector(".thumb").title = img.file_name;
+    li.querySelector(".thumb").addEventListener("click", () => openImage(i));
     ul.appendChild(li);
   });
+  renderImageList();
+}
+
+function renderImageList() {
+  const ul = $("imageList");
+  state.images.forEach((img, i) => {
+    const li = ul.children[i];
+    if (!li) return;
+    li.classList.toggle("current", i === state.imageIndex);
+    const nr = img.counts ? img.counts.needs_review : 0;
+    const dot = li.querySelector(".dot");
+    dot.classList.toggle("todo", nr > 0);
+    dot.textContent = nr > 0 ? String(nr) : "";
+    dot.title = nr > 0 ? `${nr} box(es) need review` : "Nothing left to review";
+  });
   const end = state.offset + state.images.length;
-  $("pageInfo").textContent = state.total ? `${state.offset + 1}-${end} of ${state.total}` : "0";
+  $("pageInfo").textContent = state.total ? `${state.offset + 1}–${end} of ${state.total}` : "0";
   $("pagePrev").disabled = state.offset === 0;
   $("pageNext").disabled = end >= state.total;
 }
@@ -190,13 +214,17 @@ async function openImage(i) {
   renderImageList();
   const cur = $("imageList").children[i];
   if (cur) cur.scrollIntoView({ block: "nearest" });
-  $("imageTitle").textContent = `${img.file_name}  (${img.width}x${img.height}, id ${img.id})`;
+  $("imageTitle").textContent = `${img.file_name} · ${img.width}×${img.height} · id ${img.id}`;
   setDrawMode(false);
   canvas.setAnnotations([]);
+  // Keep the box panel where it is while the next image loads, so it does not close and reopen.
+  state.loadingImage = true;
   select(null);
   canvas.setImage(api.imageUrl(img), img.width, img.height);
   const data = await guard(() => api.getAnnotations(img.id));
-  if (!data || token !== state.loadToken) return;
+  if (token !== state.loadToken) return;
+  state.loadingImage = false;
+  if (!data) { renderPanel(); return; }
   state.image = data.image;
   state.anns = data.annotations;
   canvas.setAnnotations(state.anns);
@@ -224,9 +252,10 @@ function afterChange() {
 }
 
 // ------------------------------------------------------------ boxes
-function select(id, redraw = true) {
+// glide: animate the selection from the old box to the new one (used after accept / reject and Tab).
+function select(id, redraw = true, glide = false) {
   state.selectedId = id;
-  if (redraw) canvas.setSelected(id); else canvas.selectedId = id;
+  if (redraw) canvas.setSelected(id, glide); else canvas.selectedId = id;
   renderPanel();
 }
 
@@ -234,11 +263,19 @@ function selectedAnn() { return state.anns.find((a) => a.id === state.selectedId
 
 function renderPanel() {
   const a = selectedAnn();
-  $("boxPanel").hidden = !a;
+  const right = $("right");
   $("boxEmpty").hidden = !!a;
-  if (!a) return;
-  $("bId").textContent = a.id;
-  $("bStatus").innerHTML = `<span class="st-${a.status}">${a.status}</span>`;
+  if (!a && state.loadingImage && right.classList.contains("open")) {
+    right.classList.add("stale");   // next image is loading; leave the panel open, dimmed
+    return;
+  }
+  right.classList.remove("stale");
+  right.classList.toggle("open", !!a);
+  if (!a) return;   // the old content stays inside while the panel slides shut
+  $("boxPanel").hidden = false;
+  $("bId").textContent = `#${a.id}`;
+  $("bStatus").className = `status-line st-${a.status}`;
+  $("bStatus").textContent = STATUS_LABEL[a.status] || a.status;
   $("bScore").textContent = a.score == null ? "-" : a.score.toFixed(3);
   $("bSource").textContent = a.source;
   $("bBbox").textContent = a.bbox.map((v) => Math.round(v)).join(", ");
@@ -251,7 +288,7 @@ function cycleBox(delta) {
   if (!list.length) return;
   const i = list.findIndex((a) => a.id === state.selectedId);
   const next = i < 0 ? (delta > 0 ? 0 : list.length - 1) : (i + delta + list.length) % list.length;
-  select(list[next].id);
+  select(list[next].id, true, true);
 }
 
 async function patch(ann, body) {
@@ -266,12 +303,15 @@ async function patch(ann, body) {
 async function setStatus(status) {
   const a = selectedAnn();
   if (!a) { showBanner("Select a box first (click it or press Tab).", "info"); return; }
+  const before = { ...a };
   const updated = await patch(a, { status });
   if (!updated) return;
+  if (status === "accepted") canvas.flashAccept(updated.id);
+  else if (status === "rejected") canvas.fadeReject(before);
   // Jump to the next box that still needs review on this image, if any.
   const next = state.anns.find((x) => x.status === "needs_review");
-  if (next) select(next.id);
-  else showBanner("No more needs_review boxes on this image. → for next image.", "info");
+  if (next) select(next.id, true, true);
+  else showBanner("No more boxes to review on this image. Press → for the next one.", "info");
 }
 
 async function changeClass(classId) {
@@ -298,7 +338,7 @@ function setDrawMode(on) {
   const cls = classById(Number($("newClass").value));
   canvas.setDrawMode(on, cls ? classColor(cls.name) : "#fff");
   $("drawBtn").classList.toggle("active", on);
-  $("drawBtn").textContent = on ? "Drawing... (Esc to cancel)" : "Draw box (N)";
+  $("drawBtn").innerHTML = on ? "Drawing… <kbd>Esc</kbd>" : "Draw box <kbd>N</kbd>";
 }
 
 // ------------------------------------------------------------ events
@@ -316,6 +356,7 @@ $("showRejected").addEventListener("change", (e) => {
   const a = selectedAnn();
   if (a && a.status === "rejected" && !e.target.checked) select(null); else canvas.render();
 });
+$("boxClose").addEventListener("click", () => select(null));
 $("helpBtn").addEventListener("click", () => $("helpDialog").showModal());
 $("banner").addEventListener("click", () => ($("banner").hidden = true));
 $("reviewerInput").addEventListener("change", (e) => {

@@ -4,149 +4,172 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Auto-annotate review</title>
+<link rel="preload" href="fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/ibm-plex-sans-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header id="topbar">
-  <strong class="brand">Auto-annotate</strong>
-  <span id="mockBadge" class="badge" hidden>MOCK</span>
-  <span class="tabs">
+  <span class="brand">Auto-annotate</span>
+  <span id="mockBadge" class="badge" hidden>Mock data</span>
+  <span class="tabs" role="group" aria-label="Screen">
     <button id="tabSetup" type="button">Setup</button>
     <button id="tabReview" type="button" class="active">Review</button>
   </span>
-  <label>Project <select id="projectSelect"></select></label>
-  <label>Reviewer <input id="reviewerInput" type="text" placeholder="your name" size="10"></label>
-  <span id="progress" class="progress"></span>
+  <label class="field">Project <select id="projectSelect"></select></label>
+  <label class="field">Reviewer <input id="reviewerInput" type="text" placeholder="Your name" size="10"></label>
   <span class="spacer"></span>
-  <button id="helpBtn" type="button" title="Keyboard shortcuts">?</button>
+  <button id="helpBtn" type="button" class="icon" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
 </header>
+<div id="progress" class="progress" tabindex="0" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Review progress">
+  <div id="progressFill"></div>
+</div>
 
-<div id="banner" class="banner" hidden></div>
+<div id="banner" class="banner" role="status" hidden></div>
 
+<!-- ============================================================ setup -->
 <main id="setup" hidden>
-  <section class="card">
-    <h3>1. Project</h3>
-    <form id="createForm" class="row">
-      <input id="newProjectName" type="text" placeholder="new project name, e.g. eot_crane" size="30">
-      <button type="submit">Create project</button>
-    </form>
-    <div class="muted">Pick an existing project in the top bar. Everything below applies to
-      <b id="setupProjectName">-</b> (<span id="setupImageCount">0</span> images).</div>
-  </section>
+  <div class="setup-inner">
+    <ol id="stepper" class="stepper">
+      <li><button type="button" data-step="1"><span class="num">1</span><span class="txt"><span class="lbl">Create</span><span class="sub" id="sum1">No project</span></span></button></li>
+      <li><button type="button" data-step="2"><span class="num">2</span><span class="txt"><span class="lbl">Upload</span><span class="sub" id="sum2">-</span></span></button></li>
+      <li><button type="button" data-step="3"><span class="num">3</span><span class="txt"><span class="lbl">Classes</span><span class="sub" id="sum3">-</span></span></button></li>
+      <li><button type="button" data-step="4"><span class="num">4</span><span class="txt"><span class="lbl">Run</span><span class="sub" id="sum4">Not run yet</span></span></button></li>
+    </ol>
 
-  <section class="card">
-    <h3>2. Upload images</h3>
-    <div class="row">
-      <input id="fileInput" type="file" accept="image/jpeg,image/png" multiple>
-      <button id="uploadBtn" type="button" disabled>Upload</button>
-    </div>
-    <div id="uploadBox" hidden>
-      <div class="bar"><div id="uploadBar"></div></div>
-      <div id="uploadText" class="muted"></div>
-    </div>
-    <ul id="skippedList" class="skipped"></ul>
-  </section>
+    <section class="step" data-step="1">
+      <h2>Create a project</h2>
+      <form id="createForm" class="row">
+        <input id="newProjectName" type="text" placeholder="New project name, e.g. eot_crane" size="34" aria-label="New project name">
+        <button type="submit" class="primary">Create project</button>
+      </form>
+      <p class="muted">Or pick an existing project in the top bar. The next steps apply to
+        <b id="setupProjectName">-</b> (<span id="setupImageCount" class="num-tab">0</span> images).</p>
+    </section>
 
-  <section class="card">
-    <h3>3. Classes</h3>
-    <p class="muted">The description is the text prompt the model searches for. Scores are 0-1;
-      empty means: min_score = model default, accept_score = never auto-accept.</p>
-    <table id="classTable" class="grid">
-      <thead><tr><th>name</th><th>description (prompt)</th><th>min_score</th><th>accept_score</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="row buttons">
-      <button id="addClassBtn" type="button">+ Add class</button>
-      <button id="saveClassesBtn" type="button" class="ok">Save classes</button>
-      <span id="classDirty" class="st-needs_review" hidden>unsaved changes</span>
-    </div>
-  </section>
+    <section class="step" data-step="2" hidden>
+      <h2>Upload images</h2>
+      <div id="dropZone" class="drop">
+        <div class="drop-msg">
+          <span>Drop JPG or PNG files here, or</span>
+          <label class="btn" for="fileInput">Choose files</label>
+          <input id="fileInput" class="visually-hidden" type="file" accept="image/jpeg,image/png" multiple>
+        </div>
+        <ul id="uploadThumbs" class="upload-thumbs"></ul>
+      </div>
+      <div id="uploadBox" hidden>
+        <div class="bar"><div id="uploadBar"></div></div>
+        <div id="uploadText" class="muted num-tab"></div>
+      </div>
+      <ul id="skippedList" class="skipped"></ul>
+    </section>
 
-  <section class="card">
-    <h3>4. Run detection</h3>
-    <div class="row">
-      <label>Model <select id="modelSelect"></select></label>
-      <button id="runBtn" type="button" class="ok">Run on all images</button>
+    <section class="step" data-step="3" hidden>
+      <h2>Classes</h2>
+      <p class="muted">The description is the text prompt the model searches for. Scores are 0-1.
+        Empty means: min score = model default, accept score = never auto-accept.</p>
+      <table id="classTable" class="grid">
+        <thead><tr><th>Name</th><th>Description (prompt)</th><th>Min score</th><th>Accept score</th><th><span class="visually-hidden">Remove</span></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row buttons">
+        <button id="addClassBtn" type="button">Add class</button>
+        <button id="saveClassesBtn" type="button" class="primary">Save classes</button>
+        <span id="classDirty" class="dirty" hidden>Unsaved changes</span>
+      </div>
+    </section>
+
+    <section class="step" data-step="4" hidden>
+      <h2>Run detection</h2>
+      <div class="row">
+        <label class="field">Model <select id="modelSelect"></select></label>
+        <button id="runBtn" type="button" class="primary">Run on all images</button>
+      </div>
+      <div id="modelNote" class="muted" hidden></div>
+      <div id="jobBox" hidden>
+        <div class="bar"><div id="jobBar"></div></div>
+        <div id="jobText" class="muted num-tab"></div>
+      </div>
+    </section>
+
+    <div class="step-nav">
+      <button id="stepBack" type="button">Back</button>
+      <button id="stepNext" type="button" class="primary">Next</button>
     </div>
-    <div id="modelNote" class="muted" hidden></div>
-    <div id="jobBox" hidden>
-      <div class="bar"><div id="jobBar"></div></div>
-      <div id="jobText" class="muted"></div>
-    </div>
-  </section>
+  </div>
 </main>
 
+<!-- ============================================================ review -->
 <main id="layout">
   <aside id="left">
-    <div class="row">
-      <label>Show
-        <select id="statusFilter">
-          <option value="">all images</option>
-          <option value="needs_review" selected>needs_review</option>
-          <option value="auto_accepted">auto_accepted</option>
-          <option value="accepted">accepted</option>
-          <option value="edited">edited</option>
-          <option value="rejected">rejected</option>
-        </select>
-      </label>
-    </div>
-    <ul id="imageList"></ul>
-    <div class="row pager">
-      <button id="pagePrev" type="button">&lt;</button>
-      <span id="pageInfo"></span>
-      <button id="pageNext" type="button">&gt;</button>
+    <label class="field filter">Show
+      <select id="statusFilter">
+        <option value="">All images</option>
+        <option value="needs_review" selected>Needs review</option>
+        <option value="auto_accepted">Auto accepted</option>
+        <option value="accepted">Accepted</option>
+        <option value="edited">Edited</option>
+        <option value="rejected">Rejected</option>
+      </select>
+    </label>
+    <ul id="imageList" class="filmstrip"></ul>
+    <div class="pager">
+      <button id="pagePrev" type="button" class="icon" aria-label="Previous page">&lsaquo;</button>
+      <span id="pageInfo" class="num-tab"></span>
+      <button id="pageNext" type="button" class="icon" aria-label="Next page">&rsaquo;</button>
     </div>
   </aside>
 
   <section id="center">
-    <div id="imageTitle" class="image-title"></div>
     <div id="canvasWrap"><canvas id="canvas"></canvas></div>
+    <div id="toolbar">
+      <div id="imageTitle" class="image-title num-tab"></div>
+      <span id="boxEmpty" class="muted hint">Click a box or press Tab</span>
+      <span class="spacer"></span>
+      <label class="field">New box <select id="newClass"></select></label>
+      <button id="drawBtn" type="button">Draw box <kbd>N</kbd></button>
+      <label class="check"><input id="showRejected" type="checkbox" checked> Show rejected</label>
+      <div id="legend" class="legend"></div>
+    </div>
   </section>
 
-  <aside id="right">
-    <h3>Box</h3>
-    <div id="boxEmpty" class="muted">Click a box or press Tab.</div>
-    <div id="boxPanel" hidden>
-      <table class="kv">
-        <tr><th>id</th><td id="bId"></td></tr>
-        <tr><th>status</th><td id="bStatus"></td></tr>
-        <tr><th>score</th><td id="bScore"></td></tr>
-        <tr><th>source</th><td id="bSource"></td></tr>
-        <tr><th>bbox</th><td id="bBbox"></td></tr>
-        <tr><th>reviewer</th><td id="bReviewer"></td></tr>
-      </table>
-      <label class="block">Class <select id="bClass"></select></label>
-      <div class="row buttons">
-        <button id="acceptBtn" type="button" class="ok">Accept (A)</button>
-        <button id="rejectBtn" type="button" class="bad">Reject (R)</button>
+  <aside id="right" aria-label="Selected box">
+    <div id="boxPanel" class="panel-inner" hidden>
+      <div class="panel-head">
+        <h2>Box <span id="bId" class="num-tab muted"></span></h2>
+        <button id="boxClose" type="button" class="icon" aria-label="Deselect box (Esc)" title="Deselect (Esc)">&times;</button>
+      </div>
+      <div id="bStatus" class="status-line"></div>
+      <label class="field block">Class <select id="bClass"></select></label>
+      <dl class="kv num-tab">
+        <dt>Score</dt><dd id="bScore"></dd>
+        <dt>Source</dt><dd id="bSource"></dd>
+        <dt>Bbox</dt><dd id="bBbox"></dd>
+        <dt>Reviewer</dt><dd id="bReviewer"></dd>
+      </dl>
+      <div class="actions">
+        <button id="acceptBtn" type="button" class="accept">Accept <kbd>A</kbd></button>
+        <button id="rejectBtn" type="button" class="reject">Reject <kbd>R</kbd></button>
       </div>
     </div>
-
-    <h3>New box</h3>
-    <label class="block">Class for new boxes <select id="newClass"></select></label>
-    <button id="drawBtn" type="button">Draw box (N)</button>
-
-    <h3>View</h3>
-    <label><input id="showRejected" type="checkbox" checked> show rejected boxes</label>
-    <div id="legend" class="legend"></div>
   </aside>
 </main>
 
 <dialog id="helpDialog">
-  <h3>Keyboard</h3>
-  <table class="kv">
-    <tr><th>A</th><td>accept selected box</td></tr>
-    <tr><th>R</th><td>reject selected box</td></tr>
-    <tr><th>Tab / Shift+Tab</th><td>next / previous box</td></tr>
-    <tr><th>&rarr; or D</th><td>next image</td></tr>
-    <tr><th>&larr; or S</th><td>previous image</td></tr>
-    <tr><th>1 - 9</th><td>change class of selected box (or new-box class if none selected)</td></tr>
-    <tr><th>N</th><td>draw a new box (drag on the image)</td></tr>
-    <tr><th>Esc</th><td>cancel drawing / deselect</td></tr>
-  </table>
+  <h2>Keyboard</h2>
+  <dl class="keys">
+    <dt><kbd>A</kbd></dt><dd>Accept selected box</dd>
+    <dt><kbd>R</kbd></dt><dd>Reject selected box</dd>
+    <dt><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Next / previous box</dd>
+    <dt><kbd>&rarr;</kbd> or <kbd>D</kbd></dt><dd>Next image</dd>
+    <dt><kbd>&larr;</kbd> or <kbd>S</kbd></dt><dd>Previous image</dd>
+    <dt><kbd>1</kbd> - <kbd>9</kbd></dt><dd>Change class of selected box (or new-box class if none selected)</dd>
+    <dt><kbd>N</kbd></dt><dd>Draw a new box (drag on the image)</dd>
+    <dt><kbd>Esc</kbd></dt><dd>Cancel drawing / deselect</dd>
+  </dl>
   <p class="muted">Drag a selected box to move it, drag its handles to resize.
-  Line style: dashed = needs_review, solid = auto_accepted / accepted / edited, faded = rejected.</p>
-  <form method="dialog"><button>Close</button></form>
+  Line style: dashed = needs review, solid = auto accepted / accepted / edited, faded = rejected.</p>
+  <form method="dialog"><button class="primary">Close</button></form>
 </dialog>
 
 <script src="api.js"></script>

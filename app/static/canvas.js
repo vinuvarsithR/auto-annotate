@@ -3,16 +3,28 @@
 // only drawing and mouse events convert to screen pixels.
 "use strict";
 
-const CLASS_COLORS = { person: "#00e5ff", rb: "#ff8c1a", sb: "#ffe600", biax: "#ff3df2" };
+const CLASS_COLORS = { person: "#7FC8D6", rb: "#E3C9A0", sb: "#E6D27A", biax: "#C9A2D9" };
+// Other class names get a stable pick from this muted palette (same name -> same colour).
+const FALLBACK_COLORS = ["#A3C99A", "#D9A38F", "#9FB4E0", "#D9A5C0", "#B9C97F", "#8FD1C0", "#E0B98A", "#B3A8E0"];
 const HANDLE = 6;      // handle half-size in screen px
 const MIN_SIZE = 4;    // smallest box in image px
+const CANVAS_COLORS = { base: "#1A2026", panel: "#222A31", line: "#2E3840", text: "#DCE3E8", muted: "#8996A0",
+            accept: "143,184,168" };
+const LABEL_FONT = '500 12px "IBM Plex Sans", system-ui, sans-serif';
 
 function classColor(name) {
   if (CLASS_COLORS[name]) return CLASS_COLORS[name];
   let h = 0;
-  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return `hsl(${h}, 85%, 60%)`;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return FALLBACK_COLORS[h % FALLBACK_COLORS.length];
 }
+
+// ---- motion helpers: every effect is started by a user action, lasts < 250ms, and is
+// skipped entirely when the OS asks for reduced motion.
+const reducedMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : { matches: false };
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const lerp = (a, b, t) => a + (b - a) * t;
+const fxNow = () => performance.now();
 
 class BoxCanvas {
   constructor(canvas, callbacks) {
@@ -29,39 +41,79 @@ class BoxCanvas {
     this.showRejected = true;
     this.drag = null;
     this.scale = 1; this.ox = 0; this.oy = 0;
+    this.fx = [];             // running effects: {kind, start, dur, delay?, ...}
+    this.prevImg = null;      // what is faded out during a crossfade: {img} or {w, h} (placeholder)
+    this.shown = false;       // has anything been drawn yet (no crossfade from an empty canvas)
+    this.raf = 0;
 
     new ResizeObserver(() => this.render()).observe(canvas.parentElement);
+    if (document.fonts) document.fonts.ready.then(() => this.render());
     canvas.addEventListener("mousedown", (e) => this.onDown(e));
     window.addEventListener("mousemove", (e) => this.onMove(e));
     window.addEventListener("mouseup", (e) => this.onUp(e));
   }
 
   // Load an image; on any error draw a grey placeholder of the given size.
+  // The old image stays on screen until the new one has loaded (or failed), then the two
+  // crossfade over 200ms, so there is no grey flash between frames.
   setImage(url, width, height) {
-    this.imgW = width || 1280;
-    this.imgH = height || 720;
-    this.img = null;
     this.drag = null;
-    this.render();
-    if (!url) return Promise.resolve(false);
+    const show = (im) => {
+      const old = this.shown ? (this.img ? { img: this.img } : { w: this.imgW, h: this.imgH }) : null;
+      this.fx = this.fx.filter((f) => f.kind !== "fade-img");
+      this.img = im;
+      this.imgW = im ? im.naturalWidth : (width || 1280);
+      this.imgH = im ? im.naturalHeight : (height || 720);
+      this.prevImg = old;
+      if (old) this.startFx({ kind: "fade-img", dur: 200 }); else this.render();
+    };
+    this._pending = null;
+    if (!url) { show(null); return Promise.resolve(false); }
     return new Promise((resolve) => {
       const im = new Image();
-      im.onload = () => {
-        if (this._pending !== im) return resolve(false);
-        this.img = im;
-        this.imgW = im.naturalWidth;
-        this.imgH = im.naturalHeight;
-        this.render();
-        resolve(true);
-      };
-      im.onerror = () => resolve(false);
+      im.onload = () => { if (this._pending !== im) return resolve(false); show(im); resolve(true); };
+      im.onerror = () => { if (this._pending !== im) return resolve(false); show(null); resolve(false); };
       this._pending = im;
       im.src = url;
     });
   }
 
   setAnnotations(anns) { this.anns = anns; this.render(); }
-  setSelected(id) { this.selectedId = id; this.render(); }
+  // glide: the selection frame slides from the old box to the new one.
+  setSelected(id, glide = false) {
+    const from = this.selected();
+    this.selectedId = id;
+    const to = this.selected();
+    this.fx = this.fx.filter((f) => f.kind !== "glide");
+    if (glide && from && to && from.id !== to.id) {
+      this.startFx({ kind: "glide", id: to.id, from: from.bbox.slice(), dur: 180, delay: 50 });
+    } else this.render();
+  }
+
+  // Accept: the box fills sage, then settles back to its outline.
+  flashAccept(id) { this.startFx({ kind: "accept", id, dur: 240 }); }
+
+  // Reject: the box (as it looked before) fades to the rejected look, or out if rejected are hidden.
+  fadeReject(ann) { this.startFx({ kind: "reject", id: ann.id, ann, dur: 200 }); }
+
+  startFx(f) {
+    if (reducedMotion.matches) { this.prevImg = null; this.render(); return; }
+    f.start = fxNow();
+    this.fx.push(f);
+    if (!this.raf) this.raf = requestAnimationFrame(() => this.tick());
+  }
+
+  tick() {
+    this.raf = 0;
+    this.render();
+    if (this.fx.length) this.raf = requestAnimationFrame(() => this.tick());
+  }
+
+  // Eased 0..1 progress of an effect, or null while its delay is still running.
+  fxT(f, t) {
+    const p = (t - f.start - (f.delay || 0)) / f.dur;
+    return p < 0 ? null : easeOut(Math.min(1, p));
+  }
   setDrawMode(on, color) {
     this.drawMode = on;
     if (color) this.drawColor = color;
@@ -205,28 +257,50 @@ class BoxCanvas {
   render() {
     const { w, h } = this.layout();
     const ctx = this.ctx;
+    const t = fxNow();
+    // Effects still running this frame; finished ones are dropped after this frame.
+    const fx = this.fx;
+    this.fx = fx.filter((f) => t - f.start - (f.delay || 0) < f.dur);
+    const fxOf = (kind, id) => fx.find((f) => f.kind === kind && (id === undefined || f.id === id));
+
     ctx.clearRect(0, 0, w, h);
-    const [ix, iy] = this.toScreen(0, 0);
-    const iw = this.imgW * this.scale, ih = this.imgH * this.scale;
-    if (this.img) {
-      ctx.drawImage(this.img, ix, iy, iw, ih);
-    } else {
-      ctx.fillStyle = "#6b6b6b";
-      ctx.fillRect(ix, iy, iw, ih);
-      ctx.fillStyle = "#9a9a9a";
-      ctx.font = "16px system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(`image not available (placeholder ${this.imgW}x${this.imgH})`, ix + iw / 2, iy + ih / 2);
-      ctx.textAlign = "left";
+    const fade = fxOf("fade-img");
+    const ft = fade ? (this.fxT(fade, t) || 0) : 1;
+    if (fade && this.prevImg) {
+      const p = this.prevImg;
+      ctx.globalAlpha = 1 - ft;
+      this.drawFrame(p.img || null, p.img ? p.img.naturalWidth : p.w, p.img ? p.img.naturalHeight : p.h, w, h);
     }
+    if (!fade) this.prevImg = null;
+    ctx.globalAlpha = ft;
+    this.drawFrame(this.img, this.imgW, this.imgH, w, h);
+    ctx.globalAlpha = 1;
+    this.shown = true;
 
     const anns = this.visible();
     const selId = this.selectedId;
+    const glide = fxOf("glide");
+    const gt = glide ? this.fxT(glide, t) : null;
     // Selected box is drawn last so it sits on top.
     const ordered = anns.filter((a) => a.id !== selId).concat(anns.filter((a) => a.id === selId));
     for (const a of ordered) {
+      if (fxOf("reject", a.id)) continue; // drawn below from its snapshot
       const bbox = this.drag && this.drag.ann && this.drag.ann.id === a.id ? this.drag.box : a.bbox;
-      this.drawBox(a, bbox, a.id === selId);
+      const gliding = glide && glide.id === a.id && (gt === null || gt < 1);
+      this.drawBox(a, bbox, a.id === selId && !gliding, ft, fxOf("accept", a.id), t);
+    }
+    for (const f of fx) {
+      if (f.kind !== "reject") continue;
+      const p = this.fxT(f, t) || 0;
+      const end = this.showRejected ? 0.35 : 0;
+      this.drawBox(f.ann, f.ann.bbox, false, ft * lerp(1, end, p), null, t);
+    }
+    if (glide) {
+      const to = anns.find((a) => a.id === glide.id);
+      if (to && (gt === null || gt < 1)) {
+        const b = gt === null ? glide.from : glide.from.map((v, i) => lerp(v, to.bbox[i], gt));
+        this.drawSelectionFrame(b, classColor(to.class_name));
+      }
     }
     if (this.drag && this.drag.kind === "draw") {
       const [x, y] = this.toScreen(this.drag.box[0], this.drag.box[1]);
@@ -238,17 +312,53 @@ class BoxCanvas {
     }
   }
 
-  drawBox(a, bbox, isSel) {
+  // Image (or placeholder) of size iw x ih, fitted and centred in the canvas.
+  drawFrame(img, iw, ih, cw, ch) {
+    const ctx = this.ctx;
+    const s = Math.min(cw / iw, ch / ih);
+    const x = (cw - iw * s) / 2, y = (ch - ih * s) / 2;
+    if (img) { ctx.drawImage(img, x, y, iw * s, ih * s); return; }
+    ctx.fillStyle = CANVAS_COLORS.panel;
+    ctx.fillRect(x, y, iw * s, ih * s);
+    ctx.fillStyle = CANVAS_COLORS.muted;
+    ctx.font = '400 14px "IBM Plex Sans", system-ui, sans-serif';
+    ctx.textAlign = "center";
+    ctx.fillText(`Image not available (placeholder ${iw}\u00d7${ih})`, x + iw * s / 2, y + ih * s / 2);
+    ctx.textAlign = "left";
+  }
+
+  // The moving frame shown while the selection glides between boxes.
+  drawSelectionFrame(b, color) {
+    const ctx = this.ctx;
+    const [x, y] = this.toScreen(b[0], b[1]);
+    const w = b[2] * this.scale, h = b[3] * this.scale;
+    ctx.save();
+    ctx.strokeStyle = "rgba(14,18,22,0.75)";
+    ctx.lineWidth = 5;
+    ctx.strokeRect(x, y, w, h);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+  }
+
+  drawBox(a, bbox, isSel, alpha = 1, accept = null, t = 0) {
     const ctx = this.ctx;
     const color = classColor(a.class_name);
     const [x, y] = this.toScreen(bbox[0], bbox[1]);
     const w = bbox[2] * this.scale, h = bbox[3] * this.scale;
     ctx.save();
-    if (a.status === "rejected") ctx.globalAlpha = 0.35;
+    ctx.globalAlpha = alpha * (a.status === "rejected" ? 0.35 : 1);
+    if (accept) { // sage fill: quick rise, then settles back to the plain outline
+      const p = Math.min(1, (t - accept.start) / accept.dur);
+      const k = p < 0.25 ? p / 0.25 : 1 - easeOut((p - 0.25) / 0.75);
+      ctx.fillStyle = `rgba(${CANVAS_COLORS.accept},${0.42 * Math.max(0, Math.min(1, k))})`;
+      ctx.fillRect(x, y, w, h);
+    }
     ctx.setLineDash(a.status === "needs_review" ? [6, 4] : []);
     ctx.lineWidth = isSel ? 3 : 2;
     if (isSel) { // dark outline so the selected box stands out on any background
-      ctx.strokeStyle = "rgba(0,0,0,0.8)";
+      ctx.strokeStyle = "rgba(14,18,22,0.75)";
       ctx.lineWidth = 5;
       ctx.strokeRect(x, y, w, h);
       ctx.lineWidth = 3;
@@ -258,18 +368,18 @@ class BoxCanvas {
     ctx.setLineDash([]);
 
     const label = a.class_name + (a.score != null ? " " + a.score.toFixed(2) : "") +
-                  (a.status === "rejected" ? " ✕" : "");
-    ctx.font = "12px system-ui, sans-serif";
-    const tw = ctx.measureText(label).width + 6;
-    const ly = y - 16 < 0 ? y : y - 16;
+                  (a.status === "rejected" ? " \u2715" : "");
+    ctx.font = LABEL_FONT;
+    const tw = ctx.measureText(label).width + 10;
+    const ly = y - 18 < 0 ? y : y - 18;
     ctx.fillStyle = color;
-    ctx.fillRect(x, ly, tw, 16);
-    ctx.fillStyle = "#000";
-    ctx.fillText(label, x + 3, ly + 12);
+    ctx.fillRect(x, ly, tw, 18);
+    ctx.fillStyle = CANVAS_COLORS.base;
+    ctx.fillText(label, x + 5, ly + 13);
 
     if (isSel && a.status !== "rejected") {
-      ctx.fillStyle = "#fff";
-      ctx.strokeStyle = "#000";
+      ctx.fillStyle = CANVAS_COLORS.text;
+      ctx.strokeStyle = CANVAS_COLORS.base;
       ctx.lineWidth = 1;
       const corners = [[0, 0], [1, 0], [0, 1], [1, 1]];
       const mids = [[0.5, 0], [0, 0.5], [1, 0.5], [0.5, 1]];

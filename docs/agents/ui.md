@@ -39,6 +39,34 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   image list refreshed, uploaded image + boxes visible in Review, A still works, ArrowRight
   ignored on Setup. Real mode with no backend: model list falls back with the note.
 - NOT verified against the real backend (uvicorn) yet.
+- 2026-10-31 Visual redesign "control room at dusk" (branch `ui`). Same features, endpoint calls,
+  shortcuts and ?mock=1; every old element id kept. Colours are CSS variables in style.css
+  (base/panel/line/text/muted, one per status); class colours in canvas.js (person, rb, sb, biax +
+  an 8-colour muted fallback picked by name hash). Font: IBM Plex Sans 400/500/600 latin woff2 in
+  app/static/fonts/ (from npm @fontsource/ibm-plex-sans@5.2.8, OFL.txt alongside).
+  VERIFIED: Plex figures are tabular by default ("1111" and "0000" same width).
+  Review: thumbnail filmstrip (lazy <img>, amber dot + count / sage dot when done, plain tile when
+  the image 404s, as with the fixtures), box panel slides in when a box is selected and pushes the
+  image (it stays open, dimmed, while the next image loads), progress = 2px line under the top bar
+  with the counts in its tooltip / aria-valuetext, toolbar under the image (title, new-box class,
+  draw, show rejected, legend). Setup: 4-step stepper (auto-opens the first unfinished step when
+  the project changes), drop zone; dropping or choosing files starts the upload right away (no
+  separate Upload button), tiles go dashed -> picture / "Skipped" as each batch of 10 lands.
+  Motion (canvas, rAF, user-triggered only, skipped under prefers-reduced-motion; CSS transitions
+  off too): accept = sage fill 240ms, reject = fade 200ms, selection glide 50+180ms after
+  accept/reject and on Tab, image crossfade 200ms (old image stays until the new one loads, so
+  no grey flash).
+- VERIFIED in Chrome (mock, Windows, static server on repo root), no console errors: A, R, Tab,
+  arrows/D, 1-9 (4 -> biax), drag move (-> edited), N + drag (human box), Esc, ?, Esc closes
+  help; effect timings measured (crossfade 202ms, glide 230ms, reject 201ms, accept 240ms);
+  reduced motion forced on -> no effects start. Setup: create project -> jumps to Upload;
+  25 JPG + 1 txt dropped (DragEvent with DataTransfer) -> 25 tiles + "notes.txt: not an
+  image"; re-drop -> 12 duplicates; Run blocked while classes unsaved; save; fake job 25/25;
+  25 auto_accepted + 25 needs_review; review shows the uploaded images. 1280px wide checked
+  with CSS zoom (window can't shrink below 1707 css px on this screen): toolbar fits with the
+  panel open and closed. uvicorn serves index + fonts (font/woff2). pytest 172 passed.
+- Not done: real drag from the OS file explorer (only a synthetic drop event was tested);
+  the real backend in the browser.
 
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
