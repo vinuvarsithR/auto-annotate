@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-annotate review</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <strong class="brand">Review</strong>
+  <span id="mockBadge" class="badge" hidden>MOCK</span>
+  <label>Project <select id="projectSelect"></select></label>
+  <label>Reviewer <input id="reviewerInput" type="text" placeholder="your name" size="10"></label>
+  <span id="progress" class="progress"></span>
+  <span class="spacer"></span>
+  <button id="helpBtn" type="button" title="Keyboard shortcuts">?</button>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main id="layout">
+  <aside id="left">
+    <div class="row">
+      <label>Show
+        <select id="statusFilter">
+          <option value="">all images</option>
+          <option value="needs_review" selected>needs_review</option>
+          <option value="auto_accepted">auto_accepted</option>
+          <option value="accepted">accepted</option>
+          <option value="edited">edited</option>
+          <option value="rejected">rejected</option>
+        </select>
+      </label>
+    </div>
+    <ul id="imageList"></ul>
+    <div class="row pager">
+      <button id="pagePrev" type="button">&lt;</button>
+      <span id="pageInfo"></span>
+      <button id="pageNext" type="button">&gt;</button>
+    </div>
+  </aside>
+
+  <section id="center">
+    <div id="imageTitle" class="image-title"></div>
+    <div id="canvasWrap"><canvas id="canvas"></canvas></div>
+  </section>
+
+  <aside id="right">
+    <h3>Box</h3>
+    <div id="boxEmpty" class="muted">Click a box or press Tab.</div>
+    <div id="boxPanel" hidden>
+      <table class="kv">
+        <tr><th>id</th><td id="bId"></td></tr>
+        <tr><th>status</th><td id="bStatus"></td></tr>
+        <tr><th>score</th><td id="bScore"></td></tr>
+        <tr><th>source</th><td id="bSource"></td></tr>
+        <tr><th>bbox</th><td id="bBbox"></td></tr>
+        <tr><th>reviewer</th><td id="bReviewer"></td></tr>
+      </table>
+      <label class="block">Class <select id="bClass"></select></label>
+      <div class="row buttons">
+        <button id="acceptBtn" type="button" class="ok">Accept (A)</button>
+        <button id="rejectBtn" type="button" class="bad">Reject (R)</button>
+      </div>
+    </div>
+
+    <h3>New box</h3>
+    <label class="block">Class for new boxes <select id="newClass"></select></label>
+    <button id="drawBtn" type="button">Draw box (N)</button>
+
+    <h3>View</h3>
+    <label><input id="showRejected" type="checkbox" checked> show rejected boxes</label>
+    <div id="legend" class="legend"></div>
+  </aside>
+</main>
+
+<dialog id="helpDialog">
+  <h3>Keyboard</h3>
+  <table class="kv">
+    <tr><th>A</th><td>accept selected box</td></tr>
+    <tr><th>R</th><td>reject selected box</td></tr>
+    <tr><th>Tab / Shift+Tab</th><td>next / previous box</td></tr>
+    <tr><th>&rarr; or D</th><td>next image</td></tr>
+    <tr><th>&larr; or S</th><td>previous image</td></tr>
+    <tr><th>1 - 9</th><td>change class of selected box (or new-box class if none selected)</td></tr>
+    <tr><th>N</th><td>draw a new box (drag on the image)</td></tr>
+    <tr><th>Esc</th><td>cancel drawing / deselect</td></tr>
+  </table>
+  <p class="muted">Drag a selected box to move it, drag its handles to resize.
+  Line style: dashed = needs_review, solid = auto_accepted / accepted / edited, faded = rejected.</p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<script src="api.js"></script>
+<script src="canvas.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
