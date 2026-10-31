@@ -18,10 +18,35 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   Boxes under 24 screen px on their short side get only 4 corner handles (draw + hit test), so the
   middle stays draggable (small box moved 402->484, size unchanged).
 - Committed on branch `ui-review` (app/static/ + this file only).
+- 2026-10-31 Setup screen (branch `ui`): "Setup / Review" toggle in the top bar (remembered in
+  localStorage). New app/static/setup.js: create project (#1, picker switches to it), upload
+  (#4, batches of 10 files via XHR with a byte progress bar, skipped files listed), class table
+  (#7/#8: name, description, min_score, accept_score; add/remove rows, "unsaved changes" flag,
+  checks names/descriptions/0-1 scores before PUT), Run detection (#16 model dropdown, #9 start,
+  #10 polled every 1.5 s with a progress bar, then the review image list + counts refresh).
+  Run is blocked while the class table has unsaved changes. Review screen unchanged, apart from
+  a `project-opened` event in app.js, loadProjects(preferId), and review shortcuts being off
+  while Setup shows. Mock layer: all new calls (409 name_taken, duplicate/not-an-image skips,
+  409 class_in_use, 400 no_classes/unknown_model, a fake job that moves 1 image per poll and
+  adds the contract's fake-detector boxes with the accept_score rule). Mock uploads use blob:
+  URLs, so uploaded images really show on the review canvas.
+- #16 shape follows the contract on main (`{"models": [...]}`). This branch's CONTRACT.md does
+  not have #16 yet. On 404 the dropdown falls back to `["fake"]` and shows a note.
+- VERIFIED in Chrome (mock mode, Windows, static server on repo root), no console errors:
+  create project, duplicate name -> banner, 25 PNGs + 1 txt in 3 batches (25 uploaded, txt
+  skipped), re-upload -> "duplicate", class save, class_in_use and bad-score messages, job
+  polled at ~1.46 s per step to done, 25 auto_accepted + 25 needs_review (accept_score 0.5),
+  image list refreshed, uploaded image + boxes visible in Review, A still works, ArrowRight
+  ignored on Setup. Real mode with no backend: model list falls back with the note.
+- NOT verified against the real backend (uvicorn) yet.
 
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
+None (plain JS, no libraries).
 
 ## Contract change requests
 
 ## Open questions
+- Should Setup show a job that was started before a page reload? Right now the poll stops on
+  reload (no "list jobs" endpoint to find it again).
+- Run detection always sends `image_ids: null` (all images). Is a "only new images" option wanted?

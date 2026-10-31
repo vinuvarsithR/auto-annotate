@@ -60,7 +60,8 @@ function fillClassSelect(sel) {
 }
 
 // ------------------------------------------------------------ projects
-async function loadProjects() {
+// preferId: open this project (used by the setup screen after "Create project").
+async function loadProjects(preferId = null) {
   const data = await guard(() => api.listProjects());
   if (!data) return;
   const sel = $("projectSelect");
@@ -71,9 +72,15 @@ async function loadProjects() {
     o.textContent = p.name;
     sel.appendChild(o);
   }
-  if (!data.projects.length) { showBanner("No projects yet.", "info"); return; }
-  let saved = null;
-  try { saved = localStorage.getItem("review.project"); } catch (e) { /* ignore */ }
+  if (!data.projects.length) {
+    showBanner("No projects yet. Create one on the Setup screen.", "info");
+    document.dispatchEvent(new CustomEvent("project-opened", { detail: null }));
+    return;
+  }
+  let saved = preferId != null ? String(preferId) : null;
+  if (saved == null) {
+    try { saved = localStorage.getItem("review.project"); } catch (e) { /* ignore */ }
+  }
   const pick = data.projects.find((p) => String(p.id) === saved) || data.projects[0];
   sel.value = pick.id;
   await openProject(pick.id);
@@ -90,6 +97,8 @@ async function openProject(pid) {
   state.offset = 0;
   await refreshProgress();
   await loadImages(0);
+  // Lets setup.js follow the project picker and refresh its own panels.
+  document.dispatchEvent(new CustomEvent("project-opened", { detail: state.project }));
 }
 
 async function refreshProgress() {
@@ -314,6 +323,7 @@ $("reviewerInput").addEventListener("change", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if ($("layout").hidden) return; // review shortcuts are off while the setup screen shows
   const tag = (e.target.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea" || $("helpDialog").open) return;
   if (tag === "select" && !["Tab", "Escape"].includes(e.key)) return;
