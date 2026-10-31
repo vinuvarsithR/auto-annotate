@@ -45,7 +45,8 @@ recall over precision (humans delete junk faster than they draw missed boxes).
 Work is split by docs/CONTRACT.md (backend, models, ui, export + integrator on main).
 Session notes: docs/agents/*.md. Merged on main: models (fake detector, pipeline.run),
 backend (endpoints 1-13), ui (review page). Run the app: `uvicorn app.main:app --port 8000`,
-open http://localhost:8000/ (or `/?mock=1` for fixtures). The UI has no upload/classes/job
+open http://localhost:8000/. (`/?mock=1` needs a static server on the repo root, e.g.
+`python -m http.server`; uvicorn does not serve docs/fixtures/.) The UI has no upload/classes/job
 screens yet: do those via http://localhost:8000/docs with `"model": "fake"`.
 Next: backend builds GET /api/models (contract #16); export session builds #14 and the
 roboflow_push runner (#15, later).
