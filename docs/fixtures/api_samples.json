@@ -1,5 +1,5 @@
 {
- "_note": "Sample responses for docs/CONTRACT.md. Keys are 'METHOD path'. Only the integrator edits this file.",
+ "_note": "Sample responses for docs/CONTRACT.md. Keys are 'METHOD path'. Only the integrator edits this file. A null value means 204 with an empty body.",
  "POST /api/projects": {
   "id": 1,
   "name": "eot_crane",
@@ -649,6 +649,47 @@
   "error": {
    "code": "not_found",
    "message": "image 99 not found"
+  }
+ },
+ "PATCH /api/projects/1": {
+  "id": 1,
+  "name": "eot_crane_v2",
+  "created_at": "2026-10-30T14:00:00Z",
+  "counts": {
+   "images": 3,
+   "auto_accepted": 2,
+   "needs_review": 2,
+   "accepted": 2,
+   "rejected": 1,
+   "edited": 1
+  }
+ },
+ "DELETE /api/projects/1": null,
+ "DELETE /api/annotations/109": null,
+ "PATCH /api/annotations/102 (undo)": {
+  "id": 102,
+  "image_id": 10,
+  "class_id": 2,
+  "class_name": "rb",
+  "bbox": [
+   610.0,
+   120.0,
+   95.0,
+   410.0
+  ],
+  "mask": null,
+  "score": 0.33,
+  "source": "owlv2_image",
+  "status": "needs_review",
+  "job_id": 5,
+  "reviewer": "dhyan",
+  "created_at": "2026-10-30T14:03:00Z",
+  "updated_at": "2026-10-30T14:07:00Z"
+ },
+ "error example (409 conflict)": {
+  "error": {
+   "code": "conflict",
+   "message": "project 1 has a running job"
   }
  },
  "all_annotations": [

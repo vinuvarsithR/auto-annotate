@@ -94,6 +94,10 @@ Status rules (the backend enforces them):
 | Reviewer approves | `accepted` |
 | Reviewer deletes | `rejected` (the row is kept so we can measure precision later) |
 | Reviewer changes box, mask or class | `edited` |
+| Reviewer undoes a change | the status sent in the request |
+
+An explicit `status` in a PATCH (#13) always wins. Only when `status` is absent does a
+bbox / mask / class change make the box `edited`.
 
 A new `detect` job on an image deletes that image's earlier **model** boxes that are
 still `auto_accepted` or `needs_review`. It never touches human-reviewed rows.
@@ -121,9 +125,9 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 400 | `bad_class_id` | `class_id` not in this image's project |
 | 404 | `not_found` | unknown id, unknown path, or image file missing on disk |
 | 405 | `method_not_allowed` | wrong HTTP method for the path |
-| 409 | `name_taken` | project name already used |
+| 409 | `name_taken` | project name already used (#1 create, #17 rename) |
 | 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
-| 409 | `conflict` | any other 409 |
+| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18) |
 | 500 | `internal_error` | unexpected server error (details only in the server log) |
 
 | # | Method | Path | Purpose |
@@ -144,6 +148,9 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 14 | POST | `/projects/{pid}/export` | download COCO / YOLO zip |
 | 15 | POST | `/projects/{pid}/roboflow-push` | start push job |
 | 16 | GET | `/models` | detector names for POST .../jobs |
+| 17 | PATCH | `/projects/{pid}` | rename project |
+| 18 | DELETE | `/projects/{pid}` | delete project and everything in it |
+| 19 | DELETE | `/annotations/{aid}` | hard-delete one box |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -226,13 +233,20 @@ Request `{"class_id": 1, "bbox": [100, 200, 40, 50], "mask": null, "reviewer": "
 Response 201 is an Annotation with `source: "human"`, `score: null` and `status: "accepted"`.
 
 ### 13. PATCH /annotations/{aid}
-Every field is optional. The status rules from section 1 apply.
+Every field is optional. The status rules from section 1 apply. `status` may be any of the 5
+statuses; an unknown one is 400 `bad_request`.
 ```json
 {"status": "accepted", "reviewer": "dhyan"}
 {"status": "rejected", "reviewer": "dhyan"}
 {"bbox": [810, 298, 250, 70], "class_id": 4, "reviewer": "dhyan"}
+{"status": "needs_review", "reviewer": "dhyan"}
+{"status": "auto_accepted", "bbox": [810, 298, 250, 70], "class_id": 4, "reviewer": "dhyan"}
 ```
 The response is the updated Annotation. The third example comes back with `status: "edited"`.
+Rule: an explicit `status` in the body wins; only when `status` is absent does a bbox / mask /
+class change make the box `edited`. So the last example comes back `auto_accepted`. Undo uses
+this to put a box back exactly as it was (undo "accept" -> `needs_review`; undo "move" -> the old
+bbox and the old status in one call).
 
 ### 14. POST /projects/{pid}/export
 Request:
@@ -263,6 +277,29 @@ Response `{"models": [...]}`, which is exactly `autolabel.models.list_detectors(
 ```
 The UI uses it to choose the `model` for #9. The default `"pipeline"` in #9 stays; it is
 rejected with 400 `unknown_model` until the real pipeline is registered. Owner: backend.
+
+### 17. PATCH /projects/{pid}
+Rename. Owner: backend.
+```json
+{"name": "eot_crane_v2"}
+```
+Response 200 is a Project (same shape as #1, with `counts`). Errors: empty name or bad body ->
+400 `bad_request`; name used by another project -> 409 `name_taken`; unknown pid -> 404
+`not_found`. Renaming to its own current name is a no-op 200.
+
+### 18. DELETE /projects/{pid}
+Delete a project and everything in it. Owner: backend.
+No body. Response **204** with an empty body. Removes the project row and (via ON DELETE CASCADE
+plus explicit deletes where needed) its images, classes, jobs and annotations, and the folder
+`data/uploads/<pid>/` on disk. If a job of this project is `queued` or `running` -> 409
+`conflict` and nothing is deleted. Unknown pid -> 404 `not_found`.
+
+### 19. DELETE /annotations/{aid}
+Hard-delete one box. Owner: backend.
+No body. Response **204** with an empty body. Allowed for any box, whatever its source or status
+(undoing "draw box" or "repeat previous" must remove the boxes it created). Unknown aid -> 404
+`not_found`. The UI itself only hard-deletes human boxes (`source: "human"`); for model boxes
+"Delete" still sends #13 `{"status": "rejected"}` so they keep counting toward precision.
 
 ---
 
@@ -360,6 +397,7 @@ Rules:
 ## 5. Mock data
 
 `docs/fixtures/api_samples.json` holds one example response per endpoint, keyed by `"METHOD path"`.
+A value of `null` means 204 with an empty body (#18, #19).
 It uses project 1 `eot_crane` with the 4 crane classes, 3 images, and annotations in all 5 statuses
 (including one human box and one with a mask).
 - **ui:** add a `?mock=1` switch that reads this file instead of calling `/api`. For images, use any

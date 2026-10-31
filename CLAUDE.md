@@ -48,7 +48,7 @@ backend (endpoints 1-13), ui (review page). Run the app: `uvicorn app.main:app -
 open http://localhost:8000/. (`/?mock=1` needs a static server on the repo root, e.g.
 `python -m http.server`; uvicorn does not serve docs/fixtures/.) The UI has no upload/classes/job
 screens yet: do those via http://localhost:8000/docs with `"model": "fake"`.
-Next: backend builds GET /api/models (contract #16); export session builds #14 and the
+Next: backend builds GET /api/models (contract #16), #17-#19 and the #13 status change; export session builds #14 and the
 roboflow_push runner (#15, later).
 
 ## Phase 1 state
