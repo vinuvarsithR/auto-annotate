@@ -13,10 +13,11 @@
   <span class="brand">Auto-annotate</span>
   <span id="mockBadge" class="badge" hidden>Mock data</span>
   <span class="tabs" role="group" aria-label="Screen">
+    <button id="tabProjects" type="button">Projects</button>
     <button id="tabSetup" type="button">Setup</button>
-    <button id="tabReview" type="button" class="active">Review</button>
+    <button id="tabReview" type="button">Review</button>
   </span>
-  <label class="field">Project <select id="projectSelect"></select></label>
+  <label id="projectField" class="field">Project <select id="projectSelect"></select></label>
   <label class="field">Reviewer <input id="reviewerInput" type="text" placeholder="Your name" size="10"></label>
   <span class="spacer"></span>
   <button id="helpBtn" type="button" class="icon" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
@@ -26,6 +27,21 @@
 </div>
 
 <div id="banner" class="banner" role="status" hidden></div>
+
+<!-- ============================================================ projects (start page) -->
+<main id="projects" hidden>
+  <div class="projects-inner">
+    <div class="projects-head">
+      <h1>Projects</h1>
+      <form id="projectCreateForm" class="row">
+        <input id="projectCreateName" type="text" placeholder="New project name" size="26" aria-label="New project name">
+        <button type="submit" class="primary">New project</button>
+      </form>
+    </div>
+    <ul id="projectList" class="project-list"></ul>
+    <p id="projectsEmpty" class="muted empty" hidden>No projects yet. Type a name above and press New project.</p>
+  </div>
+</main>
 
 <!-- ============================================================ setup -->
 <main id="setup" hidden>
@@ -79,11 +95,12 @@
       </div>
     </section>
 
-    <section class="step" data-step="4" hidden>
+    <section class="step step-run" data-step="4" hidden>
       <h2>Run detection</h2>
-      <div class="row">
+      <div class="row run-row">
         <label class="field">Model <select id="modelSelect"></select></label>
         <button id="runBtn" type="button" class="primary">Run on all images</button>
+        <button id="openReviewBtn" type="button" class="primary go" hidden>Open in review &rarr;</button>
       </div>
       <div id="modelNote" class="muted" hidden></div>
       <div id="jobBox" hidden>
@@ -100,7 +117,7 @@
 </main>
 
 <!-- ============================================================ review -->
-<main id="layout">
+<main id="layout" hidden>
   <aside id="left">
     <label class="field filter">Show
       <select id="statusFilter">
@@ -122,14 +139,37 @@
 
   <section id="center">
     <div id="canvasWrap"><canvas id="canvas"></canvas></div>
-    <div id="toolbar">
+    <div id="infobar">
       <div id="imageTitle" class="image-title num-tab"></div>
       <span id="boxEmpty" class="muted hint">Click a box or press Tab</span>
+      <div id="legend" class="legend" role="group" aria-label="Classes on this image (click to show or hide)"></div>
+    </div>
+    <div id="toolbar">
+      <span class="group">
+        <button id="undoBtn" type="button" class="icon" aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)" disabled>
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.5 4 2.5 7l3 3M3 7h6.5a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="redoBtn" type="button" class="icon" aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4l3 3-3 3M13 7H6.5a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </span>
+      <button id="repeatBtn" type="button" title="Copy the boxes of the previous image onto this one">Repeat previous <kbd>P</kbd></button>
+      <span class="group">
+        <label class="visually-hidden" for="newClass">Class for new boxes</label>
+        <select id="newClass" title="Class for new boxes (1-9)"></select>
+        <button id="drawBtn" type="button" title="Draw a box. Or hold Ctrl and drag.">Draw <kbd>N</kbd></button>
+      </span>
       <span class="spacer"></span>
-      <label class="field">New box <select id="newClass"></select></label>
-      <button id="drawBtn" type="button">Draw box <kbd>N</kbd></button>
+      <button id="zoomBtn" type="button" class="num-tab zoom" title="Zoom: Ctrl+scroll or pinch. Click or press 0 to fit.">Fit</button>
+      <span class="pop-wrap">
+        <button id="adjustBtn" type="button" aria-expanded="false" aria-controls="adjustPop" title="Brightness and contrast (display only)">Adjust</button>
+        <div id="adjustPop" class="popover" hidden>
+          <label class="range">Brightness <input id="brightness" type="range" min="50" max="200" step="5" value="100"><output id="brightnessOut" class="num-tab">100%</output></label>
+          <label class="range">Contrast <input id="contrast" type="range" min="50" max="200" step="5" value="100"><output id="contrastOut" class="num-tab">100%</output></label>
+          <div class="pop-foot"><span class="muted">Display only</span><button id="adjustReset" type="button">Reset</button></div>
+        </div>
+      </span>
       <label class="check"><input id="showRejected" type="checkbox" checked> Show rejected</label>
-      <div id="legend" class="legend"></div>
     </div>
   </section>
 
@@ -150,25 +190,36 @@
       <div class="actions">
         <button id="acceptBtn" type="button" class="accept">Accept <kbd>A</kbd></button>
         <button id="rejectBtn" type="button" class="reject">Reject <kbd>R</kbd></button>
+        <button id="deleteBtn" type="button" class="wide">Delete <kbd>Del</kbd></button>
       </div>
+      <p id="deleteNote" class="muted note"></p>
     </div>
   </aside>
 </main>
 
 <dialog id="helpDialog">
-  <h2>Keyboard</h2>
+  <h2>Keyboard and mouse</h2>
   <dl class="keys">
-    <dt><kbd>A</kbd></dt><dd>Accept selected box</dd>
-    <dt><kbd>R</kbd></dt><dd>Reject selected box</dd>
+    <dt><kbd>A</kbd> / <kbd>R</kbd></dt><dd>Accept / reject selected box</dd>
+    <dt><kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete selected box (model boxes are rejected, so they still count for precision)</dd>
+    <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo (this image)</dd>
+    <dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Redo</dd>
     <dt><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Next / previous box</dd>
     <dt><kbd>&rarr;</kbd> or <kbd>D</kbd></dt><dd>Next image</dd>
     <dt><kbd>&larr;</kbd> or <kbd>S</kbd></dt><dd>Previous image</dd>
     <dt><kbd>1</kbd> - <kbd>9</kbd></dt><dd>Change class of selected box (or new-box class if none selected)</dd>
-    <dt><kbd>N</kbd></dt><dd>Draw a new box (drag on the image)</dd>
+    <dt>Hold <kbd>Ctrl</kbd> + drag</dt><dd>Draw a new box</dd>
+    <dt><kbd>N</kbd></dt><dd>Draw one new box (drag on the image)</dd>
+    <dt><kbd>P</kbd></dt><dd>Repeat previous: copy the boxes of the image you had open before</dd>
+    <dt>Hold <kbd>H</kbd></dt><dd>Hide all boxes</dd>
+    <dt><kbd>Ctrl</kbd>+scroll or pinch</dt><dd>Zoom the image (up to 800%)</dd>
+    <dt>Scroll / drag empty area</dt><dd>Pan when zoomed in (middle mouse button too)</dd>
+    <dt><kbd>0</kbd> or double-click</dt><dd>Fit the image</dd>
     <dt><kbd>Esc</kbd></dt><dd>Cancel drawing / deselect</dd>
   </dl>
-  <p class="muted">Drag a selected box to move it, drag its handles to resize.
-  Line style: dashed = needs review, solid = auto accepted / accepted / edited, faded = rejected.</p>
+  <p class="muted">Drag a selected box to move it, drag its handles to resize. Click a class
+  in the legend to hide or show it. Line style: dashed = needs review, solid = auto accepted /
+  accepted / edited, faded = rejected.</p>
   <form method="dialog"><button class="primary">Close</button></form>
 </dialog>
 
@@ -176,5 +227,6 @@
 <script src="canvas.js"></script>
 <script src="app.js"></script>
 <script src="setup.js"></script>
+<script src="projects.js"></script>
 </body>
 </html>

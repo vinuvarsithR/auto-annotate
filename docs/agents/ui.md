@@ -67,12 +67,89 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   panel open and closed. uvicorn serves index + fonts (font/woff2). pytest 172 passed.
 - Not done: real drag from the OS file explorer (only a synthetic drop event was tested);
   the real backend in the browser.
+- 2026-10-31 Review tools round (branch `ui`), user-approved plan:
+  - Projects start page (new app/static/projects.js, tab "Projects", always opens first): list
+    (newest first, images, created date, boxes-reviewed bar), New project (-> Setup, Upload step),
+    inline rename (#17), delete with type-the-name confirm (#18), Setup / Review buttons.
+    Deleting the open project opens another one, or clears Setup + Review when none is left.
+  - Run step compact (no min-height), "Open in review ->" once the job is done / boxes exist.
+  - Zoom: Ctrl+wheel or touchpad pinch anywhere on the review screen zooms the image around the
+    cursor (100-800% of fit), never the page; plain wheel / drag on empty area / middle button
+    pans when zoomed; 0, double-click or the zoom button = fit; every new image starts at fit;
+    a programmatically selected box (Tab, after accept) is brought into view.
+  - Hold Ctrl: crosshair, drag draws a box (also over existing boxes); N / Draw still work.
+  - Delete (Del / Backspace / panel button): human box -> DELETE (#19); model box -> rejected.
+    Server without #19 (405) -> rejected instead, with a message.
+  - Undo / redo (Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y, toolbar buttons), per image, 50 steps: accept,
+    reject, delete, move/resize, class change, draw, repeat previous. Re-created boxes get new ids;
+    all steps are re-pointed at them. Undo of a status change needs the #13 change; on an old
+    server it says so and keeps the step.
+  - Repeat previous (P / button): copies the auto_accepted / accepted / edited boxes of the image
+    open before (else the one before in the list) as human boxes; skips same-class IoU >= 0.5;
+    scales boxes if image sizes differ; one undo step.
+  - Extras the user picked: hold H hides all boxes; legend shows per-class counts on this image
+    (rejected not counted) and click hides/shows a class; Adjust popover with display-only
+    brightness/contrast (canvas filter, kept across images).
+  - Toolbar is now two rows (info: name + legend; tools). Fits at 1280px with the panel open.
+- VERIFIED in Chrome (mock, static server on repo root), no console errors: create -> Setup step 2;
+  upload 4 generated JPGs, classes, fake job, compact Run step + Open in review; zoom via
+  dispatched wheel events (prevented, point under cursor drifts < 1 image px, pinch-size deltas,
+  clamp 1-8x, pan, 0 = fit, reset on next image); real Ctrl+click carries ctrlKey; Ctrl-draw
+  over an existing box makes a new human box and leaves the old one; Ctrl+Z undid a move exactly;
+  draw -> class change -> delete -> 3x undo = exact starting state, 3x redo, server matches;
+  model-box delete = rejected, undo -> auto_accepted; repeat previous (1 copied, 2nd press all
+  skipped, undo removes); H hide, legend toggle, brightness filter; rename (incl. 409 name_taken),
+  delete with confirm (button disabled until the name matches), 409 with a running job, deleting
+  the last project -> empty states. Real backend (uvicorn on a scratch data dir): flows work;
+  rename/delete project -> 405 message; delete drawn box -> rejected fallback; undo of accept ->
+  "can't undo ... contract #13" message. pytest 172 passed.
+- GUESS until tried on the user's machine: a real touchpad pinch / real Ctrl+mouse-wheel (Chrome
+  sends both as wheel + ctrlKey; only synthetic wheel events were tested), and a real Ctrl+drag
+  (the test tool can't hold Ctrl during a drag; tested with synthetic mouse events).
 
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 None (plain JS, no libraries).
 
 ## Contract change requests
+
+### 2026-10-31: project rename/delete, box delete, undo (for backend + integrator)
+The UI is already built against these shapes and works with them in `?mock=1`. Against the
+real server, rename/delete projects, deleting drawn boxes and undo of status changes stay
+unavailable until these are added. The UI does not touch `app/api/`.
+
+New error use: 409 `conflict` (already in the table) for "project has a running job".
+
+**#17 PATCH /projects/{pid}** - rename. Owner: backend.
+```json
+{"name": "eot_crane_v2"}
+```
+Response 200 is a Project (same shape as #1, with `counts`). Errors: empty name or bad body ->
+400 `bad_request`; name used by another project -> 409 `name_taken`; unknown pid -> 404
+`not_found`. Renaming to its own current name is a no-op 200.
+
+**#18 DELETE /projects/{pid}** - delete a project and everything in it. Owner: backend.
+No body. Response **204** with an empty body. Removes the project row and (via ON DELETE CASCADE
+plus explicit deletes where needed) its images, classes, jobs and annotations, and the folder
+`data/uploads/<pid>/` on disk. A job of this project with status `queued` or `running` -> 409
+`conflict` and nothing is deleted. Unknown pid -> 404 `not_found`.
+
+**#19 DELETE /annotations/{aid}** - hard delete one box. Owner: backend.
+No body. Response **204** with an empty body. Allowed for any box, whatever its source or status
+(undoing "draw box" or "repeat previous" must remove the boxes it created). Unknown aid -> 404
+`not_found`. The UI itself only hard-deletes human boxes (`source: "human"`); for model boxes
+"Delete" still sends `{"status": "rejected"}` so they keep counting toward precision.
+
+**#13 PATCH /annotations/{aid}** - change: `status` may be any of the 5 statuses.
+```json
+{"status": "needs_review", "reviewer": "dhyan"}
+{"status": "auto_accepted", "bbox": [810, 298, 250, 70], "class_id": 4, "reviewer": "dhyan"}
+```
+Rule: an explicit `status` in the body wins; only when `status` is absent does a bbox / mask /
+class change make the box `edited` (as today). Unknown status -> 400 `bad_request`. Undo uses
+this to put a box back exactly as it was (e.g. undo "accept" -> `needs_review`, undo "move" ->
+the old bbox and the old status in one call). The status rules table in section 1 gets one more
+row: "Reviewer undoes a change | the status sent in the request".
 
 ## Open questions
 

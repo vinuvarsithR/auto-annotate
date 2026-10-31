@@ -61,6 +61,12 @@ const realApi = {
   patchAnnotation: (aid, body) => http("PATCH", `/annotations/${aid}`, body),
   imageUrl: (img) => img.url,
 
+  // ---- requested contract changes (docs/agents/ui.md): #17 rename, #18 delete project,
+  // #19 delete box. Until the backend has them the server answers 405 / 404.
+  renameProject: (pid, name) => http("PATCH", `/projects/${pid}`, { name }),
+  deleteProject: (pid) => http("DELETE", `/projects/${pid}`),
+  deleteAnnotation: (aid) => http("DELETE", `/annotations/${aid}`),
+
   // ---- setup screen (endpoints 1, 4, 8, 9, 10, 16)
   createProject: (name) => http("POST", "/projects", { name }),
   // Upload one batch of File objects. onProgress(fraction 0..1) follows the bytes sent.
@@ -253,7 +259,11 @@ const mockApi = {
       a.class_name = cls.name;
       edited = true;
     }
-    // Status rules (CONTRACT.md section 1): an explicit status wins, otherwise any edit -> edited.
+    // Status rules (CONTRACT.md section 1 + requested #13 change): an explicit status (any of
+    // the 5) wins, otherwise any edit -> edited.
+    if (body.status !== undefined && !STATUSES.includes(body.status)) {
+      throw new ApiError("bad_request", `unknown status "${body.status}"`, 400);
+    }
     if (body.status) a.status = body.status;
     else if (edited) a.status = "edited";
     if ("reviewer" in body) a.reviewer = body.reviewer;
@@ -261,6 +271,41 @@ const mockApi = {
     return clone(a);
   },
   imageUrl: (img) => img.url, // fixture urls are not served -> the canvas draws a placeholder
+
+  async deleteAnnotation(aid) { // requested #19
+    const db = await loadMock();
+    const k = db.annotations.findIndex((x) => x.id === Number(aid));
+    if (k < 0) mockNotFound("annotation", aid);
+    db.annotations.splice(k, 1);
+    return null;
+  },
+  async renameProject(pid, name) { // requested #17
+    const db = await loadMock();
+    mockProject(db, pid);
+    name = String(name || "").trim();
+    if (!name) throw new ApiError("bad_request", "name is required", 400);
+    if (db.projects.some((p) => p.name === name && p.id !== Number(pid))) {
+      throw new ApiError("name_taken", `project "${name}" already exists`, 409);
+    }
+    db.projects.find((p) => p.id === Number(pid)).name = name;
+    return mockProject(db, pid);
+  },
+  async deleteProject(pid) { // requested #18
+    const db = await loadMock();
+    mockProject(db, pid);
+    pid = Number(pid);
+    if (db.jobs.some((j) => j.project_id === pid && (j.status === "queued" || j.status === "running"))) {
+      throw new ApiError("conflict", "project has a running job", 409);
+    }
+    const ids = new Set(db.images.filter((i) => i.project_id === pid).map((i) => i.id));
+    for (const i of db.images) if (ids.has(i.id) && String(i.url).startsWith("blob:")) URL.revokeObjectURL(i.url);
+    db.annotations = db.annotations.filter((a) => !ids.has(a.image_id));
+    db.images = db.images.filter((i) => i.project_id !== pid);
+    db.classes = db.classes.filter((c) => c.project_id !== pid);
+    db.jobs = db.jobs.filter((j) => j.project_id !== pid);
+    db.projects = db.projects.filter((p) => p.id !== pid);
+    return null;
+  },
 
   // ---- setup screen
   async createProject(name) {

@@ -2,7 +2,7 @@
 // run detection (9) and poll the job (10); the model list comes from endpoint 16.
 // Shown as one guided 4-step flow (create, upload, classes, run); uploads start as soon as
 // files are dropped or chosen, and thumbnails appear as each batch lands.
-// Uses globals from app.js: $, state, guard, showBanner, loadProjects, openProject.
+// Uses globals from app.js: $, state, guard, showBanner, showScreen, loadProjects, openProject.
 "use strict";
 
 const UPLOAD_BATCH = 10;   // files per POST, so one bad file does not lose a big upload
@@ -21,16 +21,6 @@ const setup = {
   tileUrls: [],        // object URLs of upload thumbnails (revoked on the next upload)
 };
 
-// ------------------------------------------------------------ screen toggle
-function showScreen(name) {
-  const isSetup = name === "setup";
-  $("setup").hidden = !isSetup;
-  $("layout").hidden = isSetup;
-  $("tabSetup").classList.toggle("active", isSetup);
-  $("tabReview").classList.toggle("active", !isSetup);
-  try { localStorage.setItem("ui.screen", name); } catch (e) { /* ignore */ }
-}
-
 // ------------------------------------------------------------ project
 function onProjectOpened(p) {
   const changed = (setup.project && setup.project.id) !== (p && p.id);
@@ -40,7 +30,7 @@ function onProjectOpened(p) {
   $("setupImageCount").textContent = p ? p.counts.images : 0;
   updateButtons();
   if (p) loadClasses(p.id);
-  else { renderClassRows([]); showStep(1); showScreen("setup"); }
+  else { renderClassRows([]); showStep(1); }
 }
 
 // ------------------------------------------------------------ steps
@@ -86,6 +76,8 @@ function renderStepper() {
   $("stepNext").hidden = setup.step === 4;
   $("stepNext").textContent = STEP_NEXT[setup.step] || "Next";
   $("stepNext").disabled = !p;
+  // After a finished run (or when the project already has boxes): straight to review.
+  $("openReviewBtn").hidden = !p || !!setup.jobId || !stepDone(4);
 }
 
 // First step that is not done yet (or Run when all are).
@@ -363,11 +355,10 @@ function updateButtons() {
   $("saveClassesBtn").disabled = !hasProject;
   $("runBtn").disabled = !hasProject || !!setup.jobId || !$("modelSelect").value;
   $("runBtn").textContent = setup.jobId ? "Running..." : "Run on all images";
+  renderStepper();
 }
 
 // ------------------------------------------------------------ wiring
-$("tabSetup").addEventListener("click", () => showScreen("setup"));
-$("tabReview").addEventListener("click", () => showScreen("review"));
 $("createForm").addEventListener("submit", createProject);
 $("fileInput").addEventListener("change", (e) => {
   const files = Array.from(e.target.files || []);
@@ -401,12 +392,10 @@ $("addClassBtn").addEventListener("click", () => { addClassRow().querySelector("
 $("saveClassesBtn").addEventListener("click", saveClasses);
 $("classTable").addEventListener("input", () => setDirty(true));
 $("runBtn").addEventListener("click", runDetection);
+$("openReviewBtn").addEventListener("click", () => showScreen("review"));
 document.addEventListener("project-opened", (e) => onProjectOpened(e.detail));
 
 (function initSetup() {
-  let screen = "review";
-  try { screen = localStorage.getItem("ui.screen") || "review"; } catch (e) { /* ignore */ }
-  showScreen(screen);
   showStep(1);
   updateButtons();
   loadModels();

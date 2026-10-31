@@ -1,4 +1,4 @@
-// canvas.js - draws one image plus its boxes and handles mouse editing.
+// canvas.js - draws one image plus its boxes and handles mouse editing, zoom and pan.
 // All box coordinates stay in IMAGE pixels ([x, y, w, h], COCO style);
 // only drawing and mouse events convert to screen pixels.
 "use strict";
@@ -8,6 +8,7 @@ const CLASS_COLORS = { person: "#7FC8D6", rb: "#E3C9A0", sb: "#E6D27A", biax: "#
 const FALLBACK_COLORS = ["#A3C99A", "#D9A38F", "#9FB4E0", "#D9A5C0", "#B9C97F", "#8FD1C0", "#E0B98A", "#B3A8E0"];
 const HANDLE = 6;      // handle half-size in screen px
 const MIN_SIZE = 4;    // smallest box in image px
+const ZOOM_MAX = 8;    // 800% of "fit"
 const CANVAS_COLORS = { base: "#1A2026", panel: "#222A31", line: "#2E3840", text: "#DCE3E8", muted: "#8996A0",
             accept: "143,184,168" };
 const LABEL_FONT = '500 12px "IBM Plex Sans", system-ui, sans-serif';
@@ -25,46 +26,62 @@ const reducedMotion = window.matchMedia ? window.matchMedia("(prefers-reduced-mo
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 const lerp = (a, b, t) => a + (b - a) * t;
 const fxNow = () => performance.now();
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 class BoxCanvas {
   constructor(canvas, callbacks) {
     this.cv = canvas;
     this.ctx = canvas.getContext("2d");
-    this.cb = callbacks; // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox)
+    this.cb = callbacks; // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox), onView(zoom)
     this.img = null;          // HTMLImageElement or null (placeholder)
     this.imgW = 1280;
     this.imgH = 720;
     this.anns = [];
     this.selectedId = null;
-    this.drawMode = false;
+    this.drawMode = false;    // sticky draw mode (N / Draw button): one box, then off
+    this.tempDraw = false;    // draw while Ctrl is held
     this.drawColor = "#fff";
     this.showRejected = true;
+    this.hideAll = false;     // H held: no boxes at all
+    this.hiddenClasses = new Set(); // class ids switched off in the legend
+    this.imgFilter = "none";  // display-only brightness / contrast
     this.drag = null;
+    // View: zoom 1 = whole image fitted; pan = screen px offset from the centred position.
+    this.zoom = 1; this.panX = 0; this.panY = 0;
+    this.fit = 1; this.vw = 1; this.vh = 1;
     this.scale = 1; this.ox = 0; this.oy = 0;
     this.fx = [];             // running effects: {kind, start, dur, delay?, ...}
-    this.prevImg = null;      // what is faded out during a crossfade: {img} or {w, h} (placeholder)
+    this.prevImg = null;      // what is faded out during a crossfade: {img | w,h, view}
     this.shown = false;       // has anything been drawn yet (no crossfade from an empty canvas)
     this.raf = 0;
 
     new ResizeObserver(() => this.render()).observe(canvas.parentElement);
     if (document.fonts) document.fonts.ready.then(() => this.render());
     canvas.addEventListener("mousedown", (e) => this.onDown(e));
+    canvas.addEventListener("dblclick", (e) => { if (!this.drawing() && !e.ctrlKey) this.resetView(); });
     window.addEventListener("mousemove", (e) => this.onMove(e));
     window.addEventListener("mouseup", (e) => this.onUp(e));
   }
 
   // Load an image; on any error draw a grey placeholder of the given size.
   // The old image stays on screen until the new one has loaded (or failed), then the two
-  // crossfade over 200ms, so there is no grey flash between frames.
+  // crossfade over 200ms, so there is no grey flash between frames. Every new image starts at "fit".
   setImage(url, width, height) {
     this.drag = null;
     const show = (im) => {
-      const old = this.shown ? (this.img ? { img: this.img } : { w: this.imgW, h: this.imgH }) : null;
+      let old = null;
+      if (this.shown) {
+        this.layout();
+        old = this.img ? { img: this.img } : { w: this.imgW, h: this.imgH };
+        old.view = { s: this.scale, x: this.ox, y: this.oy };
+      }
       this.fx = this.fx.filter((f) => f.kind !== "fade-img");
       this.img = im;
       this.imgW = im ? im.naturalWidth : (width || 1280);
       this.imgH = im ? im.naturalHeight : (height || 720);
       this.prevImg = old;
+      this.zoom = 1; this.panX = 0; this.panY = 0;
+      this.notifyView();
       if (old) this.startFx({ kind: "fade-img", dur: 200 }); else this.render();
     };
     this._pending = null;
@@ -85,6 +102,7 @@ class BoxCanvas {
     this.selectedId = id;
     const to = this.selected();
     this.fx = this.fx.filter((f) => f.kind !== "glide");
+    if (to) this.ensureVisible(to.bbox);
     if (glide && from && to && from.id !== to.id) {
       this.startFx({ kind: "glide", id: to.id, from: from.bbox.slice(), dur: 180, delay: 50 });
     } else this.render();
@@ -94,7 +112,8 @@ class BoxCanvas {
   flashAccept(id) { this.startFx({ kind: "accept", id, dur: 240 }); }
 
   // Reject: the box (as it looked before) fades to the rejected look, or out if rejected are hidden.
-  fadeReject(ann) { this.startFx({ kind: "reject", id: ann.id, ann, dur: 200 }); }
+  // gone = the box was deleted: always fade out completely.
+  fadeReject(ann, gone = false) { this.startFx({ kind: "reject", id: ann.id, ann, gone, dur: 200 }); }
 
   startFx(f) {
     if (reducedMotion.matches) { this.prevImg = null; this.render(); return; }
@@ -114,14 +133,41 @@ class BoxCanvas {
     const p = (t - f.start - (f.delay || 0)) / f.dur;
     return p < 0 ? null : easeOut(Math.min(1, p));
   }
+
+  // ------------------------------------------------------------ modes
+  drawing() { return this.drawMode || this.tempDraw; }
   setDrawMode(on, color) {
     this.drawMode = on;
     if (color) this.drawColor = color;
-    this.cv.style.cursor = on ? "crosshair" : "default";
+    if (!this.drag) this.cv.style.cursor = this.drawing() ? "crosshair" : "default";
+    this.render();
+  }
+  setDrawColor(color) { this.drawColor = color; }
+  // Ctrl held: the cursor becomes a crosshair and a drag draws a box (no button press needed).
+  setTempDraw(on) {
+    if (this.tempDraw === on) return;
+    this.tempDraw = on;
+    if (!this.drag) this.cv.style.cursor = this.drawing() ? "crosshair" : "default";
+  }
+  // Esc while dragging out a new box drops it. Returns true if there was one.
+  cancelDraw() {
+    if (!this.drag || this.drag.kind !== "draw") return false;
+    this.drag = null;
+    this.render();
+    return true;
+  }
+  setHideAll(on) { if (this.hideAll !== on) { this.hideAll = on; this.render(); } }
+  setClassHidden(classId, hidden) {
+    if (hidden) this.hiddenClasses.add(classId); else this.hiddenClasses.delete(classId);
+    this.render();
+  }
+  // brightness / contrast as factors (1 = unchanged). Display only; the stored image is not touched.
+  setImageFilter(brightness, contrast) {
+    this.imgFilter = brightness === 1 && contrast === 1 ? "none" : `brightness(${brightness}) contrast(${contrast})`;
     this.render();
   }
 
-  // ------------------------------------------------------------ geometry
+  // ------------------------------------------------------------ geometry + view
   layout() {
     const box = this.cv.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -131,9 +177,15 @@ class BoxCanvas {
       this.cv.style.width = w + "px"; this.cv.style.height = h + "px";
     }
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.scale = Math.min(w / this.imgW, h / this.imgH);
-    this.ox = (w - this.imgW * this.scale) / 2;
-    this.oy = (h - this.imgH * this.scale) / 2;
+    this.vw = w; this.vh = h;
+    this.fit = Math.min(w / this.imgW, h / this.imgH);
+    this.scale = this.fit * this.zoom;
+    // Smaller than the view: centred. Larger: the image edge never comes inside the view.
+    const iw = this.imgW * this.scale, ih = this.imgH * this.scale;
+    const cx = (w - iw) / 2, cy = (h - ih) / 2;
+    this.ox = iw <= w ? cx : clamp(cx + this.panX, w - iw, 0);
+    this.oy = ih <= h ? cy : clamp(cy + this.panY, h - ih, 0);
+    this.panX = this.ox - cx; this.panY = this.oy - cy;
     return { w, h };
   }
   toScreen(x, y) { return [this.ox + x * this.scale, this.oy + y * this.scale]; }
@@ -141,6 +193,43 @@ class BoxCanvas {
     const r = this.cv.getBoundingClientRect();
     return [(e.clientX - r.left - this.ox) / this.scale, (e.clientY - r.top - this.oy) / this.scale];
   }
+
+  // Zoom by `factor` keeping the image point under (clientX, clientY) still.
+  // Without a point, zoom around the centre of the view.
+  zoomAt(factor, clientX = null, clientY = null) {
+    this.layout();
+    const z = clamp(this.zoom * factor, 1, ZOOM_MAX);
+    if (Math.abs(z - this.zoom) < 1e-6) return;
+    const r = this.cv.getBoundingClientRect();
+    const sx = clientX == null ? this.vw / 2 : clientX - r.left;
+    const sy = clientY == null ? this.vh / 2 : clientY - r.top;
+    const ix = (sx - this.ox) / this.scale, iy = (sy - this.oy) / this.scale;
+    this.zoom = z;
+    const s2 = this.fit * z;
+    this.panX = sx - ix * s2 - (this.vw - this.imgW * s2) / 2;
+    this.panY = sy - iy * s2 - (this.vh - this.imgH * s2) / 2;
+    this.render();
+    this.notifyView();
+  }
+  panBy(dx, dy) { if (this.zoom > 1) { this.panX += dx; this.panY += dy; this.render(); } }
+  resetView() {
+    if (this.zoom === 1 && !this.panX && !this.panY) return;
+    this.zoom = 1; this.panX = 0; this.panY = 0;
+    this.render();
+    this.notifyView();
+  }
+  notifyView() { if (this.cb.onView) this.cb.onView(this.zoom); }
+  // When zoomed in, bring a box that is off screen into the middle of the view.
+  ensureVisible(b) {
+    if (this.zoom === 1) return;
+    this.layout();
+    const [x, y] = this.toScreen(b[0], b[1]);
+    const w = b[2] * this.scale, h = b[3] * this.scale;
+    if (x >= 0 && y >= 0 && x + w <= this.vw && y + h <= this.vh) return;
+    this.panX += this.vw / 2 - (x + w / 2);
+    this.panY += this.vh / 2 - (y + h / 2);
+  }
+
   clampBox([x, y, w, h]) {
     if (w < 0) { x += w; w = -w; }
     if (h < 0) { y += h; h = -h; }
@@ -148,7 +237,10 @@ class BoxCanvas {
     w = Math.min(w, this.imgW - x); h = Math.min(h, this.imgH - y);
     return [x, y, w, h].map((v) => Math.round(v * 10) / 10);
   }
-  visible() { return this.anns.filter((a) => this.showRejected || a.status !== "rejected"); }
+  visible() {
+    if (this.hideAll) return [];
+    return this.anns.filter((a) => (this.showRejected || a.status !== "rejected") && !this.hiddenClasses.has(a.class_id));
+  }
   selected() { return this.anns.find((a) => a.id === this.selectedId) || null; }
 
   // Which handle of box b (image coords) is under point p? Returns e.g. "nw", "e", or null.
@@ -173,15 +265,17 @@ class BoxCanvas {
 
   // ------------------------------------------------------------ mouse
   onDown(e) {
+    if (e.button === 1) { e.preventDefault(); this.startPan(e); return; } // middle button pans
     if (e.button !== 0) return;
     const [px, py] = this.toImage(e);
-    if (this.drawMode) {
+    if (this.drawing() || e.ctrlKey) {
       this.drag = { kind: "draw", sx: px, sy: py, box: [px, py, 0, 0] };
       return;
     }
     const sel = this.selected();
+    const visibleSel = sel && this.visible().includes(sel);
     // Rejected boxes can be selected (to accept them again) but not moved or resized.
-    if (sel && sel.status !== "rejected") {
+    if (visibleSel && sel.status !== "rejected") {
       const h = this.handleAt(sel.bbox, px, py);
       if (h) { this.startEdit(sel, "resize", h, px, py); return; }
       if (this.inside(sel.bbox, px, py)) { this.startEdit(sel, "move", null, px, py); return; }
@@ -193,17 +287,28 @@ class BoxCanvas {
     this.selectedId = hit ? hit.id : null;
     this.cb.onSelect(hit);
     if (hit && hit.status !== "rejected") this.startEdit(hit, "move", null, px, py);
+    else if (!hit && this.zoom > 1) this.startPan(e); // drag on empty image pans when zoomed
     this.render();
   }
 
   startEdit(ann, kind, handle, px, py) {
     this.drag = { kind, handle, ann, sx: px, sy: py, orig: ann.bbox.slice(), box: ann.bbox.slice(), moved: false };
   }
+  startPan(e) {
+    this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, px: this.panX, py: this.panY };
+    this.cv.style.cursor = "grabbing";
+  }
 
   onMove(e) {
     if (!this.drag) { this.hoverCursor(e); return; }
-    const [px, py] = this.toImage(e);
     const d = this.drag;
+    if (d.kind === "pan") {
+      this.panX = d.px + (e.clientX - d.sx);
+      this.panY = d.py + (e.clientY - d.sy);
+      this.render();
+      return;
+    }
+    const [px, py] = this.toImage(e);
     const dx = px - d.sx, dy = py - d.sy;
     if (d.kind === "draw") {
       d.box = this.clampBox([d.sx, d.sy, dx, dy]);
@@ -226,10 +331,11 @@ class BoxCanvas {
     this.render();
   }
 
-  onUp() {
+  onUp(e) {
     const d = this.drag;
     if (!d) return;
     this.drag = null;
+    if (d.kind === "pan") { this.hoverCursor(e); return; }
     if (d.kind === "draw") {
       if (d.box[2] >= MIN_SIZE && d.box[3] >= MIN_SIZE) this.cb.onBoxDrawn(d.box);
       this.render();
@@ -241,15 +347,16 @@ class BoxCanvas {
   }
 
   hoverCursor(e) {
-    if (this.drawMode) return;
+    if (this.drawing()) { this.cv.style.cursor = "crosshair"; return; }
     const sel = this.selected();
+    const [px, py] = this.toImage(e);
     let cur = "default";
-    if (sel) {
-      const [px, py] = this.toImage(e);
+    if (sel && sel.status !== "rejected" && this.visible().includes(sel)) {
       const h = this.handleAt(sel.bbox, px, py);
       if (h) cur = { n: "ns", s: "ns", e: "ew", w: "ew", nw: "nwse", se: "nwse", ne: "nesw", sw: "nesw" }[h] + "-resize";
       else if (this.inside(sel.bbox, px, py)) cur = "move";
     }
+    if (cur === "default" && this.zoom > 1 && !this.visible().some((a) => this.inside(a.bbox, px, py))) cur = "grab";
     this.cv.style.cursor = cur;
   }
 
@@ -267,13 +374,13 @@ class BoxCanvas {
     const fade = fxOf("fade-img");
     const ft = fade ? (this.fxT(fade, t) || 0) : 1;
     if (fade && this.prevImg) {
-      const p = this.prevImg;
+      const p = this.prevImg, v = p.view;
       ctx.globalAlpha = 1 - ft;
-      this.drawFrame(p.img || null, p.img ? p.img.naturalWidth : p.w, p.img ? p.img.naturalHeight : p.h, w, h);
+      this.drawFrame(p.img || null, p.img ? p.img.naturalWidth : p.w, p.img ? p.img.naturalHeight : p.h, v.s, v.x, v.y);
     }
     if (!fade) this.prevImg = null;
     ctx.globalAlpha = ft;
-    this.drawFrame(this.img, this.imgW, this.imgH, w, h);
+    this.drawFrame(this.img, this.imgW, this.imgH, this.scale, this.ox, this.oy);
     ctx.globalAlpha = 1;
     this.shown = true;
 
@@ -290,9 +397,9 @@ class BoxCanvas {
       this.drawBox(a, bbox, a.id === selId && !gliding, ft, fxOf("accept", a.id), t);
     }
     for (const f of fx) {
-      if (f.kind !== "reject") continue;
+      if (f.kind !== "reject" || this.hideAll) continue;
       const p = this.fxT(f, t) || 0;
-      const end = this.showRejected ? 0.35 : 0;
+      const end = f.gone || !this.showRejected ? 0 : 0.35;
       this.drawBox(f.ann, f.ann.bbox, false, ft * lerp(1, end, p), null, t);
     }
     if (glide) {
@@ -312,18 +419,21 @@ class BoxCanvas {
     }
   }
 
-  // Image (or placeholder) of size iw x ih, fitted and centred in the canvas.
-  drawFrame(img, iw, ih, cw, ch) {
+  // Image (or placeholder) of size iw x ih, drawn at scale s with its top-left at (x, y).
+  drawFrame(img, iw, ih, s, x, y) {
     const ctx = this.ctx;
-    const s = Math.min(cw / iw, ch / ih);
-    const x = (cw - iw * s) / 2, y = (ch - ih * s) / 2;
-    if (img) { ctx.drawImage(img, x, y, iw * s, ih * s); return; }
+    if (img) {
+      ctx.filter = this.imgFilter;
+      ctx.drawImage(img, x, y, iw * s, ih * s);
+      ctx.filter = "none";
+      return;
+    }
     ctx.fillStyle = CANVAS_COLORS.panel;
     ctx.fillRect(x, y, iw * s, ih * s);
     ctx.fillStyle = CANVAS_COLORS.muted;
     ctx.font = '400 14px "IBM Plex Sans", system-ui, sans-serif';
     ctx.textAlign = "center";
-    ctx.fillText(`Image not available (placeholder ${iw}\u00d7${ih})`, x + iw * s / 2, y + ih * s / 2);
+    ctx.fillText(`Image not available (placeholder ${iw}×${ih})`, x + iw * s / 2, y + ih * s / 2);
     ctx.textAlign = "left";
   }
 
@@ -368,7 +478,7 @@ class BoxCanvas {
     ctx.setLineDash([]);
 
     const label = a.class_name + (a.score != null ? " " + a.score.toFixed(2) : "") +
-                  (a.status === "rejected" ? " \u2715" : "");
+                  (a.status === "rejected" ? " ✕" : "");
     ctx.font = LABEL_FONT;
     const tw = ctx.measureText(label).width + 10;
     const ly = y - 18 < 0 ? y : y - 18;
