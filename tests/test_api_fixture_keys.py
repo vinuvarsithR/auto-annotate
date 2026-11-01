@@ -35,8 +35,10 @@ def test_all_endpoints_match_fixture_keys(tmp_path):
         pid = created["id"]
 
         files = [("files", (f"im{i}.jpg", image_bytes(), "image/jpeg")) for i in range(3)]
+        files.append(("files", ("im0.jpg", image_bytes(), "image/jpeg")))  # -> renamed im0_2.jpg
         files.append(("files", ("notes.txt", b"x", "text/plain")))
         up = c.post(f"/api/projects/{pid}/images", files=files).json()
+        assert up["renamed"] == [{"from": "im0.jpg", "to": "im0_2.jpg"}]
         same_keys(up, FIXTURES["POST /api/projects/1/images"])
         iid = up["images"][0]["id"]
 

@@ -9,10 +9,11 @@ models branch is merged. fake_run behaves like the contract's "fake" detector:
 from __future__ import annotations
 
 import io
+import itertools
 from dataclasses import dataclass
 
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from app.main import create_app
 
@@ -77,9 +78,25 @@ def make_client(tmp_path, pipeline: FakePipeline | None = None,
     return TestClient(app), pipeline
 
 
-def image_bytes(fmt: str = "JPEG", size=(1280, 720)) -> bytes:
+_colour_counter = itertools.count()
+
+
+def image_bytes(fmt: str = "JPEG", size=(1280, 720), colour=None) -> bytes:
+    """A small solid image. Each call gets a new colour (so new bytes, not a #4 duplicate)
+    unless `colour` is given; pass the same colour twice to get identical bytes."""
+    if colour is None:
+        n = next(_colour_counter)
+        colour = (n % 256, (n // 256) % 256, 200)
+    # JPEG can encode nearby colours to the same bytes, so the colour also goes into metadata.
+    tag = f"test-image {colour}"
     buf = io.BytesIO()
-    Image.new("RGB", size, (120, 120, 0)).save(buf, format=fmt)
+    im = Image.new("RGB", size, colour)
+    if fmt == "PNG":
+        info = PngImagePlugin.PngInfo()
+        info.add_text("tag", tag)
+        im.save(buf, format=fmt, pnginfo=info)
+    else:
+        im.save(buf, format=fmt, comment=tag.encode())
     return buf.getvalue()
 
 

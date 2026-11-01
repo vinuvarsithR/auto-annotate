@@ -3,7 +3,9 @@ images.py - endpoints 4-6 (upload, list, download images) and 20 (set review_sta
 
 Upload rules:
 * Only real JPEG / PNG files (checked by opening them with PIL, not just the name).
-* A file name already in the project is skipped as "duplicate".
+* Duplicates are found by content (sha256), not by name (CONTRACT #4):
+  same bytes as an image in the project (or earlier in the same request) -> skipped "duplicate";
+  same name but different bytes -> saved as stem_2.ext (stem_3.ext, ...) and listed in "renamed".
 * Only the base name is kept, so "../../x.jpg" cannot write outside data/uploads.
 """
 
@@ -55,7 +57,7 @@ def upload_images(pid: int, request: Request, files: list[UploadFile] = File(...
     folder = Path(request.app.state.data_dir) / "uploads" / str(pid)
     folder.mkdir(parents=True, exist_ok=True)
 
-    added, skipped = [], []
+    added, skipped, renamed = [], [], []
     for f in files:
         name = safe_name(f.filename)
         data = f.file.read()
@@ -63,30 +65,51 @@ def upload_images(pid: int, request: Request, files: list[UploadFile] = File(...
         if size is None:
             skipped.append({"file_name": name or (f.filename or ""), "reason": "not an image"})
             continue
-        if conn.execute("SELECT 1 FROM images WHERE project_id=? AND file_name=?",
-                        (pid, name)).fetchone():
-            skipped.append({"file_name": name, "reason": "duplicate"})
-            continue
+        digest = db.sha256_hex(data)
 
         target = None
+        conn.execute("BEGIN IMMEDIATE")  # no other upload can take the name/hash meanwhile
         try:
-            with conn:
-                cur = conn.execute(
-                    "INSERT INTO images (project_id, file_name, path, width, height, uploaded_at) "
-                    "VALUES (?, ?, '', ?, ?, ?)",
-                    (pid, name, size[0], size[1], db.now()),
-                )
-                iid = cur.lastrowid
-                target = folder / f"{iid}_{name}"
-                target.write_bytes(data)
-                conn.execute("UPDATE images SET path=? WHERE id=?", (target.as_posix(), iid))
-        except Exception:
+            if conn.execute("SELECT 1 FROM images WHERE project_id=? AND sha256=?",
+                            (pid, digest)).fetchone():
+                conn.rollback()
+                skipped.append({"file_name": name, "reason": "duplicate"})
+                continue
+            final = free_name(conn, pid, name)
+            cur = conn.execute(
+                "INSERT INTO images (project_id, file_name, path, width, height, uploaded_at, "
+                "sha256) VALUES (?, ?, '', ?, ?, ?, ?)",
+                (pid, final, size[0], size[1], db.now(), digest),
+            )
+            iid = cur.lastrowid
+            target = folder / f"{iid}_{final}"
+            target.write_bytes(data)
+            conn.execute("UPDATE images SET path=? WHERE id=?", (target.as_posix(), iid))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
             if target is not None and target.exists():
                 target.unlink()
             raise
+        if final != name:
+            renamed.append({"from": name, "to": final})
         added.append(require_image(conn, iid))
 
-    return {"images": db.images_dicts(conn, added), "skipped": skipped}
+    return {"images": db.images_dicts(conn, added), "skipped": skipped, "renamed": renamed}
+
+
+def free_name(conn: sqlite3.Connection, pid: int, name: str) -> str:
+    """`name` if no image in the project has it, else the first free stem_2.ext, stem_3.ext, ..."""
+    def taken(n: str) -> bool:
+        return conn.execute("SELECT 1 FROM images WHERE project_id=? AND file_name=?",
+                            (pid, n)).fetchone() is not None
+    if not taken(name):
+        return name
+    p = Path(name)
+    k = 2
+    while taken(f"{p.stem}_{k}{p.suffix}"):
+        k += 1
+    return f"{p.stem}_{k}{p.suffix}"
 
 
 @router.get("/projects/{pid}/images")

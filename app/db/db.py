@@ -11,6 +11,7 @@ Plain-English summary
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     | Added | Column                | Old rows get |
     | #20   | images.review_status     | 'todo'       |
     | #21   | images.roboflow_image_id | NULL         |
+    | #4    | images.sha256            | hash of the file at `path` (NULL if the file is missing) |
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
     if "review_status" not in cols:
@@ -70,6 +72,31 @@ def migrate(conn: sqlite3.Connection) -> None:
                      "CHECK (review_status IN ('todo', 'done', 'empty'))")
     if "roboflow_image_id" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN roboflow_image_id TEXT")
+    if "sha256" not in cols:
+        conn.execute("ALTER TABLE images ADD COLUMN sha256 TEXT")
+    backfill_sha256(conn)
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def backfill_sha256(conn: sqlite3.Connection) -> int:
+    """Fill images.sha256 where it is NULL by hashing the file on disk. Returns rows filled.
+
+    Only that column is touched; a missing or unreadable file leaves it NULL (tried again
+    next startup). Old duplicates already in the database are kept as they are.
+    """
+    rows = conn.execute("SELECT id, path FROM images WHERE sha256 IS NULL").fetchall()
+    filled = 0
+    for r in rows:
+        try:
+            digest = sha256_hex(Path(r["path"]).read_bytes())
+        except OSError:
+            continue
+        conn.execute("UPDATE images SET sha256=? WHERE id=?", (digest, r["id"]))
+        filled += 1
+    return filled
 
 
 JOB_KINDS = ("detect", "roboflow_push")

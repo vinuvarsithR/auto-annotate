@@ -157,3 +157,64 @@ def test_roboflow_image_id_not_in_image_json(tmp_path):
         s = setup_project(c, n_images=1)
         img = c.get(f"/api/projects/{s['pid']}/images").json()["images"][0]
         assert "roboflow_image_id" not in img
+
+
+# --- migration: databases made before images.sha256 (#4 duplicate check) ----
+
+def _make_pre_hash_db(path, files):
+    """A database without images.sha256. files: list of (file_name, path on disk)."""
+    old = re.sub(r"\n\s*sha256 +TEXT,[^\n]*", "", db.SCHEMA.read_text(encoding="utf-8"))
+    assert "sha256" not in old and "roboflow_image_id" in old
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(old)
+    conn.execute("INSERT INTO projects (name, created_at) VALUES ('old', 't')")
+    for name, p in files:
+        conn.execute("INSERT INTO images (project_id, file_name, path, width, height, uploaded_at, "
+                     "review_status, roboflow_image_id) VALUES (1, ?, ?, 4, 4, 't', 'done', 'rf1')",
+                     (name, str(p)))
+    conn.commit()
+    conn.close()
+
+
+def test_migrate_backfills_sha256_and_keeps_rows(tmp_path):
+    import hashlib
+    a, b = tmp_path / "a.jpg", tmp_path / "b.jpg"
+    a.write_bytes(b"AAAA")
+    b.write_bytes(b"AAAA")  # an old duplicate: both rows must survive
+    path = tmp_path / "app.db"
+    _make_pre_hash_db(path, [("a.jpg", a), ("b.jpg", b), ("gone.jpg", tmp_path / "gone.jpg")])
+    db.init_db(path)
+    db.init_db(path)  # second run must be a no-op
+    conn = db.connect(path)
+    rows = conn.execute("SELECT * FROM images ORDER BY id").fetchall()
+    want = hashlib.sha256(b"AAAA").hexdigest()
+    assert [(r["file_name"], r["sha256"]) for r in rows] == \
+        [("a.jpg", want), ("b.jpg", want), ("gone.jpg", None)]
+    assert all((r["review_status"], r["roboflow_image_id"], r["width"]) == ("done", "rf1", 4)
+               for r in rows)
+
+
+def test_backfill_retries_file_that_appears_later(tmp_path):
+    late = tmp_path / "late.jpg"
+    path = tmp_path / "app.db"
+    _make_pre_hash_db(path, [("late.jpg", late)])
+    db.init_db(path)
+    late.write_bytes(b"later")
+    db.init_db(path)
+    assert db.connect(path).execute("SELECT sha256 FROM images").fetchone()[0] is not None
+
+
+def test_old_db_upload_of_existing_file_is_duplicate(tmp_path):
+    """After backfill, re-uploading an image the old database already had is skipped."""
+    from tests.test_api_helpers import image_bytes, make_client
+    data = image_bytes(colour=(7, 7, 7))
+    disk = tmp_path / "old.jpg"
+    disk.write_bytes(data)
+    _make_pre_hash_db(tmp_path / "data" / "app.db", [("old.jpg", disk)])
+    with make_client(tmp_path)[0] as c:
+        body = c.post("/api/projects/1/images",
+                      files=[("files", ("renamed_copy.jpg", data, "image/jpeg")),
+                             ("files", ("old.jpg", image_bytes(), "image/jpeg"))]).json()
+        assert body["skipped"] == [{"file_name": "renamed_copy.jpg", "reason": "duplicate"}]
+        assert body["renamed"] == [{"from": "old.jpg", "to": "old_2.jpg"}]
