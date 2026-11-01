@@ -191,8 +191,8 @@ $("projectCreateForm").addEventListener("submit", async (e) => {
   if (!p) return;
   $("projectCreateName").value = "";
   showBanner(`Project "${p.name}" created. Next: upload images.`, "info");
-  showScreen("setup");
-  await loadProjects(p.id);   // opens it; Setup jumps to the first unfinished step (upload)
+  await loadProjects(p.id);   // selects + opens it in the top bar
+  showScreen("setup");        // Setup uses the selected project and opens on step 2 Upload
 });
 
 document.addEventListener("screen-shown", (e) => { if (e.detail === "projects") loadProjectsPage(); });

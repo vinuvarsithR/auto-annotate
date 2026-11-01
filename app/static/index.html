@@ -54,13 +54,20 @@
     </ol>
 
     <section class="step" data-step="1">
-      <h2>Create a project</h2>
-      <form id="createForm" class="row">
-        <input id="newProjectName" type="text" placeholder="New project name, e.g. eot_crane" size="34" aria-label="New project name">
-        <button type="submit" class="primary">Create project</button>
-      </form>
-      <p class="muted">Or pick an existing project in the top bar. The next steps apply to
-        <b id="setupProjectName">-</b> (<span id="setupImageCount" class="num-tab">0</span> images).</p>
+      <div id="currentProject" hidden>
+        <h2>Project: <span id="setupProjectName">-</span></h2>
+        <p class="muted"><span id="setupImageCount" class="num-tab">0</span> images. The next steps apply
+          to this project. Pick another one in the top bar, or
+          <button type="button" id="otherProjectBtn" class="linkish">create a different project</button>.</p>
+      </div>
+      <div id="createBox">
+        <h2>Create a project</h2>
+        <form id="createForm" class="row">
+          <input id="newProjectName" type="text" placeholder="New project name, e.g. eot_crane" size="34" aria-label="New project name">
+          <button type="submit" class="primary">Create project</button>
+        </form>
+        <p class="muted">Or pick an existing project in the top bar.</p>
+      </div>
     </section>
 
     <section class="step" data-step="2" hidden>

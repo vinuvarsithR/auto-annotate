@@ -17,20 +17,38 @@ const setup = {
   lastJob: null,       // last Job seen for this project (step 4 summary)
   savedClasses: 0,     // classes saved on the server for this project
   step: 1,             // step on screen (1-4)
-  autoStep: true,      // pick the first unfinished step once this project's classes are known
   tileUrls: [],        // object URLs of upload thumbnails (revoked on the next upload)
 };
 
 // ------------------------------------------------------------ project
+// Setup always works on the project selected in the top bar (state.project, set by app.js).
 function onProjectOpened(p) {
   const changed = (setup.project && setup.project.id) !== (p && p.id);
   setup.project = p;
-  if (changed) { setup.autoStep = true; setup.lastJob = null; clearTiles(); }
-  $("setupProjectName").textContent = p ? p.name : "(none - create one)";
-  $("setupImageCount").textContent = p ? p.counts.images : 0;
+  if (changed) { setup.lastJob = null; clearTiles(); }
+  renderProjectBox();
   updateButtons();
   if (p) loadClasses(p.id);
-  else { renderClassRows([]); showStep(1); }
+  else renderClassRows([]);
+  // A selected project already covers step 1: go straight to Upload.
+  if (changed) showStep(p ? 2 : 1);
+}
+
+// Step 1: "Project: NAME" when one is selected (with a small "create a different project"
+// link), else the create form.
+function renderProjectBox(showCreate = false) {
+  const p = setup.project;
+  $("currentProject").hidden = !p;
+  $("createBox").hidden = !!p && !showCreate;
+  $("setupProjectName").textContent = p ? p.name : "-";
+  $("setupImageCount").textContent = p ? p.counts.images : 0;
+}
+
+// Opening Setup re-reads the selected project, in case a "project-opened" event was missed.
+function onSetupShown() {
+  const p = state.project && state.project.id === state.projectId ? state.project : null;
+  if ((setup.project && setup.project.id) !== (p && p.id)) onProjectOpened(p);
+  else { renderProjectBox(); showStep(p ? 2 : 1); }
 }
 
 // ------------------------------------------------------------ steps
@@ -64,7 +82,7 @@ function renderStepper() {
     if (k === setup.step) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
     b.querySelector(".num").textContent = k !== setup.step && stepDone(k) ? "\u2713" : String(k);
   });
-  $("sum1").textContent = p ? p.name : "No project";
+  $("sum1").textContent = p ? `Project: ${p.name}` : "No project";
   $("sum2").textContent = p ? `${p.counts.images} image${p.counts.images === 1 ? "" : "s"}` : "-";
   $("sum3").textContent = !p ? "-" : setup.dirty ? "Unsaved changes" :
     `${setup.savedClasses} class${setup.savedClasses === 1 ? "" : "es"}`;
@@ -78,12 +96,6 @@ function renderStepper() {
   $("stepNext").disabled = !p;
   // After a finished run (or when the project already has boxes): straight to review.
   $("openReviewBtn").hidden = !p || !!setup.jobId || !stepDone(4);
-}
-
-// First step that is not done yet (or Run when all are).
-function firstOpenStep() {
-  for (const n of [1, 2, 3]) if (!stepDone(n)) return n;
-  return 4;
 }
 
 async function createProject(ev) {
@@ -199,6 +211,11 @@ async function uploadFiles(list) {
   setup.uploading = false;
   updateButtons();
   if (pid === state.projectId) await openProject(pid); // refresh counts + review image list
+  // Uploads add to the project (same file name = skipped as duplicate); say the new total.
+  if (setup.project && setup.project.id === pid) {
+    const n = setup.project.counts.images;
+    setBar("uploadBar", "uploadText", done / files.length, `${msg} Project now has ${n} image${n === 1 ? "" : "s"}.`);
+  }
 }
 
 // ------------------------------------------------------------ classes
@@ -231,10 +248,7 @@ function renderClassRows(classes) {
 async function loadClasses(pid) {
   const data = await guard(() => api.listClasses(pid));
   if (data && setup.project && setup.project.id === pid) renderClassRows(data.classes);
-  if (setup.project && setup.project.id === pid && setup.autoStep) {
-    setup.autoStep = false;
-    showStep(firstOpenStep());
-  } else renderStepper();
+  renderStepper();
 }
 
 function setDirty(on) {
@@ -360,6 +374,8 @@ function updateButtons() {
 
 // ------------------------------------------------------------ wiring
 $("createForm").addEventListener("submit", createProject);
+$("otherProjectBtn").addEventListener("click", () => { renderProjectBox(true); $("newProjectName").focus(); });
+document.addEventListener("screen-shown", (e) => { if (e.detail === "setup") onSetupShown(); });
 $("fileInput").addEventListener("change", (e) => {
   const files = Array.from(e.target.files || []);
   e.target.value = "";

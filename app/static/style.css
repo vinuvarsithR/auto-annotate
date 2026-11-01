@@ -419,3 +419,6 @@ table.grid .c-del:hover { color: var(--rejected); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Setup step 1: small text-style button ("create a different project") */
+button.linkish { border: 0; background: none; padding: 0; height: auto; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
