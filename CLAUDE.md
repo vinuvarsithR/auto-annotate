@@ -8,11 +8,33 @@ setup and layout. This file holds the working rules, current state and next step
 - Build in phases. Before each phase: a short plan + files to create, then WAIT for OK.
   Stop after each phase and wait for approval.
 - Explain each step in plain English. Keep it short; use tables where they help.
-- Write tests for evaluation and export code. Run `pytest` before saying anything works.
-- Always say whether something is VERIFIED or a GUESS (model names, versions, VRAM, accuracy).
-- Don't add features that weren't asked for. Propose them and wait for OK instead.
-- Roboflow key lives in `.env` as ROBOFLOW_API_KEY. Never print, log or commit it.
-- Placeholders in commands: write `YOUR_VERSION`, never `<N>` (bash reads `<` as a redirect).
+
+## Rules for every session
+
+1. **Start:** `git branch --show-current`, stop if it isn't your branch. `git status`, stop if
+   not clean. Then `git merge --no-edit main`.
+2. **Ownership.** Never edit files you don't own. Need a change elsewhere: write a contract
+   change request in `docs/agents/YOUR_ROLE.md` and stop that part.
+
+   | Role | Owns |
+   |---|---|
+   | integrator | docs/CONTRACT.md, CLAUDE.md, requirements.txt, docs/fixtures/, merges |
+   | backend | app/api/, app/db/, app/worker/, app/main.py + their tests |
+   | ui | app/static/ |
+   | models | autolabel/models/, autolabel/pipeline.py |
+   | export | autolabel/export/, app/api/export.py + their tests |
+3. **Scope:** build only what docs/CONTRACT.md says. No extra features: propose them and wait for OK.
+4. **Tests:** evaluation, backend and export code need tests. Run them with
+   `D:\autoannotate\auto-annotate\.venv\Scripts\python.exe -m pytest` (worktrees have no .venv).
+   All must pass before committing, and before saying anything works.
+5. **Commits:** on your own branch only. Never merge into main; the integrator does that
+   (`git merge --no-edit YOUR_BRANCH`, pytest, `git push --all`).
+6. **App:** run it on a free port, not 8000 or 8001: `uvicorn app.main:app --port YOUR_PORT`.
+7. **Roboflow:** the key lives only in `.env` as ROBOFLOW_API_KEY; never print, log or commit
+   it. Use the Python SDK, not the Roboflow connector.
+8. **Placeholders** in commands look like `YOUR_VERSION`, never `<N>` (bash reads `<` as a redirect).
+9. **Report** in at most 5 lines + commit hash. Say VERIFIED vs GUESS (model names, versions,
+   VRAM, accuracy).
 
 ## Machine (verified 2026-10-30)
 
