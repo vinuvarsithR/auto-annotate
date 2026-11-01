@@ -53,6 +53,7 @@
     "height": 720,
     "url": "/api/images/10/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "todo",
     "counts": {
      "auto_accepted": 1,
      "needs_review": 1,
@@ -69,6 +70,7 @@
     "height": 720,
     "url": "/api/images/11/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "done",
     "counts": {
      "auto_accepted": 0,
      "needs_review": 0,
@@ -85,6 +87,7 @@
     "height": 720,
     "url": "/api/images/12/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "todo",
     "counts": {
      "auto_accepted": 1,
      "needs_review": 1,
@@ -111,6 +114,7 @@
     "height": 720,
     "url": "/api/images/10/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "todo",
     "counts": {
      "auto_accepted": 1,
      "needs_review": 1,
@@ -127,6 +131,7 @@
     "height": 720,
     "url": "/api/images/11/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "done",
     "counts": {
      "auto_accepted": 0,
      "needs_review": 0,
@@ -143,6 +148,7 @@
     "height": 720,
     "url": "/api/images/12/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "todo",
     "counts": {
      "auto_accepted": 1,
      "needs_review": 1,
@@ -166,6 +172,7 @@
     "height": 720,
     "url": "/api/images/10/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "todo",
     "counts": {
      "auto_accepted": 1,
      "needs_review": 1,
@@ -182,6 +189,7 @@
     "height": 720,
     "url": "/api/images/12/file",
     "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "todo",
     "counts": {
      "auto_accepted": 1,
      "needs_review": 1,
@@ -340,6 +348,7 @@
    "height": 720,
    "url": "/api/images/10/file",
    "uploaded_at": "2026-10-30T14:01:00Z",
+   "review_status": "todo",
    "counts": {
     "auto_accepted": 1,
     "needs_review": 1,
@@ -420,6 +429,7 @@
    "height": 720,
    "url": "/api/images/11/file",
    "uploaded_at": "2026-10-30T14:01:00Z",
+   "review_status": "done",
    "counts": {
     "auto_accepted": 0,
     "needs_review": 0,
@@ -500,6 +510,7 @@
    "height": 720,
    "url": "/api/images/12/file",
    "uploaded_at": "2026-10-30T14:01:00Z",
+   "review_status": "todo",
    "counts": {
     "auto_accepted": 1,
     "needs_review": 1,
@@ -690,6 +701,65 @@
   "error": {
    "code": "conflict",
    "message": "project 1 has a running job"
+  }
+ },
+ "GET /api/projects/1/images?review_status=done": {
+  "images": [
+   {
+    "id": 11,
+    "project_id": 1,
+    "file_name": "biax__cam0_2026-09-29_18-48-25_00290.jpg",
+    "width": 1280,
+    "height": 720,
+    "url": "/api/images/11/file",
+    "uploaded_at": "2026-10-30T14:01:00Z",
+    "review_status": "done",
+    "counts": {
+     "auto_accepted": 0,
+     "needs_review": 0,
+     "accepted": 2,
+     "rejected": 0,
+     "edited": 1
+    }
+   }
+  ],
+  "total": 1,
+  "offset": 0,
+  "limit": 50
+ },
+ "PATCH /api/images/10": {
+  "id": 10,
+  "project_id": 1,
+  "file_name": "rb_load__cam0_2026-09-29_18-34-11_00049.jpg",
+  "width": 1280,
+  "height": 720,
+  "url": "/api/images/10/file",
+  "uploaded_at": "2026-10-30T14:01:00Z",
+  "review_status": "done",
+  "counts": {
+   "auto_accepted": 1,
+   "needs_review": 1,
+   "accepted": 0,
+   "rejected": 1,
+   "edited": 0
+  }
+ },
+ "error example (409 conflict, #20 empty with boxes)": {
+  "error": {
+   "code": "conflict",
+   "message": "image 10 has 2 boxes that are not rejected"
+  }
+ },
+ "error example (409 conflict, #12 box on empty image)": {
+  "error": {
+   "code": "conflict",
+   "message": "image 13 is marked empty; set review_status to todo first"
+  }
+ },
+ "error example (400 bad review_status)": {
+  "error": {
+   "code": "bad_request",
+   "message": "review_status must be one of todo, done, empty"
   }
  },
  "all_annotations": [

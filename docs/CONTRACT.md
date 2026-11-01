@@ -37,6 +37,8 @@ CREATE TABLE images (
   width        INTEGER NOT NULL,
   height       INTEGER NOT NULL,
   uploaded_at  TEXT NOT NULL,
+  review_status TEXT NOT NULL DEFAULT 'todo'
+                CHECK (review_status IN ('todo', 'done', 'empty')),  -- set only by #20
   UNIQUE (project_id, file_name)
 );
 
@@ -102,6 +104,19 @@ bbox / mask / class change make the box `edited`.
 A new `detect` job on an image deletes that image's earlier **model** boxes that are
 still `auto_accepted` or `needs_review`. It never touches human-reviewed rows.
 
+Image review status (`images.review_status`):
+
+| Value | Meaning |
+|---|---|
+| `todo` | not checked yet (default for new images and for rows that existed before this column) |
+| `done` | a reviewer checked the image |
+| `empty` | a reviewer checked it and there is nothing to label |
+
+Only #20 changes `review_status`; nothing changes it automatically. `empty` needs every box of
+the image to be `rejected` (#20 -> 409 `conflict` otherwise), and #12 on an `empty` image ->
+409 `conflict`. A detect job (#9) or an undo (#13) may still add boxes to an `empty` image; it
+stays `empty`. The backend adds the column on startup (`ALTER TABLE ... DEFAULT 'todo'`) if missing.
+
 ---
 
 ## 2. REST API
@@ -127,7 +142,7 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 405 | `method_not_allowed` | wrong HTTP method for the path |
 | 409 | `name_taken` | project name already used (#1 create, #17 rename) |
 | 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
-| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18) |
+| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12) |
 | 500 | `internal_error` | unexpected server error (details only in the server log) |
 
 | # | Method | Path | Purpose |
@@ -151,6 +166,7 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 17 | PATCH | `/projects/{pid}` | rename project |
 | 18 | DELETE | `/projects/{pid}` | delete project and everything in it |
 | 19 | DELETE | `/annotations/{aid}` | hard-delete one box |
+| 20 | PATCH | `/images/{iid}` | set image review status |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -175,12 +191,16 @@ Response 201:
 **Image**:
 ```json
 {"id": 10, "project_id": 1, "file_name": "biax__cam0_2026-09-29_18-48-25_00290.jpg", "width": 1280, "height": 720,
- "url": "/api/images/10/file", "uploaded_at": "2026-10-30T14:01:00Z",
+ "url": "/api/images/10/file", "uploaded_at": "2026-10-30T14:01:00Z", "review_status": "todo",
  "counts": {"auto_accepted": 2, "needs_review": 1, "accepted": 0, "rejected": 0, "edited": 0}}
 ```
+`review_status` is `todo`, `done` or `empty` (section 1). Every response that contains an Image
+(#4, #5, #11, #20) has it.
 
-### 5. GET /projects/{pid}/images?status=needs_review&offset=0&limit=50
+### 5. GET /projects/{pid}/images?status=needs_review&review_status=todo&offset=0&limit=50
 `status` is optional. When given, only images with at least one box in that status are returned.
+`review_status` is optional and takes one value. When given, only images with that review status
+are returned; an unknown value is 400 `bad_request`. If both filters are given, both must match.
 Response `{"images": [Image, ...], "total": 47, "offset": 0, "limit": 50}`.
 
 ### 6. GET /images/{iid}/file
@@ -231,6 +251,7 @@ Response `{"image": Image, "annotations": [Annotation, ...]}`. **Annotation**:
 ### 12. POST /images/{iid}/annotations
 Request `{"class_id": 1, "bbox": [100, 200, 40, 50], "mask": null, "reviewer": "dhyan"}`.
 Response 201 is an Annotation with `source: "human"`, `score: null` and `status: "accepted"`.
+If the image's `review_status` is `empty` -> 409 `conflict` (set it back to `todo` with #20 first).
 
 ### 13. PATCH /annotations/{aid}
 Every field is optional. The status rules from section 1 apply. `status` may be any of the 5
@@ -255,6 +276,7 @@ Request:
 ```
 `format` is `coco` or `yolo`. The response is a `application/zip` download named
 `<project>_<format>.zip`.
+An image with `review_status: "empty"` is exported with no annotations.
 Route rule: `app/api/export.py` defines `router = APIRouter()` with the path
 `/projects/{pid}/export` (no `/api`); `app/main.py` mounts it under `/api` when the module exists.
 The zip layout is defined by the export session in `autolabel/export/`
@@ -300,6 +322,20 @@ No body. Response **204** with an empty body. Allowed for any box, whatever its 
 (undoing "draw box" or "repeat previous" must remove the boxes it created). Unknown aid -> 404
 `not_found`. The UI itself only hard-deletes human boxes (`source: "human"`); for model boxes
 "Delete" still sends #13 `{"status": "rejected"}` so they keep counting toward precision.
+
+### 20. PATCH /images/{iid}
+Set the image review status. Owner: backend.
+```json
+{"review_status": "empty", "reviewer": "dhyan"}
+{"review_status": "done"}
+{"review_status": "todo"}
+```
+`review_status` is required: `todo`, `done` or `empty`. `reviewer` is optional and is accepted
+but not stored for now (the `images` table has no reviewer column). Response 200 is the updated
+Image. Any value may be set at any time, except `empty` while the image has a box that is not
+`rejected` -> 409 `conflict` and nothing changes. `done` is allowed with boxes still
+`needs_review`. Errors: missing or unknown `review_status`, or a bad body -> 400 `bad_request`;
+unknown iid -> 404 `not_found`. Setting the current value again is a no-op 200.
 
 ---
 
