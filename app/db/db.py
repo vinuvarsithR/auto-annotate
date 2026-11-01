@@ -19,6 +19,8 @@ from pathlib import Path
 SCHEMA = Path(__file__).with_name("schema.sql")
 
 STATUSES = ("auto_accepted", "needs_review", "accepted", "rejected", "edited")
+REVIEW_STATUSES = ("todo", "done", "empty")  # images.review_status, set only by #20
+BAD_REVIEW_STATUS = "review_status must be one of " + ", ".join(REVIEW_STATUSES)
 MODEL_PENDING = ("auto_accepted", "needs_review")  # model boxes a new job may replace
 
 _CHUNK = 500  # stay well under SQLite's limit on '?' parameters
@@ -48,9 +50,22 @@ def init_db(db_path: str | Path) -> None:
         ).fetchone()
         if not exists:
             conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+        migrate(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database made by an older version up to schema.sql. Never deletes data.
+
+    | Added | Column                | Old rows get |
+    | #20   | images.review_status  | 'todo'       |
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
+    if "review_status" not in cols:
+        conn.execute("ALTER TABLE images ADD COLUMN review_status TEXT NOT NULL DEFAULT 'todo' "
+                     "CHECK (review_status IN ('todo', 'done', 'empty'))")
 
 
 def fail_stale_jobs(conn: sqlite3.Connection) -> int:
@@ -112,6 +127,7 @@ def image_dict(row: sqlite3.Row, counts: dict[str, int] | None = None) -> dict:
         "id": row["id"], "project_id": row["project_id"], "file_name": row["file_name"],
         "width": row["width"], "height": row["height"],
         "url": f"/api/images/{row['id']}/file", "uploaded_at": row["uploaded_at"],
+        "review_status": row["review_status"],
         "counts": counts if counts is not None else zero_counts(),
     }
 

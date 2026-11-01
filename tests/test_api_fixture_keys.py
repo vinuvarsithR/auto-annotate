@@ -87,6 +87,24 @@ def test_all_endpoints_match_fixture_keys(tmp_path):
 
         same_keys(c.get("/api/models").json(), FIXTURES["GET /api/models"])
 
+        # #20 and the review_status filter / errors
+        bad = c.patch(f"/api/images/{iid}", json={"review_status": "finished"}).json()
+        same_keys(bad, FIXTURES["error example (400 bad review_status)"])
+        assert bad == FIXTURES["error example (400 bad review_status)"]
+        same_keys(c.patch(f"/api/images/{iid}", json={"review_status": "empty"}).json(),
+                  FIXTURES["error example (409 conflict, #20 empty with boxes)"])
+        same_keys(c.patch(f"/api/images/{iid}", json={"review_status": "done", "reviewer": "dhyan"})
+                  .json(), FIXTURES["PATCH /api/images/10"])
+        same_keys(c.get(f"/api/projects/{pid}/images", params={"review_status": "done"}).json(),
+                  FIXTURES["GET /api/projects/1/images?review_status=done"])
+        empty_iid = up["images"][2]["id"]
+        for a in c.get(f"/api/images/{empty_iid}/annotations").json()["annotations"]:
+            c.patch(f"/api/annotations/{a['id']}", json={"status": "rejected"})
+        assert c.patch(f"/api/images/{empty_iid}", json={"review_status": "empty"}).status_code == 200
+        same_keys(c.post(f"/api/images/{empty_iid}/annotations",
+                         json={"class_id": cid, "bbox": [1, 2, 3, 4]}).json(),
+                  FIXTURES["error example (409 conflict, #12 box on empty image)"])
+
         same_keys(c.patch(f"/api/projects/{pid}", json={"name": "eot_crane_v2"}).json(),
                   FIXTURES["PATCH /api/projects/1"])
 

@@ -1,5 +1,6 @@
-"""Tests for app/db/db.py: tables, foreign keys, stale jobs."""
+"""Tests for app/db/db.py: tables, foreign keys, stale jobs, migration."""
 
+import re
 import sqlite3
 
 import pytest
@@ -49,3 +50,54 @@ def test_fail_stale_jobs(tmp_path):
 def test_now_format():
     t = db.now()
     assert len(t) == 20 and t.endswith("Z") and t[10] == "T"
+
+
+# --- migration: databases made before images.review_status (#20) ------------
+
+def _make_old_db(path):
+    """A database with the schema as it was before review_status, holding one image."""
+    old = re.sub(r"\n\s*review_status TEXT[^\n]*\n[^\n]*-- set only by #20", "",
+                 db.SCHEMA.read_text(encoding="utf-8"))
+    assert "review_status" not in old
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(old)
+    conn.execute("INSERT INTO projects (name, created_at) VALUES ('old', 't')")
+    conn.execute("INSERT INTO images (project_id, file_name, path, width, height, uploaded_at) "
+                 "VALUES (1, 'a.jpg', 'p/a.jpg', 1280, 720, 't')")
+    conn.commit()
+    conn.close()
+
+
+def test_migrate_adds_review_status_and_keeps_rows(tmp_path):
+    path = tmp_path / "app.db"
+    _make_old_db(path)
+    db.init_db(path)
+    db.init_db(path)  # second run must be a no-op
+    conn = db.connect(path)
+    row = conn.execute("SELECT * FROM images").fetchone()
+    assert (row["file_name"], row["width"], row["review_status"]) == ("a.jpg", 1280, "todo")
+    assert conn.execute("SELECT name FROM projects").fetchone()[0] == "old"
+    with pytest.raises(sqlite3.IntegrityError):  # CHECK constraint came along
+        conn.execute("UPDATE images SET review_status='weird'")
+
+
+def test_new_db_review_status_default_and_check(tmp_path):
+    db.init_db(tmp_path / "app.db")
+    conn = db.connect(tmp_path / "app.db")
+    conn.execute("INSERT INTO projects (name, created_at) VALUES ('p', 't')")
+    conn.execute("INSERT INTO images (project_id, file_name, path, width, height, uploaded_at)"
+                 " VALUES (1, 'a.jpg', 'p', 1, 1, 't')")
+    assert conn.execute("SELECT review_status FROM images").fetchone()[0] == "todo"
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE images SET review_status='weird'")
+
+
+def test_old_db_app_starts_and_serves_review_status(tmp_path):
+    from tests.test_api_helpers import make_client
+    _make_old_db(tmp_path / "data" / "app.db")
+    with make_client(tmp_path)[0] as c:
+        imgs = c.get("/api/projects/1/images").json()["images"]
+        assert [(i["file_name"], i["review_status"]) for i in imgs] == [("a.jpg", "todo")]
+        assert c.patch(f"/api/images/{imgs[0]['id']}",
+                       json={"review_status": "done"}).json()["review_status"] == "done"

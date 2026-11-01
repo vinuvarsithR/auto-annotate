@@ -79,7 +79,12 @@ def add_annotation(iid: int, body: AnnotationIn, conn: sqlite3.Connection = Depe
     _require_class_in_project(conn, body.class_id, image["project_id"])
     x, y, w, h = body.bbox
     t = db.now()
+    conn.execute("BEGIN IMMEDIATE")  # #20 cannot mark the image empty between check and insert
     with conn:
+        if conn.execute("SELECT review_status FROM images WHERE id=?",
+                        (iid,)).fetchone()[0] == "empty":
+            raise ApiError(409, "conflict",
+                           f"image {iid} is marked empty; set review_status to todo first")
         cur = conn.execute(
             "INSERT INTO annotations (image_id, class_id, x, y, w, h, mask, score, source, status, "
             "job_id, reviewer, created_at, updated_at) "

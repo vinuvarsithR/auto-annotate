@@ -14,6 +14,8 @@ CREATE TABLE images (
   width        INTEGER NOT NULL,
   height       INTEGER NOT NULL,
   uploaded_at  TEXT NOT NULL,
+  review_status TEXT NOT NULL DEFAULT 'todo'
+                CHECK (review_status IN ('todo', 'done', 'empty')),  -- set only by #20
   UNIQUE (project_id, file_name)
 );
 

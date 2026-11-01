@@ -1,5 +1,5 @@
 """
-images.py - endpoints 4-6: upload, list and download images.
+images.py - endpoints 4-6 (upload, list, download images) and 20 (set review_status).
 
 Upload rules:
 * Only real JPEG / PNG files (checked by opening them with PIL, not just the name).
@@ -17,6 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel
 
 from app.api.deps import get_conn, require_image, require_project
 from app.api.errors import ApiError
@@ -89,23 +90,58 @@ def upload_images(pid: int, request: Request, files: list[UploadFile] = File(...
 
 
 @router.get("/projects/{pid}/images")
-def list_images(pid: int, status: str | None = None,
+def list_images(pid: int, status: str | None = None, review_status: str | None = None,
                 offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=1000),
                 conn: sqlite3.Connection = Depends(get_conn)):
     require_project(conn, pid)
     if status is not None and status not in db.STATUSES:
         raise ApiError(400, "bad_request", f"unknown status '{status}'")
+    if review_status is not None and review_status not in db.REVIEW_STATUSES:
+        raise ApiError(400, "bad_request", db.BAD_REVIEW_STATUS)
     where = "WHERE i.project_id=?"
     args: list = [pid]
     if status is not None:
         where += (" AND EXISTS (SELECT 1 FROM annotations a "
                   "WHERE a.image_id = i.id AND a.status = ?)")
         args.append(status)
+    if review_status is not None:
+        where += " AND i.review_status = ?"
+        args.append(review_status)
     total = conn.execute(f"SELECT COUNT(*) FROM images i {where}", args).fetchone()[0]
     rows = conn.execute(f"SELECT i.* FROM images i {where} ORDER BY i.id LIMIT ? OFFSET ?",
                         args + [limit, offset]).fetchall()
     return {"images": db.images_dicts(conn, rows), "total": total,
             "offset": offset, "limit": limit}
+
+
+class ImagePatch(BaseModel):
+    review_status: str               # checked below, so a bad value gets the contract message
+    reviewer: str | None = None      # accepted, not stored (images has no reviewer column)
+
+
+@router.patch("/images/{iid}")
+def patch_image(iid: int, body: ImagePatch, conn: sqlite3.Connection = Depends(get_conn)):
+    """#20: set review_status. `empty` only if every box of the image is rejected.
+
+    BEGIN IMMEDIATE so no box can be added between the check and the update.
+    """
+    if body.review_status not in db.REVIEW_STATUSES:
+        raise ApiError(400, "bad_request", db.BAD_REVIEW_STATUS)
+    require_image(conn, iid)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if body.review_status == "empty":
+            n = conn.execute("SELECT COUNT(*) FROM annotations WHERE image_id=? "
+                             "AND status != 'rejected'", (iid,)).fetchone()[0]
+            if n:
+                raise ApiError(409, "conflict",
+                               f"image {iid} has {n} boxes that are not rejected")
+        conn.execute("UPDATE images SET review_status=? WHERE id=?", (body.review_status, iid))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return db.images_dicts(conn, [require_image(conn, iid)])[0]
 
 
 @router.get("/images/{iid}/file")
