@@ -2,9 +2,14 @@
 roboflow_push.py - the Roboflow part of CONTRACT #21, using the roboflow Python SDK
 (never the Roboflow MCP connector).
 
-    settings, missing = roboflow_settings()      # reads .env; missing = names, never values
-    project = open_project(settings)             # once per job
-    rf_id = push_image(project, image, path, classes, annotations, batch_name(), statuses)
+The backend worker does the loop (which images, skipping pushed ones, saving ids).
+This module only provides:
+
+    settings = roboflow_settings()     # RoboflowSettings, or the list of missing .env names
+    rf_id = push_image(settings, image, boxes, class_names, batch_name)
+
+`image` = {"id", "file_name", "path", "width", "height"}; `boxes` = [{"class_name", "bbox"}]
+(already filtered by the worker; an empty list = image with no labels).
 
 The key is never printed, logged or put into an error: SDK output is swallowed and every
 SDK error becomes a one-line PushError with the key replaced by `***`.
@@ -20,12 +25,8 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Mapping
-
-from autolabel.export.formats import to_coco
-from autolabel.export.select import validate_statuses
 
 log = logging.getLogger(__name__)
 
@@ -47,11 +48,11 @@ class RoboflowSettings:
 
 def roboflow_settings(
     env: Mapping[str, str] | None = None, dotenv_path: Path | None = None
-) -> tuple[RoboflowSettings | None, list[str]]:
+) -> RoboflowSettings | list[str]:
     """
     Read the 3 settings. `env` defaults to os.environ after loading `.env` from the repo
-    root (existing environment variables win). Returns (settings, []) or (None, missing
-    names). Only names are reported, never values.
+    root (existing environment variables win). Returns RoboflowSettings, or the list of
+    missing names (names only, never values).
     """
     if env is None:
         try:
@@ -64,21 +65,12 @@ def roboflow_settings(
     values = {n: (env.get(n) or "").strip() for n in ENV_NAMES}
     missing = [n for n in ENV_NAMES if not values[n]]
     if missing:
-        return None, missing
-    return (
-        RoboflowSettings(
-            workspace=values["ROBOFLOW_WORKSPACE"],
-            project=values["ROBOFLOW_PROJECT"],
-            api_key=values["ROBOFLOW_API_KEY"],
-        ),
-        [],
+        return missing
+    return RoboflowSettings(
+        workspace=values["ROBOFLOW_WORKSPACE"],
+        project=values["ROBOFLOW_PROJECT"],
+        api_key=values["ROBOFLOW_API_KEY"],
     )
-
-
-def batch_name(now: datetime | None = None) -> str:
-    """`autolabel_<YYYY-MM-DD>` for the job start (UTC)."""
-    now = now or datetime.now(timezone.utc)
-    return f"autolabel_{now.astimezone(timezone.utc):%Y-%m-%d}"
 
 
 def safe_message(exc: BaseException, secrets: list[str]) -> str:
@@ -87,8 +79,7 @@ def safe_message(exc: BaseException, secrets: list[str]) -> str:
     for s in secrets:
         if s:
             msg = msg.replace(s, "***")
-    msg = " ".join(msg.split())
-    return msg[:MAX_ERROR_LEN]
+    return " ".join(msg.split())[:MAX_ERROR_LEN]
 
 
 @contextlib.contextmanager
@@ -104,59 +95,71 @@ def _quiet_sdk(secrets: list[str], what: str):
         raise PushError(f"{what} failed: {safe_message(e, secrets)}") from None
 
 
-def open_project(settings: RoboflowSettings):
-    """Open the Roboflow project with the SDK (one network call; do it once per job)."""
-    with _quiet_sdk([settings.api_key], "opening Roboflow project"):
-        from roboflow import Roboflow
+# One SDK project per settings, so a push job opens the project once, not per image.
+_projects: dict[tuple[str, str, str], object] = {}
 
-        rf = Roboflow(api_key=settings.api_key)
-        return rf.workspace(settings.workspace).project(settings.project)
+
+def _project(settings: RoboflowSettings):
+    k = (settings.api_key, settings.workspace, settings.project)
+    if k not in _projects:
+        with _quiet_sdk([settings.api_key], "opening Roboflow project"):
+            from roboflow import Roboflow
+
+            rf = Roboflow(api_key=settings.api_key)
+            _projects[k] = rf.workspace(settings.workspace).project(settings.project)
+    return _projects[k]
+
+
+def coco_for_image(image: dict, boxes: list[dict], class_names: list[str]) -> dict:
+    """One-image COCO dict; categories 1-based in class_names order."""
+    idx = {n: i for i, n in enumerate(class_names)}
+    anns = []
+    for i, b in enumerate(boxes, start=1):
+        if b["class_name"] not in idx:
+            raise PushError(f"image {image['id']}: unknown class {b['class_name']!r}")
+        x, y, w, h = (float(v) for v in b["bbox"])
+        anns.append({"id": i, "image_id": 1, "category_id": idx[b["class_name"]] + 1,
+                     "bbox": [x, y, w, h], "area": w * h, "iscrowd": 0, "segmentation": []})
+    return {
+        "images": [{"id": 1, "file_name": image["file_name"],
+                    "width": image["width"], "height": image["height"]}],
+        "categories": [{"id": i + 1, "name": n} for i, n in enumerate(class_names)],
+        "annotations": anns,
+    }
 
 
 def push_image(
-    project,
+    settings: RoboflowSettings,
     image: dict,
-    path: str | os.PathLike,
-    classes: list[dict],
-    annotations: list[dict],
-    batch: str,
-    statuses: list[str] | None = None,
-    secrets: list[str] | None = None,
+    boxes: list[dict],
+    class_names: list[str],
+    batch_name: str,
 ) -> str:
     """
-    Upload one image and its boxes; return the Roboflow image id.
-
-    - `project`: from open_project (an SDK Project).
-    - `image`: Image JSON; must be review_status done or empty. If it already has a
-      `roboflow_image_id`, nothing is uploaded and that id is returned.
-    - `path`: the image file on disk. It is uploaded under its original `file_name`.
-    - boxes follow the #14 rules (same `statuses`, never `rejected`); an `empty` image
-      is uploaded with a COCO file that has no boxes.
-    - `secrets`: strings to scrub from errors (pass the API key).
-    Raises PushError (one line, key-free) on any failure.
+    Upload one image with its boxes to Roboflow; return the Roboflow image id.
+    The file at image["path"] is uploaded under its original image["file_name"], with a
+    one-image COCO annotation (no boxes for an empty list). Raises PushError (one line,
+    key-free) on any failure.
     """
-    if image.get("roboflow_image_id"):
-        return str(image["roboflow_image_id"])
-    if image.get("review_status") not in ("done", "empty"):
-        raise PushError(f"image {image['id']} is not done/empty")
-    statuses = validate_statuses(statuses)
-    secrets = list(secrets or [])
-
-    coco = to_coco([image], classes, annotations, statuses)
-    coco["images"][0]["file_name"] = image["file_name"]
+    secrets = [settings.api_key]
+    project = _project(settings)
+    coco = coco_for_image(image, boxes, class_names)
     stem = PurePosixPath(image["file_name"]).stem
     ann = {"name": f"{stem}.json", "rawText": json.dumps(coco)}
 
     with tempfile.TemporaryDirectory() as tmp:
         # Roboflow names the image after the uploaded file; the file on disk is
         # `<id>_<file_name>`, so copy it to its original name first.
-        upload_path = Path(tmp) / image["file_name"]
-        shutil.copyfile(path, upload_path)
+        upload_path = Path(tmp) / PurePosixPath(image["file_name"]).name
+        try:
+            shutil.copyfile(image["path"], upload_path)
+        except OSError as e:
+            raise PushError(f"image {image['id']}: file not readable ({type(e).__name__})") from None
         with _quiet_sdk(secrets, f"uploading image {image['id']}"):
             result = project.single_upload(
                 image_path=str(upload_path),
                 annotation_path=ann,
-                batch_name=batch,
+                batch_name=batch_name,
                 annotation_overwrite=True,
             )
 

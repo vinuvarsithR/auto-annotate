@@ -9,9 +9,9 @@ and `tests/test_export_roboflow.py` (SDK mocked, no network).
 
 | Module | What |
 |---|---|
-| `select.py` | `validate_statuses` (None -> approved default; `rejected`/unknown/empty -> ValueError), `exportable_images` (done/empty), `pending_push_images` (+ no `roboflow_image_id`), `boxes_for_image` (empty image -> no boxes, never `rejected`), `NothingToExport` |
+| `select.py` | `validate_statuses` (None -> approved default; `rejected`/unknown/empty -> ValueError), `exportable_images` (done/empty), `boxes_for_image` (empty image -> no boxes, never `rejected`), `NothingToExport` |
 | `formats.py` | `to_coco`, `to_yolo`, `build_zip(fmt, images, classes, annotations, statuses=None, image_bytes=None) -> bytes` |
-| `roboflow_push.py` | `roboflow_settings(env=None) -> (settings or None, missing names)`, `batch_name()`, `open_project(settings)`, `push_image(project, image, path, classes, annotations, batch, statuses=None, secrets=None) -> roboflow id`, `PushError` |
+| `roboflow_push.py` | `roboflow_settings() -> RoboflowSettings or list of missing names`, `push_image(settings, image, boxes, class_names, batch_name) -> roboflow id`, `PushError` |
 
 Zip layout (#14):
 
@@ -26,19 +26,12 @@ Zip layout (#14):
   boxes fully outside are dropped.
 - Two exported images with the same stem: later ones get `<image id>_` in front of the name.
 
-How backend B2 (worker) should call the push (one SDK project per job):
-```python
-settings, missing = roboflow_settings()          # missing -> fail with the names only
-project = open_project(settings)                 # raises PushError (key-free)
-batch = batch_name()                             # job start, UTC
-for image in pending_push_images(images):        # Image JSON (+ roboflow_image_id)
-    rf_id = push_image(project, image, image_row_path, classes, annotations, batch,
-                       statuses=config["statuses"], secrets=[settings.api_key])
-    # save rf_id in images.roboflow_image_id, update done/progress
-# on PushError: job failed, error = str(exc) (one line, key replaced by ***)
-```
-`push_image` uploads the file under its original `file_name` (copies it to a temp dir), with a
-one-image COCO annotation (`annotation_overwrite=True`), and swallows SDK stdout/stderr.
+#21 push (changed 2026-11-01): the backend worker does the loop (selection, skipping pushed
+images, saving ids). `push_image(settings, image, boxes, class_names, batch_name)` only uploads one
+image: `image` = {id, file_name, path, width, height}, `boxes` = [{class_name, bbox}]. It uploads the
+file under its original `file_name` (temp copy) with a one-image COCO annotation
+(`annotation_overwrite=True`), opens the SDK project once per settings (cached), swallows SDK
+stdout/stderr, and raises a one-line key-free `PushError`. `RoboflowSettings` hides the key in repr.
 
 ## Packages needed
 - roboflow==1.7.3 (already pinned by integrator). `single_upload(image_path, annotation_path={"name","rawText"}, batch_name, annotation_overwrite)` checked in the installed 1.7.3 source: VERIFIED.

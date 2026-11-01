@@ -1,6 +1,6 @@
 """
 select.py - which images and boxes get exported / pushed (CONTRACT section 1,
-"Export / push rules").
+"Export / push rules"; the worker applies the same rules for #21 itself).
 
 Everything works on the API JSON shapes (Image, Class, Annotation dicts).
 """
@@ -41,14 +41,6 @@ def validate_statuses(statuses: list[str] | None) -> list[str]:
 def exportable_images(images: list[dict]) -> list[dict]:
     """Images with review_status done or empty, in the given order."""
     return [im for im in images if im.get("review_status") in EXPORT_REVIEW_STATUSES]
-
-
-def pending_push_images(images: list[dict]) -> list[dict]:
-    """
-    Exportable images that were not pushed to Roboflow yet (#21 `total`).
-    An image counts as pushed when its dict has a non-empty `roboflow_image_id`.
-    """
-    return [im for im in exportable_images(images) if not im.get("roboflow_image_id")]
 
 
 def boxes_for_image(image: dict, annotations: list[dict], statuses: list[str]) -> list[dict]:

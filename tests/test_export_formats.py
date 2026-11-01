@@ -12,7 +12,6 @@ from autolabel.export import (
     APPROVED_STATUSES,
     NothingToExport,
     build_zip,
-    pending_push_images,
     to_coco,
     to_yolo,
     validate_statuses,
@@ -48,12 +47,6 @@ def test_validate_statuses_default_and_rules():
     for bad in (["rejected"], ["accepted", "rejected"], ["nope"], [], "accepted"):
         with pytest.raises(ValueError):
             validate_statuses(bad)
-
-
-def test_pending_push_images_skips_todo_and_pushed(data):
-    images, _, _ = data
-    images[1]["roboflow_image_id"] = "abc"   # image 11 already pushed
-    assert [im["id"] for im in pending_push_images(images)] == [12]
 
 
 # ---- COCO ----
