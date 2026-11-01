@@ -95,12 +95,12 @@ def _quiet_sdk(secrets: list[str], what: str):
         raise PushError(f"{what} failed: {safe_message(e, secrets)}") from None
 
 
-# One SDK project per settings, so a push job opens the project once, not per image.
-_projects: dict[tuple[str, str, str], object] = {}
+# One SDK project per (workspace, project), so a push job opens it once, not per image.
+_projects: dict[tuple[str, str], object] = {}
 
 
 def _project(settings: RoboflowSettings):
-    k = (settings.api_key, settings.workspace, settings.project)
+    k = (settings.workspace, settings.project)
     if k not in _projects:
         with _quiet_sdk([settings.api_key], "opening Roboflow project"):
             from roboflow import Roboflow

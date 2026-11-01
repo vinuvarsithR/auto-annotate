@@ -178,3 +178,23 @@ def test_open_project_error_is_key_free(monkeypatch, settings, image, capsys, ca
     with pytest.raises(PushError) as ei:
         push_image(settings, image, [], CLASSES, "b")
     no_key_anywhere(capsys, caplog, str(ei.value))
+
+
+def test_project_cache_keyed_by_workspace_and_project(monkeypatch, image):
+    opened = []
+
+    class FakeRF:
+        def __init__(self, api_key):
+            pass
+
+        def workspace(self, ws):
+            return types.SimpleNamespace(project=lambda p: (opened.append((ws, p)), FakeProject())[1])
+
+    monkeypatch.setitem(sys.modules, "roboflow", types.SimpleNamespace(Roboflow=FakeRF))
+    monkeypatch.setattr(roboflow_push, "_projects", {})
+    a = roboflow_settings(ENV)
+    b = roboflow_settings({**ENV, "ROBOFLOW_PROJECT": "other"})
+    for s in (a, b, a, b):
+        push_image(s, image, [], CLASSES, "b")
+    assert opened == [("ws", "proj"), ("ws", "other")]
+    assert set(roboflow_push._projects) == {("ws", "proj"), ("ws", "other")}
