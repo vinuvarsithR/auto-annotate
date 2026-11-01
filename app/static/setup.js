@@ -146,22 +146,44 @@ function addTiles(files) {
   return tiles;
 }
 
+// Batches of up to UPLOAD_BATCH files, never two files with the same name in one batch, so each
+// file's result in a response is found by its name without doubt (the response has no per-file order).
+function uploadBatches(files) {
+  const batches = [];
+  let cur = [], names = new Set();
+  for (const f of files) {
+    if (cur.length >= UPLOAD_BATCH || names.has(f.name)) { batches.push(cur); cur = []; names = new Set(); }
+    cur.push(f);
+    names.add(f.name);
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
+
+// What happened to one file of a batch: { ok: true } or { ok: false, reason }.
+// Renamed and skipped are checked first: a saved image's new name can equal another file's name.
+function fileOutcome(name, res) {
+  if (res.renamed.some((r) => r.from === name)) return { ok: true };
+  const s = res.skipped.find((x) => x.file_name === name);
+  if (s) return { ok: false, reason: s.reason };
+  if (res.images.some((i) => i.file_name === name)) return { ok: true };
+  return { ok: false, reason: "not uploaded" };
+}
+
 function landTiles(files, tiles, res, error) {
-  const ok = new Set(res ? res.images.map((i) => i.file_name) : []);
-  // A renamed file is saved under its new name; count it as uploaded under its original name too.
-  for (const r of (res && res.renamed) || []) if (ok.has(r.to)) ok.add(r.from);
-  const why = new Map(res ? res.skipped.map((s) => [s.file_name, s.reason]) : []);
+  if (res) res = { images: res.images, skipped: res.skipped, renamed: res.renamed || [] };
   files.forEach((f, i) => {
     const li = tiles[i];
     if (!li) return;
     li.className = "";
-    if (ok.has(f.name)) {
+    const out = res ? fileOutcome(f.name, res) : { ok: false, reason: "failed" };
+    if (out.ok) {
       const url = URL.createObjectURL(f);
       setup.tileUrls.push(url);
       li.innerHTML = `<img alt="">`;
       li.querySelector("img").src = url;
     } else {
-      const reason = error ? "failed" : (why.get(f.name) || "not uploaded");
+      const reason = out.reason;
       li.className = error ? "failed" : "skipped";
       li.innerHTML = `Skipped<span class="tag"></span>`;
       li.querySelector(".tag").textContent = `${f.name}: ${reason}`;
@@ -194,8 +216,8 @@ async function uploadFiles(list) {
   let uploaded = 0, done = 0;
   const skipped = [], renamed = [];
   let failed = null;
-  for (let i = 0; i < files.length && !failed; i += UPLOAD_BATCH) {
-    const batch = files.slice(i, i + UPLOAD_BATCH);
+  for (const batch of uploadBatches(files)) {
+    if (failed) break;
     const report = (frac) => setBar("uploadBar", "uploadText", (done + frac * batch.length) / files.length,
                                     `Uploading ${Math.min(files.length, done + Math.round(frac * batch.length))} / ${files.length} files`);
     report(0);
