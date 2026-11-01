@@ -343,25 +343,33 @@ const mockApi = {
   async uploadImages(pid, files, onProgress) {
     const db = await loadMock();
     mockProject(db, pid);
-    const images = [], skipped = [];
+    const images = [], skipped = [], renamed = [];
     let i = 0;
     for (const f of files) {
       await mockDelay(60); // so the progress bar is visible
       i += 1;
       if (onProgress) onProgress(i / files.length);
       if (!/\.(jpe?g|png)$/i.test(f.name)) { skipped.push({ file_name: f.name, reason: "not an image" }); continue; }
-      if (db.images.some((x) => x.project_id === Number(pid) && x.file_name === f.name)) {
-        skipped.push({ file_name: f.name, reason: "duplicate" });
-        continue;
+      // Mock stand-in for the server's sha256 check: same name + same size = duplicate,
+      // same name + other size = renamed to stem_2.ext (stem_3, ...).
+      const mine = db.images.filter((x) => x.project_id === Number(pid));
+      const same = mine.find((x) => x.file_name === f.name);
+      if (same && same.size === f.size) { skipped.push({ file_name: f.name, reason: "duplicate" }); continue; }
+      let name = f.name;
+      if (same) {
+        const dot = f.name.lastIndexOf(".");
+        const stem = f.name.slice(0, dot), ext = f.name.slice(dot);
+        for (let n = 2; mine.some((x) => x.file_name === name); n++) name = `${stem}_${n}${ext}`;
+        renamed.push({ from: f.name, to: name });
       }
       const { width, height } = await imageSize(f);
       // A blob: URL, so uploaded images really show on the review canvas in mock mode.
-      const img = { id: db.nextImageId++, project_id: Number(pid), file_name: f.name, width, height,
+      const img = { id: db.nextImageId++, project_id: Number(pid), file_name: name, width, height, size: f.size,
                     url: URL.createObjectURL(f), uploaded_at: now(), review_status: "todo" };
       db.images.push(img);
       images.push(mockImageWithCounts(db, img));
     }
-    return { images, skipped };
+    return { images, skipped, renamed };
   },
   async putClasses(pid, classes) {
     const db = await loadMock();

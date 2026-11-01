@@ -148,6 +148,8 @@ function addTiles(files) {
 
 function landTiles(files, tiles, res, error) {
   const ok = new Set(res ? res.images.map((i) => i.file_name) : []);
+  // A renamed file is saved under its new name; count it as uploaded under its original name too.
+  for (const r of (res && res.renamed) || []) if (ok.has(r.to)) ok.add(r.from);
   const why = new Map(res ? res.skipped.map((s) => [s.file_name, s.reason]) : []);
   files.forEach((f, i) => {
     const li = tiles[i];
@@ -168,6 +170,17 @@ function landTiles(files, tiles, res, error) {
   });
 }
 
+// "Added 12 - 2 duplicates skipped - 1 renamed: a.jpg -> a_2.jpg" (parts left out when 0).
+function uploadSummary(added, skipped, renamed) {
+  const dups = skipped.filter((s) => s.reason === "duplicate").length;
+  const other = skipped.length - dups;
+  const parts = [`Added ${added}`];
+  if (dups) parts.push(`${dups} duplicate${dups === 1 ? "" : "s"} skipped`);
+  if (other) parts.push(`${other} other skipped`);
+  if (renamed.length) parts.push(`${renamed.length} renamed: ` + renamed.map((r) => `${r.from} -> ${r.to}`).join(", "));
+  return parts.join(" - ");
+}
+
 async function uploadFiles(list) {
   const pid = setup.project && setup.project.id;
   const files = Array.from(list || []);
@@ -179,7 +192,7 @@ async function uploadFiles(list) {
   $("uploadBox").hidden = false;
   $("skippedList").innerHTML = "";
   let uploaded = 0, done = 0;
-  const skipped = [];
+  const skipped = [], renamed = [];
   let failed = null;
   for (let i = 0; i < files.length && !failed; i += UPLOAD_BATCH) {
     const batch = files.slice(i, i + UPLOAD_BATCH);
@@ -191,6 +204,7 @@ async function uploadFiles(list) {
       const res = await api.uploadImages(pid, batch, report);
       uploaded += res.images.length;
       skipped.push(...res.skipped);
+      renamed.push(...(res.renamed || []));
       landTiles(batch, tiles, res, null);
     } catch (e) {
       console.error(e);
@@ -199,7 +213,7 @@ async function uploadFiles(list) {
     }
     done += batch.length;
   }
-  const msg = `Uploaded ${uploaded} image(s)` + (skipped.length ? `, skipped ${skipped.length}` : "") +
+  const msg = uploadSummary(uploaded, skipped, renamed) +
               (failed ? `. Stopped after ${done} / ${files.length} files: ${failed}` : ".");
   setBar("uploadBar", "uploadText", done / files.length, msg);
   for (const s of skipped) {
@@ -211,7 +225,7 @@ async function uploadFiles(list) {
   setup.uploading = false;
   updateButtons();
   if (pid === state.projectId) await openProject(pid); // refresh counts + review image list
-  // Uploads add to the project (same file name = skipped as duplicate); say the new total.
+  // Uploads add to the project (same content = skipped as duplicate); say the new total.
   if (setup.project && setup.project.id === pid) {
     const n = setup.project.counts.images;
     setBar("uploadBar", "uploadText", done / files.length, `${msg} Project now has ${n} image${n === 1 ? "" : "s"}.`);
