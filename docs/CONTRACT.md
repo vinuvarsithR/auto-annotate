@@ -299,8 +299,9 @@ Request (every field optional):
 Only images with `review_status` `done` or `empty` are exported (section 1, export / push rules);
 an `empty` image is exported with no labels. Only boxes whose status is in `statuses` are written.
 The response is an `application/zip` download named `<project>_<format>.zip`.
-Errors: unknown pid -> 404 `not_found`; bad `format` / `statuses` / body -> 400 `bad_request`;
-no `done` or `empty` image in the project -> 409 `conflict`.
+Errors: unknown pid -> 404 `not_found`; `include_images: true` and an exported image's file is
+missing on disk -> 404 `not_found` (no zip is sent); bad `format` / `statuses` / body -> 400
+`bad_request`; no `done` or `empty` image in the project -> 409 `conflict`.
 Route rule: `app/api/export.py` defines `router = APIRouter()` with the path
 `/projects/{pid}/export` (no `/api`); `app/main.py` mounts it under `/api` when the module exists.
 The zip layout is defined by the export session in `autolabel/export/`
