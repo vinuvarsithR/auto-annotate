@@ -456,7 +456,9 @@ function savedSelection() {
   return a;
 }
 
-async function setStatus(status, label = null) {
+// then: "next" (A / R keys) selects the next box to review; "close" (popup buttons) closes the
+// popup and deselects, as after Save.
+async function setStatus(status, label = null, then = "next") {
   const a = savedSelection();
   if (!a) return;
   const before = { ...a };
@@ -464,7 +466,7 @@ async function setStatus(status, label = null) {
   if (!updated) return;
   if (status === "accepted") canvas.flashAccept(updated.id);
   else if (status === "rejected") canvas.fadeReject(before);
-  selectNextToReview();
+  if (then === "close") select(null); else selectNextToReview();
 }
 
 // U: put an approved / rejected box back to the status it had before. Uses this image's undo
@@ -595,6 +597,8 @@ function renderPopup() {
   }
   $("bpDelete").title = a.id === PENDING ? "Drop this new box"
     : a.source === "human" ? "Delete this drawn box (Del)" : "Reject this model box; it is kept for precision stats (Del)";
+  // Approve / Reject need a saved box; a new unsaved box is saved with Save first.
+  $("bpApprove").disabled = $("bpReject").disabled = a.id === PENDING;
   renderPopList();
   el.hidden = false;
   positionPopup();
@@ -1003,6 +1007,8 @@ document.addEventListener("mousedown", (e) => {
 });
 $("bpSave").addEventListener("click", savePopup);
 $("bpDelete").addEventListener("click", deleteBox);
+$("bpApprove").addEventListener("click", () => setStatus("accepted", null, "close"));
+$("bpReject").addEventListener("click", () => setStatus("rejected", null, "close"));
 $("bpClass").addEventListener("input", (e) => { pop.filter = e.target.value; pop.hl = 0; renderPopList(); });
 $("bpClass").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); savePopup(); }
