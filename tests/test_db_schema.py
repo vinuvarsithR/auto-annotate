@@ -101,3 +101,59 @@ def test_old_db_app_starts_and_serves_review_status(tmp_path):
         assert [(i["file_name"], i["review_status"]) for i in imgs] == [("a.jpg", "todo")]
         assert c.patch(f"/api/images/{imgs[0]['id']}",
                        json={"review_status": "done"}).json()["review_status"] == "done"
+
+
+# --- migration: databases made before images.roboflow_image_id (#21, B1) -----
+
+def _make_pre_push_db(path):
+    """A database with review_status but no roboflow_image_id, holding one reviewed image."""
+    old = re.sub(r"\n\s*roboflow_image_id TEXT,[^\n]*", "", db.SCHEMA.read_text(encoding="utf-8"))
+    assert "roboflow_image_id" not in old and "review_status" in old
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(old)
+    conn.execute("INSERT INTO projects (name, created_at) VALUES ('old', 't')")
+    conn.execute("INSERT INTO images (project_id, file_name, path, width, height, uploaded_at, "
+                 "review_status) VALUES (1, 'a.jpg', 'p/a.jpg', 1280, 720, 't', 'done')")
+    conn.commit()
+    conn.close()
+
+
+def test_migrate_adds_roboflow_image_id_and_keeps_rows(tmp_path):
+    path = tmp_path / "app.db"
+    _make_pre_push_db(path)
+    db.init_db(path)
+    db.init_db(path)  # second run must be a no-op
+    conn = db.connect(path)
+    row = conn.execute("SELECT * FROM images").fetchone()
+    assert (row["file_name"], row["review_status"], row["roboflow_image_id"]) == \
+        ("a.jpg", "done", None)
+    conn.execute("UPDATE images SET roboflow_image_id='abc'")
+    assert conn.execute("SELECT roboflow_image_id FROM images").fetchone()[0] == "abc"
+
+
+def test_oldest_db_gets_both_columns(tmp_path):
+    """A database from before #20 and #21 gets review_status AND roboflow_image_id."""
+    path = tmp_path / "app.db"
+    old = re.sub(r"\n\s*review_status TEXT[^\n]*\n[^\n]*-- set only by #20", "",
+                 db.SCHEMA.read_text(encoding="utf-8"))
+    old = re.sub(r"\n\s*roboflow_image_id TEXT,[^\n]*", "", old)
+    assert "review_status" not in old and "roboflow_image_id" not in old
+    conn = sqlite3.connect(path)
+    conn.executescript(old)
+    conn.execute("INSERT INTO projects (name, created_at) VALUES ('old', 't')")
+    conn.execute("INSERT INTO images (project_id, file_name, path, width, height, uploaded_at) "
+                 "VALUES (1, 'a.jpg', 'p', 1, 1, 't')")
+    conn.commit()
+    conn.close()
+    db.init_db(path)
+    row = db.connect(path).execute("SELECT * FROM images").fetchone()
+    assert (row["file_name"], row["review_status"], row["roboflow_image_id"]) ==         ("a.jpg", "todo", None)
+
+
+def test_roboflow_image_id_not_in_image_json(tmp_path):
+    from tests.test_api_helpers import make_client, setup_project
+    with make_client(tmp_path)[0] as c:
+        s = setup_project(c, n_images=1)
+        img = c.get(f"/api/projects/{s['pid']}/images").json()["images"][0]
+        assert "roboflow_image_id" not in img
