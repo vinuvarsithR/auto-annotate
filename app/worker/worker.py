@@ -1,5 +1,5 @@
 """
-worker.py - background worker that runs detect jobs.
+worker.py - background worker that runs detect and roboflow_push jobs.
 
 Plain-English summary
 ---------------------
@@ -13,15 +13,22 @@ Plain-English summary
     3. update done / total / progress.
   So if the job fails halfway, images that weren't reached keep their old boxes.
 * Any exception -> job 'failed' with a one-line error message.
+* roboflow_push jobs (#21): the images with review_status done/empty and no
+  roboflow_image_id yet, one at a time: push(image, boxes, class_names, batch_name)
+  returns the Roboflow id, which is saved at once (so a failed job can just be
+  started again). Errors become a one-line message with the API key removed.
 * run_once() processes a single job without a thread (used by tests).
-* The model code is loaded lazily through load_pipeline(), so the API starts
-  even when autolabel.models is not installed, and tests can pass a fake.
+* The model code is loaded lazily through load_pipeline(), and the Roboflow
+  code through load_pusher(), so the API starts without them and tests can
+  pass fakes (no network in tests).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -34,6 +41,14 @@ log = logging.getLogger("app.worker")
 # load_pipeline() -> (run_function, ClassSpec class)
 PipelineLoader = Callable[[], tuple[Callable, type]]
 
+# load_pusher() -> (push, secrets)
+#   push(image: dict, boxes: list[dict], class_names: list[str], batch_name: str) -> str
+#   secrets: strings that must never appear in a job error (the API key)
+PusherLoader = Callable[[], tuple[Callable[..., str], list[str]]]
+
+PUSH_REVIEW_STATUSES = ("done", "empty")
+DEFAULT_PUSH_STATUSES = ("auto_accepted", "accepted", "edited")
+
 
 def default_load_pipeline() -> tuple[Callable, type]:
     from autolabel import pipeline
@@ -41,17 +56,42 @@ def default_load_pipeline() -> tuple[Callable, type]:
     return pipeline.run, ClassSpec
 
 
-def one_line(exc: BaseException, limit: int = 300) -> str:
+def default_load_pusher() -> tuple[Callable[..., str], list[str]]:
+    """Bind autolabel.export.push_image to the .env settings (export session's code)."""
+    from autolabel.export import push_image, roboflow_settings
+    settings = roboflow_settings()
+    if isinstance(settings, (list, tuple)):  # contract: the list of missing names
+        raise RuntimeError("Roboflow settings missing from .env: " + ", ".join(settings))
+    secrets = [os.environ.get("ROBOFLOW_API_KEY", "")]
+    if isinstance(settings, dict):
+        secrets += [str(v) for k, v in settings.items() if "key" in str(k).lower()]
+
+    def push(image, boxes, class_names, batch_name):
+        return push_image(settings, image, boxes, class_names, batch_name)
+    return push, [x for x in secrets if x]
+
+
+_KEY_PARAM = re.compile(r"(api_key=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def one_line(exc: BaseException, limit: int = 300, secrets=()) -> str:
+    """First line of the error, key removed, at most `limit` chars."""
     text = f"{type(exc).__name__}: {exc}".strip()
     text = text.splitlines()[0] if text else type(exc).__name__
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    text = _KEY_PARAM.sub(r"\1***", text)
     return text[:limit]
 
 
 class Worker:
     def __init__(self, db_path: str | Path, load_pipeline: PipelineLoader | None = None,
-                 poll_seconds: float = 2.0):
+                 poll_seconds: float = 2.0, load_pusher: PusherLoader | None = None):
         self.db_path = db_path
         self.load_pipeline = load_pipeline or default_load_pipeline
+        self.load_pusher = load_pusher or default_load_pusher
+        self._secrets: list[str] = []
         self.poll_seconds = poll_seconds
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -61,7 +101,7 @@ class Worker:
 
     def start(self) -> None:
         if self._thread is None:
-            self._thread = threading.Thread(target=self._loop, name="detect-worker", daemon=True)
+            self._thread = threading.Thread(target=self._loop, name="job-worker", daemon=True)
             self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -88,20 +128,25 @@ class Worker:
     # ------------------------------------------------------------ one job
 
     def run_once(self) -> bool:
-        """Run the oldest queued detect job. Returns False if there was none."""
+        """Run the oldest queued job (any kind). Returns False if there was none."""
         conn = db.connect(self.db_path)
         try:
             job = self._claim(conn)
             if job is None:
                 return False
+            self._secrets = []
             try:
-                self._process(conn, job)
+                if job["kind"] == "roboflow_push":
+                    self._process_push(conn, job)
+                else:
+                    self._process(conn, job)
             except Exception as exc:
-                log.warning("job %s failed: %s", job["id"], one_line(exc))
+                msg = one_line(exc, secrets=self._secrets)
+                log.warning("job %s failed: %s", job["id"], msg)
                 conn.rollback()
                 with conn:
                     conn.execute("UPDATE jobs SET status='failed', error=?, finished_at=? "
-                                 "WHERE id=?", (one_line(exc), db.now(), job["id"]))
+                                 "WHERE id=?", (msg, db.now(), job["id"]))
             return True
         finally:
             conn.close()
@@ -109,7 +154,7 @@ class Worker:
     def _claim(self, conn: sqlite3.Connection) -> sqlite3.Row | None:
         conn.execute("BEGIN IMMEDIATE")  # lock so two workers can't take the same job
         try:
-            job = conn.execute("SELECT * FROM jobs WHERE status='queued' AND kind='detect' "
+            job = conn.execute("SELECT * FROM jobs WHERE status='queued' "
                                "ORDER BY id LIMIT 1").fetchone()
             if job is not None:
                 conn.execute("UPDATE jobs SET status='running', started_at=? WHERE id=?",
@@ -172,6 +217,51 @@ class Worker:
                          r["source"] or model, r["status"], jid, t, t))
                 conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
                              (done, done / total if total else 1.0, jid))
+
+        with conn:
+            conn.execute("UPDATE jobs SET status='done', progress=1.0, finished_at=? WHERE id=?",
+                         (db.now(), jid))
+
+    def _process_push(self, conn: sqlite3.Connection, job: sqlite3.Row) -> None:
+        """#21: upload done/empty images not pushed yet, one at a time."""
+        jid, pid = job["id"], job["project_id"]
+        config = json.loads(job["config"])
+        statuses = list(config.get("statuses") or DEFAULT_PUSH_STATUSES)
+        if "rejected" in statuses:
+            raise ValueError("rejected boxes are never pushed")
+        started = conn.execute("SELECT started_at FROM jobs WHERE id=?", (jid,)).fetchone()[0]
+        batch_name = f"autolabel_{(started or db.now())[:10]}"
+
+        rows = conn.execute(
+            "SELECT * FROM images WHERE project_id=? AND roboflow_image_id IS NULL "
+            "AND review_status IN (?, ?) ORDER BY id", (pid, *PUSH_REVIEW_STATUSES)).fetchall()
+        total = len(rows)
+        with conn:
+            conn.execute("UPDATE jobs SET total=? WHERE id=?", (total, jid))
+
+        if total:
+            # class order = the order #7 returns (by id)
+            class_names = [r["name"] for r in conn.execute(
+                "SELECT name FROM classes WHERE project_id=? ORDER BY id", (pid,))]
+            push, self._secrets = self.load_pusher()
+            marks = ",".join("?" * len(statuses))
+            for done, img in enumerate(rows, start=1):
+                boxes = [] if img["review_status"] == "empty" else [
+                    {"class_name": b["class_name"],
+                     "bbox": [float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"])]}
+                    for b in conn.execute(
+                        db.ANNOTATION_SELECT + f" WHERE a.image_id=? AND a.status IN ({marks}) "
+                        "ORDER BY a.id", (img["id"], *statuses))]
+                image = {"id": img["id"], "file_name": img["file_name"], "path": img["path"],
+                         "width": img["width"], "height": img["height"]}
+                rf_id = push(image, boxes, class_names, batch_name)
+                if not rf_id:
+                    raise RuntimeError(f"Roboflow returned no id for image {img['id']}")
+                with conn:
+                    conn.execute("UPDATE images SET roboflow_image_id=? WHERE id=?",
+                                 (str(rf_id), img["id"]))
+                    conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
+                                 (done, done / total, jid))
 
         with conn:
             conn.execute("UPDATE jobs SET status='done', progress=1.0, finished_at=? WHERE id=?",

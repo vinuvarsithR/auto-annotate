@@ -6,7 +6,7 @@ Run it (from the repo root, inside .venv):
 
 * API under /api (docs/CONTRACT.md section 2), UI from app/static at /.
 * data/app.db and data/uploads/ are created on startup.
-* A background worker thread runs detect jobs (app/worker/worker.py).
+* A background worker thread runs detect and roboflow_push jobs (app/worker/worker.py).
 * create_app(...) lets tests use a temp folder, a fake detector and no thread.
 """
 
@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import annotations, classes, images, jobs, models, projects
 from app.api.errors import install_error_handlers
 from app.db import db
-from app.worker.worker import PipelineLoader, Worker
+from app.worker.worker import PipelineLoader, PusherLoader, Worker
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -36,6 +36,7 @@ def default_list_detectors() -> list[str]:
 
 def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                load_pipeline: PipelineLoader | None = None,
+               load_pusher: PusherLoader | None = None,
                list_detectors: Callable[[], list[str]] | None = None,
                static_dir: Path | None = STATIC_DIR) -> FastAPI:
     data_dir = Path(data_dir)
@@ -58,7 +59,7 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
     app.state.data_dir = data_dir
     app.state.db_path = db_path
     app.state.list_detectors = list_detectors or default_list_detectors
-    app.state.worker = Worker(db_path, load_pipeline=load_pipeline)
+    app.state.worker = Worker(db_path, load_pipeline=load_pipeline, load_pusher=load_pusher)
 
     install_error_handlers(app)
     for module in (projects, images, classes, jobs, annotations, models):
