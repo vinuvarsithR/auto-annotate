@@ -32,13 +32,13 @@ class BoxCanvas {
   constructor(canvas, callbacks) {
     this.cv = canvas;
     this.ctx = canvas.getContext("2d");
-    this.cb = callbacks; // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox), onView(zoom)
+    this.cb = callbacks; // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox), onView(zoom, scale), onRender()
     this.img = null;          // HTMLImageElement or null (placeholder)
     this.imgW = 1280;
     this.imgH = 720;
     this.anns = [];
     this.selectedId = null;
-    this.drawMode = false;    // sticky draw mode (N / Draw button): one box, then off
+    this.drawMode = false;    // Box tool (B): every drag draws a box until the tool changes
     this.tempDraw = false;    // draw while Ctrl is held
     this.drawColor = "#fff";
     this.showRejected = true;
@@ -55,7 +55,7 @@ class BoxCanvas {
     this.shown = false;       // has anything been drawn yet (no crossfade from an empty canvas)
     this.raf = 0;
 
-    new ResizeObserver(() => this.render()).observe(canvas.parentElement);
+    new ResizeObserver(() => { this.render(); this.notifyView(); }).observe(canvas.parentElement);
     if (document.fonts) document.fonts.ready.then(() => this.render());
     canvas.addEventListener("mousedown", (e) => this.onDown(e));
     canvas.addEventListener("dblclick", (e) => { if (!this.drawing() && !e.ctrlKey) this.resetView(); });
@@ -175,6 +175,8 @@ class BoxCanvas {
     if (this.cv.width !== w * dpr || this.cv.height !== h * dpr) {
       this.cv.width = w * dpr; this.cv.height = h * dpr;
       this.cv.style.width = w + "px"; this.cv.style.height = h + "px";
+      // Resizing clears the canvas; outside render() (e.g. notifyView, zoomAt) draw it again.
+      if (!this.inRender && !this.raf) this.raf = requestAnimationFrame(() => this.tick());
     }
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.vw = w; this.vh = h;
@@ -196,9 +198,11 @@ class BoxCanvas {
 
   // Zoom by `factor` keeping the image point under (clientX, clientY) still.
   // Without a point, zoom around the centre of the view.
+  // Smallest zoom: "fit", or 100% (1 image px = 1 screen px) when the image is smaller than the view.
+  minZoom() { return Math.min(1, 1 / this.fit); }
   zoomAt(factor, clientX = null, clientY = null) {
     this.layout();
-    const z = clamp(this.zoom * factor, 1, ZOOM_MAX);
+    const z = clamp(this.zoom * factor, this.minZoom(), Math.max(ZOOM_MAX, 1 / this.fit));
     if (Math.abs(z - this.zoom) < 1e-6) return;
     const r = this.cv.getBoundingClientRect();
     const sx = clientX == null ? this.vw / 2 : clientX - r.left;
@@ -211,6 +215,8 @@ class BoxCanvas {
     this.render();
     this.notifyView();
   }
+  // Zoom so that 1 image pixel = 1 screen pixel ("100%"), around the centre of the view.
+  zoomToActual() { this.layout(); this.zoomAt(1 / this.fit / this.zoom); }
   panBy(dx, dy) { if (this.zoom > 1) { this.panX += dx; this.panY += dy; this.render(); } }
   resetView() {
     if (this.zoom === 1 && !this.panX && !this.panY) return;
@@ -218,7 +224,7 @@ class BoxCanvas {
     this.render();
     this.notifyView();
   }
-  notifyView() { if (this.cb.onView) this.cb.onView(this.zoom); }
+  notifyView() { if (this.cb.onView) { this.layout(); this.cb.onView(this.zoom, this.scale); } }
   // When zoomed in, bring a box that is off screen into the middle of the view.
   ensureVisible(b) {
     if (this.zoom === 1) return;
@@ -242,6 +248,14 @@ class BoxCanvas {
     return this.anns.filter((a) => (this.showRejected || a.status !== "rejected") && !this.hiddenClasses.has(a.class_id));
   }
   selected() { return this.anns.find((a) => a.id === this.selectedId) || null; }
+  // Screen rectangle (canvas px) of the selected box as drawn now (follows a drag), or null when hidden.
+  selectedRect() {
+    const a = this.selected();
+    if (!a || !this.visible().includes(a)) return null;
+    const b = this.drag && this.drag.ann && this.drag.ann.id === a.id ? this.drag.box : a.bbox;
+    const [x, y] = this.toScreen(b[0], b[1]);
+    return { x, y, w: b[2] * this.scale, h: b[3] * this.scale };
+  }
 
   // Which handle of box b (image coords) is under point p? Returns e.g. "nw", "e", or null.
   handleAt(b, px, py) {
@@ -362,6 +376,12 @@ class BoxCanvas {
 
   // ------------------------------------------------------------ drawing
   render() {
+    this.inRender = true;
+    try { this.draw(); } finally { this.inRender = false; }
+    if (this.cb.onRender) this.cb.onRender();
+  }
+
+  draw() {
     const { w, h } = this.layout();
     const ctx = this.ctx;
     const t = fxNow();

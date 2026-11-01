@@ -107,11 +107,43 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   sends both as wheel + ctrlKey; only synthetic wheel events were tested), and a real Ctrl+drag
   (the test tool can't hold Ctrl during a drag; tested with synthetic mouse events).
 
+- 2026-11-01 Editor layout (branch `ui`): left icon rail + collapsible Labels panel (classes on this
+  image with colour, count, eye toggle; greyed "Unused classes"; Show rejected); canvas with class tags;
+  vertical tool rail (Drag D, Box B, Repeat P, Undo, Redo, Mark empty N disabled) with hover tooltips;
+  collapsible image strip on the far right (index / total, prev/next, check mark = no box needs review);
+  bottom-left bar (zoom - / % / + / Reset, Brightness popover, shortcuts dialog with search).
+  Box popup next to the selected box: class field (type to filter, Up/Down, Enter save, Esc cancel),
+  Delete, Save. A drawn box stays unsaved (browser only) until Save; Esc drops it. New shortcuts:
+  B, D, U (undo approve/reject via #13 explicit status), Ctrl+C / Ctrl+V (one selected box; pasted as
+  human boxes, scaled to the image size, one undo step), + / - / 0 / 1 (1 = 100% = 1 image px per screen px).
+  Removed: right-side box panel, A/R buttons (keys only), D/S as image nav (Left/Right stay),
+  1-9 class keys (1 is now zoom 100%; class via the popup), the "new box class" dropdown (a new box
+  starts with the last saved class). Zoom % now shows real pixel scale, not % of fit.
+  Fixed: canvas cleared after a resize outside render() (now redrawn on the next frame).
+  VERIFIED in Chrome (mock on a static server, real keys/mouse unless noted), no console errors:
+  B + drag -> popup focused, "bi" + Enter -> biax human box (1 undo step); Esc drops an unsaved box;
+  Esc leaves Box tool; click box, Up, Enter -> class changed (edited); A -> accepted, U -> needs_review,
+  R -> rejected, U -> needs_review; Ctrl+C, Right, Ctrl+V -> pasted copy; Delete removes it;
+  + 100%, - 80%, 1 100%, 0 fit; N -> "not available" message; ? opens dialog, search "zoom" -> 5 rows
+  and no shortcut fired; typing "dar1b" in Reviewer fires nothing; tooltip shows "Box (B)"; strip and
+  Labels collapse. Ctrl+drag tested with synthetic events (test tool can't hold Ctrl in a drag).
+  Real backend (uvicorn :8011, this worktree's data/app.db): review page loads, boxes drawn, no errors.
+  pytest 180 passed. Multi-select is not built (copy works on the one selected box).
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 None (plain JS, no libraries).
 
 ## Contract change requests
+
+### 2026-11-01: mark an image as empty / reviewed (for backend + integrator)
+The editor has a "Mark image empty" tool (N). The contract has no image-level state, so the
+button is disabled and N only shows a message. Today "done" in the strip = no box needs review,
+which can't tell "checked, nothing there" from "never looked at".
+Proposal: `images.review_status TEXT NOT NULL DEFAULT 'todo' CHECK (review_status IN ('todo','done','empty'))`,
+returned as `review_status` in **Image**, and **#20 PATCH /images/{iid}** `{"review_status": "empty", "reviewer": "dhyan"}`
+-> 200 Image. Setting `empty` while the image has boxes that are not rejected -> 409 `conflict`.
+#5 gets `?review_status=` as a filter. Export: an `empty` image is exported with no annotations.
 
 ### 2026-10-31: project rename/delete, box delete, undo (for backend + integrator)
 The UI is already built against these shapes and works with them in `?mock=1`. Against the

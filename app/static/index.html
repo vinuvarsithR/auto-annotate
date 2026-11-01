@@ -118,108 +118,149 @@
 
 <!-- ============================================================ review -->
 <main id="layout" hidden>
-  <aside id="left">
-    <label class="field filter">Show
-      <select id="statusFilter">
-        <option value="">All images</option>
-        <option value="needs_review" selected>Needs review</option>
-        <option value="auto_accepted">Auto accepted</option>
-        <option value="accepted">Accepted</option>
-        <option value="edited">Edited</option>
-        <option value="rejected">Rejected</option>
-      </select>
-    </label>
-    <ul id="imageList" class="filmstrip"></ul>
-    <div class="pager">
-      <button id="pagePrev" type="button" class="icon" aria-label="Previous page">&lsaquo;</button>
-      <span id="pageInfo" class="num-tab"></span>
-      <button id="pageNext" type="button" class="icon" aria-label="Next page">&rsaquo;</button>
-    </div>
+  <!-- left: icon rail + collapsible Labels panel -->
+  <nav id="rail" aria-label="Panels">
+    <button id="labelsBtn" type="button" class="icon rail-btn tip" data-tip="Labels" aria-label="Labels" aria-expanded="true" aria-controls="labelsPanel">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2.5 2.5h5.2l5.8 5.8-5.2 5.2-5.8-5.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="5.4" cy="5.4" r="1.1" fill="currentColor"/></svg>
+    </button>
+  </nav>
+  <aside id="labelsPanel" aria-label="Labels">
+    <div class="lp-head"><h2>Labels</h2><span class="muted num-tab" id="labelsTotal"></span></div>
+    <ul id="labelList" class="label-list" aria-label="Classes on this image"></ul>
+    <h3 id="unusedHead" class="lp-sub">Unused classes</h3>
+    <ul id="unusedList" class="label-list unused" aria-label="Classes with no box on this image"></ul>
+    <label class="check lp-foot"><input id="showRejected" type="checkbox" checked> Show rejected boxes</label>
   </aside>
 
+  <!-- centre: the image -->
   <section id="center">
-    <div id="canvasWrap"><canvas id="canvas"></canvas></div>
-    <div id="infobar">
+    <div id="canvasWrap">
+      <canvas id="canvas"></canvas>
       <div id="imageTitle" class="image-title num-tab"></div>
-      <span id="boxEmpty" class="muted hint">Click a box or press Tab</span>
-      <div id="legend" class="legend" role="group" aria-label="Classes on this image (click to show or hide)"></div>
-    </div>
-    <div id="toolbar">
-      <span class="group">
-        <button id="undoBtn" type="button" class="icon" aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)" disabled>
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.5 4 2.5 7l3 3M3 7h6.5a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-        <button id="redoBtn" type="button" class="icon" aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4l3 3-3 3M13 7H6.5a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </span>
-      <button id="repeatBtn" type="button" title="Copy the boxes of the previous image onto this one">Repeat previous <kbd>P</kbd></button>
-      <span class="group">
-        <label class="visually-hidden" for="newClass">Class for new boxes</label>
-        <select id="newClass" title="Class for new boxes (1-9)"></select>
-        <button id="drawBtn" type="button" title="Draw a box. Or hold Ctrl and drag.">Draw <kbd>N</kbd></button>
-      </span>
-      <span class="spacer"></span>
-      <button id="zoomBtn" type="button" class="num-tab zoom" title="Zoom: Ctrl+scroll or pinch. Click or press 0 to fit.">Fit</button>
-      <span class="pop-wrap">
-        <button id="adjustBtn" type="button" aria-expanded="false" aria-controls="adjustPop" title="Brightness and contrast (display only)">Adjust</button>
-        <div id="adjustPop" class="popover" hidden>
-          <label class="range">Brightness <input id="brightness" type="range" min="50" max="200" step="5" value="100"><output id="brightnessOut" class="num-tab">100%</output></label>
-          <label class="range">Contrast <input id="contrast" type="range" min="50" max="200" step="5" value="100"><output id="contrastOut" class="num-tab">100%</output></label>
-          <div class="pop-foot"><span class="muted">Display only</span><button id="adjustReset" type="button">Reset</button></div>
+
+      <!-- box editor popup: follows the selected box -->
+      <div id="boxPop" class="boxpop" role="dialog" aria-label="Edit box" hidden>
+        <div class="bp-head"><span id="bpStatus" class="status-line"></span><span id="bpMeta" class="muted num-tab"></span></div>
+        <label class="visually-hidden" for="bpClass">Class</label>
+        <input id="bpClass" type="text" autocomplete="off" spellcheck="false" placeholder="Type to filter classes"
+               role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="bpList">
+        <ul id="bpList" class="bp-list" role="listbox" aria-label="Classes"></ul>
+        <div class="bp-actions">
+          <button id="bpDelete" type="button" class="reject">Delete</button>
+          <button id="bpSave" type="button" class="primary">Save <kbd>Enter</kbd></button>
         </div>
-      </span>
-      <label class="check"><input id="showRejected" type="checkbox" checked> Show rejected</label>
+      </div>
+
+      <!-- bottom-left: zoom, brightness, shortcuts -->
+      <div id="viewBar" class="viewbar">
+        <button id="zoomOut" type="button" class="icon ghost tip" data-tip="Zoom out (-)" aria-label="Zoom out">&minus;</button>
+        <span id="zoomPct" class="zoom-pct num-tab" aria-live="polite">100%</span>
+        <button id="zoomIn" type="button" class="icon ghost tip" data-tip="Zoom in (+)" aria-label="Zoom in">+</button>
+        <button id="zoomReset" type="button" class="ghost tip" data-tip="Fit image (0)">Reset</button>
+        <span class="vb-sep" aria-hidden="true"></span>
+        <span class="pop-wrap">
+          <button id="adjustBtn" type="button" class="ghost tip" data-tip="Brightness and contrast (display only)" aria-expanded="false" aria-controls="adjustPop">Brightness</button>
+          <div id="adjustPop" class="popover" hidden>
+            <label class="range">Brightness <input id="brightness" type="range" min="50" max="200" step="5" value="100"><output id="brightnessOut" class="num-tab">100%</output></label>
+            <label class="range">Contrast <input id="contrast" type="range" min="50" max="200" step="5" value="100"><output id="contrastOut" class="num-tab">100%</output></label>
+            <div class="pop-foot"><span class="muted">Display only</span><button id="adjustReset" type="button">Reset</button></div>
+          </div>
+        </span>
+        <span class="vb-sep" aria-hidden="true"></span>
+        <button id="keysBtn" type="button" class="icon ghost tip" data-tip="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4 6.6h.01M6.3 6.6h.01M8.6 6.6h.01M10.9 6.6h.01M4.6 10h6.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
     </div>
   </section>
 
-  <aside id="right" aria-label="Selected box">
-    <div id="boxPanel" class="panel-inner" hidden>
-      <div class="panel-head">
-        <h2>Box <span id="bId" class="num-tab muted"></span></h2>
-        <button id="boxClose" type="button" class="icon" aria-label="Deselect box (Esc)" title="Deselect (Esc)">&times;</button>
+  <!-- right of the image: tools -->
+  <div id="tools" role="toolbar" aria-orientation="vertical" aria-label="Tools">
+    <button id="toolDrag" type="button" class="icon tool tip tip-left" data-tip="Drag / select (D)" aria-label="Drag / select (D)" aria-pressed="true">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 2.5v10l2.8-2.6 2 4.1 1.8-.9-2-4h3.9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="toolBox" type="button" class="icon tool tip tip-left" data-tip="Box (B)" aria-label="Box (B)" aria-pressed="false">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2.2 1.6"/><path d="M1.5 3h3M3 1.5v3M11.5 13h3M13 11.5v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    </button>
+    <span class="tool-sep" aria-hidden="true"></span>
+    <button id="repeatBtn" type="button" class="icon tool tip tip-left" data-tip="Repeat previous (P)" aria-label="Repeat previous (P)">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 10.5V3.5a1 1 0 0 1 1-1h7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    </button>
+    <button id="undoBtn" type="button" class="icon tool tip tip-left" data-tip="Undo (Ctrl+Z)" aria-label="Undo (Ctrl+Z)" disabled>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.5 4 2.5 7l3 3M3 7h6.5a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="redoBtn" type="button" class="icon tool tip tip-left" data-tip="Redo (Ctrl+Shift+Z)" aria-label="Redo (Ctrl+Shift+Z)" disabled>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4l3 3-3 3M13 7H6.5a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span class="tool-sep" aria-hidden="true"></span>
+    <button id="emptyBtn" type="button" class="icon tool tip tip-left" data-tip="Mark image empty (N) - not available yet: needs a backend change" aria-label="Mark image empty (N), not available yet" disabled>
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 12.5l9-9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <!-- far right: image strip -->
+  <aside id="strip" aria-label="Images">
+    <div class="strip-head">
+      <button id="stripToggle" type="button" class="icon ghost tip tip-left" data-tip="Hide images" aria-label="Hide image strip" aria-expanded="true" aria-controls="stripBody">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span class="strip-title">Images</span>
+    </div>
+    <div id="stripBody" class="strip-body">
+      <label class="field filter">Show
+        <select id="statusFilter">
+          <option value="">All images</option>
+          <option value="needs_review" selected>Needs review</option>
+          <option value="auto_accepted">Auto accepted</option>
+          <option value="accepted">Accepted</option>
+          <option value="edited">Edited</option>
+          <option value="rejected">Rejected</option>
+        </select>
+      </label>
+      <div class="strip-nav">
+        <button id="imgPrev" type="button" class="icon tip" data-tip="Previous image (Left)" aria-label="Previous image">&lsaquo;</button>
+        <span id="imgCounter" class="num-tab">0 / 0</span>
+        <button id="imgNext" type="button" class="icon tip tip-left" data-tip="Next image (Right)" aria-label="Next image">&rsaquo;</button>
       </div>
-      <div id="bStatus" class="status-line"></div>
-      <label class="field block">Class <select id="bClass"></select></label>
-      <dl class="kv num-tab">
-        <dt>Score</dt><dd id="bScore"></dd>
-        <dt>Source</dt><dd id="bSource"></dd>
-        <dt>Bbox</dt><dd id="bBbox"></dd>
-        <dt>Reviewer</dt><dd id="bReviewer"></dd>
-      </dl>
-      <div class="actions">
-        <button id="acceptBtn" type="button" class="accept">Accept <kbd>A</kbd></button>
-        <button id="rejectBtn" type="button" class="reject">Reject <kbd>R</kbd></button>
-        <button id="deleteBtn" type="button" class="wide">Delete <kbd>Del</kbd></button>
-      </div>
-      <p id="deleteNote" class="muted note"></p>
+      <ul id="imageList" class="filmstrip"></ul>
     </div>
   </aside>
 </main>
 
-<dialog id="helpDialog">
-  <h2>Keyboard and mouse</h2>
-  <dl class="keys">
-    <dt><kbd>A</kbd> / <kbd>R</kbd></dt><dd>Accept / reject selected box</dd>
-    <dt><kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete selected box (model boxes are rejected, so they still count for precision)</dd>
-    <dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo (this image)</dd>
-    <dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Redo</dd>
-    <dt><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Next / previous box</dd>
-    <dt><kbd>&rarr;</kbd> or <kbd>D</kbd></dt><dd>Next image</dd>
-    <dt><kbd>&larr;</kbd> or <kbd>S</kbd></dt><dd>Previous image</dd>
-    <dt><kbd>1</kbd> - <kbd>9</kbd></dt><dd>Change class of selected box (or new-box class if none selected)</dd>
-    <dt>Hold <kbd>Ctrl</kbd> + drag</dt><dd>Draw a new box</dd>
-    <dt><kbd>N</kbd></dt><dd>Draw one new box (drag on the image)</dd>
-    <dt><kbd>P</kbd></dt><dd>Repeat previous: copy the boxes of the image you had open before</dd>
-    <dt>Hold <kbd>H</kbd></dt><dd>Hide all boxes</dd>
-    <dt><kbd>Ctrl</kbd>+scroll or pinch</dt><dd>Zoom the image (up to 800%)</dd>
-    <dt>Scroll / drag empty area</dt><dd>Pan when zoomed in (middle mouse button too)</dd>
-    <dt><kbd>0</kbd> or double-click</dt><dd>Fit the image</dd>
-    <dt><kbd>Esc</kbd></dt><dd>Cancel drawing / deselect</dd>
+<dialog id="helpDialog" aria-labelledby="helpTitle">
+  <div class="help-head">
+    <h2 id="helpTitle">Keyboard shortcuts</h2>
+    <input id="keySearch" type="search" placeholder="Search shortcuts" aria-label="Search shortcuts" autocomplete="off">
+  </div>
+  <dl id="keyList" class="keys">
+    <div><dt><kbd>D</kbd></dt><dd>Drag / select tool</dd></div>
+    <div><dt><kbd>B</kbd></dt><dd>Box tool: drag on the image to draw a box</dd></div>
+    <div><dt>Hold <kbd>Ctrl</kbd> + drag</dt><dd>Draw a box while in the drag tool</dd></div>
+    <div><dt><kbd>P</kbd></dt><dd>Repeat previous: copy the kept boxes of the image you had open before</dd></div>
+    <div><dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo (this image)</dd></div>
+    <div><dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Redo</dd></div>
+    <div><dt><kbd>Ctrl</kbd>+<kbd>C</kbd></dt><dd>Copy the selected box</dd></div>
+    <div><dt><kbd>Ctrl</kbd>+<kbd>V</kbd></dt><dd>Paste copied boxes onto this image</dd></div>
+    <div><dt><kbd>A</kbd></dt><dd>Approve (accept) selected box</dd></div>
+    <div><dt><kbd>R</kbd></dt><dd>Reject selected box</dd></div>
+    <div><dt><kbd>U</kbd></dt><dd>Undo approve / reject of the selected box</dd></div>
+    <div><dt><kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete selected box (model boxes are rejected, so they still count for precision)</dd></div>
+    <div><dt><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Select next / previous box</dd></div>
+    <div><dt><kbd>Enter</kbd></dt><dd>Box popup: save</dd></div>
+    <div><dt><kbd>Esc</kbd></dt><dd>Box popup: cancel (a new, unsaved box is removed); else leave the box tool / deselect</dd></div>
+    <div><dt><kbd>&uarr;</kbd> / <kbd>&darr;</kbd></dt><dd>Box popup: previous / next class</dd></div>
+    <div><dt><kbd>&larr;</kbd> / <kbd>&rarr;</kbd></dt><dd>Previous / next image</dd></div>
+    <div><dt><kbd>+</kbd> / <kbd>-</kbd></dt><dd>Zoom in / out</dd></div>
+    <div><dt><kbd>0</kbd> or double-click</dt><dd>Reset zoom (fit the image)</dd></div>
+    <div><dt><kbd>1</kbd></dt><dd>Zoom to 100% (1 image pixel = 1 screen pixel)</dd></div>
+    <div><dt><kbd>Ctrl</kbd>+scroll or pinch</dt><dd>Zoom around the cursor</dd></div>
+    <div><dt>Scroll / drag empty area</dt><dd>Pan when zoomed in (middle mouse button too)</dd></div>
+    <div><dt>Hold <kbd>H</kbd></dt><dd>Hide all boxes</dd></div>
+    <div><dt><kbd>?</kbd></dt><dd>Show this list</dd></div>
   </dl>
-  <p class="muted">Drag a selected box to move it, drag its handles to resize. Click a class
-  in the legend to hide or show it. Line style: dashed = needs review, solid = auto accepted /
-  accepted / edited, faded = rejected.</p>
+  <p id="keyNone" class="muted" hidden>No shortcut matches.</p>
+  <p class="muted">Line style: dashed = needs review, solid = auto accepted / accepted / edited, faded = rejected.
+  Mark image empty (N) is not available yet (needs a backend change).</p>
   <form method="dialog"><button class="primary">Close</button></form>
 </dialog>
 
