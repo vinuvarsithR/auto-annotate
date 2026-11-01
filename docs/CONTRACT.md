@@ -391,6 +391,23 @@ Who builds what:
 Export builds against B3's helper name once backend has merged it; until then it may insert the job
 row itself in its tests only.
 
+Push interface (owner: export; importable as `from autolabel.export import push_image, roboflow_settings`):
+```python
+def roboflow_settings() -> object | list[str]: ...
+    # the settings (e.g. a dict) when all 3 .env names are set, else the LIST of missing names
+def push_image(settings, image: dict, boxes: list[dict], class_names: list[str],
+               batch_name: str) -> str: ...
+    # one SDK upload; returns the Roboflow image id
+    # image       = {"id", "file_name", "path", "width", "height"}
+    # boxes       = [{"class_name": "biax", "bbox": [x, y, w, h]}, ...]   (pixels, section conventions)
+    # class_names = project class order (#7)
+```
+The **worker** (backend) owns image selection (`done`/`empty`, `roboflow_image_id` NULL), skipping,
+saving the returned id, progress and errors. It passes `push_image` only boxes whose status is in the
+job's `statuses` (#14's default approved statuses when the body gave none; never `rejected`), and
+`boxes = []` for an `empty` image. `push_image` does no filtering and never touches the database.
+If `settings` is a dict, values under a key whose name contains "key" are scrubbed from job errors.
+
 ---
 
 ## 3. Detector interface (Python)

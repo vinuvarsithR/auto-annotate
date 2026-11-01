@@ -15,6 +15,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 
@@ -60,12 +61,44 @@ def migrate(conn: sqlite3.Connection) -> None:
     """Bring a database made by an older version up to schema.sql. Never deletes data.
 
     | Added | Column                | Old rows get |
-    | #20   | images.review_status  | 'todo'       |
+    | #20   | images.review_status     | 'todo'       |
+    | #21   | images.roboflow_image_id | NULL         |
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
     if "review_status" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN review_status TEXT NOT NULL DEFAULT 'todo' "
                      "CHECK (review_status IN ('todo', 'done', 'empty'))")
+    if "roboflow_image_id" not in cols:
+        conn.execute("ALTER TABLE images ADD COLUMN roboflow_image_id TEXT")
+
+
+JOB_KINDS = ("detect", "roboflow_push")
+
+
+def create_job(conn: sqlite3.Connection, pid: int, kind: str, config: dict, total: int,
+               wake: Callable[[], None] | None = None) -> dict:
+    """Insert a 'queued' job and return it as Job JSON (B3, used by #9 and #21).
+
+    * total 0 -> the job is stored 'done' at once (progress 1, finished_at set).
+    * wake: pass request.app.state.worker.wake so the worker starts right away.
+    """
+    if kind not in JOB_KINDS:
+        raise ValueError(f"unknown job kind '{kind}'")
+    t = now()
+    with conn:
+        if total == 0:
+            cur = conn.execute(
+                "INSERT INTO jobs (project_id, kind, status, progress, done, total, config, "
+                "created_at, started_at, finished_at) VALUES (?, ?, 'done', 1.0, 0, 0, ?, ?, ?, ?)",
+                (pid, kind, json.dumps(config), t, t, t))
+        else:
+            cur = conn.execute(
+                "INSERT INTO jobs (project_id, kind, status, progress, done, total, config, "
+                "created_at) VALUES (?, ?, 'queued', 0, 0, ?, ?, ?)",
+                (pid, kind, total, json.dumps(config), t))
+    if wake is not None and total:
+        wake()
+    return job_dict(conn.execute("SELECT * FROM jobs WHERE id=?", (cur.lastrowid,)).fetchone())
 
 
 def fail_stale_jobs(conn: sqlite3.Connection) -> int:

@@ -40,6 +40,17 @@ Worker loads the models code lazily: `from autolabel import pipeline` and
 models branch is merged, this returns 400 `unknown_model` ("autolabel.models is not installed").
 Tests use their own fake (`tests/test_api_helpers.py`: FakeClassSpec/FakePrediction/FakePipeline).
 
+### #21 backend part (B1-B3, 2026-11-01)
+
+| Task | What | Where |
+|---|---|---|
+| B1 | `images.roboflow_image_id TEXT` in schema.sql; `migrate()` adds it to old DBs (rows kept, value NULL). Not in Image JSON | `app/db/` |
+| B2 | Worker takes any queued job (oldest first). `roboflow_push`: images `done`/`empty` with NULL id, boxes with status in `config.statuses` (`empty` image -> no boxes), batch `autolabel_<started_at date>`, id saved per image, `failed` + one-line error with the key replaced by `***` | `app/worker/worker.py` |
+| B3 | `db.create_job(conn, pid, kind, config, total, wake=None) -> Job`. `total` 0 -> stored `done` at once (no wake). Route passes `wake=request.app.state.worker.wake` | `app/db/db.py` |
+
+The #9 detect route is unchanged (still inserts its own row), so detect behaviour did not change.
+Tests: `tests/test_worker_push.py`, migration tests in `tests/test_db_schema.py`. Pusher faked, no network.
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 
@@ -60,11 +71,21 @@ Tests use their own fake (`tests/test_api_helpers.py`: FakeClassSpec/FakePredict
    `name_taken`, `class_in_use`, `unknown_model`, `no_classes`, `bad_image_ids`, `bad_class_id`,
    `internal_error`, `method_not_allowed`. Worth listing in section 2 so the UI can rely on them.
 
+3. **`push_image` call shape (for export, #21).** The contract does not fix it, so the worker uses
+   this; export please match it or ask for a change:
+   * `roboflow_settings()` returns the settings (any object, e.g. a dict) when all 3 names are set,
+     or a **list** of missing names.
+   * `push_image(settings, image, boxes, class_names, batch_name) -> str` (the Roboflow image id), where
+     `image = {"id", "file_name", "path", "width", "height"}`, `boxes = [{"class_name", "bbox": [x, y, w, h]}]`
+     (already filtered by status), `class_names` = project class order (#7).
+   * The worker loads them lazily in `default_load_pusher()`; tests inject `load_pusher`.
+   * If `settings` is a dict, values whose key name contains "key" (and env `ROBOFLOW_API_KEY`) are
+     scrubbed from job errors; `api_key=...` in URLs is scrubbed too.
+
 ## Open questions
 
 1. Should `GET /projects/{pid}/images` reject `limit` > 1000? (currently 400 above 1000.)
-2. Jobs for `kind = roboflow_push` are ignored by this worker; the export/push session will need either
-   a hook in the worker or its own runner. Which one?
+2. (closed) `roboflow_push` jobs now run in this worker (B2).
 3. The backend work was first built by mistake in the main worktree (`D:/autoannotate/auto-annotate`)
    and then copied here. The untracked copies there (`app/api/`, `app/db/`, `app/worker/`,
    `app/main.py`, `tests/test_api_*.py`, `tests/test_db_schema.py`, `tests/test_worker_status.py`)

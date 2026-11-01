@@ -16,6 +16,7 @@ CREATE TABLE images (
   uploaded_at  TEXT NOT NULL,
   review_status TEXT NOT NULL DEFAULT 'todo'
                 CHECK (review_status IN ('todo', 'done', 'empty')),  -- set only by #20
+  roboflow_image_id TEXT,               -- NULL = not pushed yet; set only by the #21 push job
   UNIQUE (project_id, file_name)
 );
 
