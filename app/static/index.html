@@ -200,6 +200,16 @@
 
   <!-- far right: image strip -->
   <aside id="strip" aria-label="Images">
+    <div class="review-box" role="group" aria-label="Review the selected box">
+      <button id="approveBtn" type="button" class="accept tip tip-left" data-tip="Approve selected box (A)" aria-label="Approve selected box (A)" disabled>
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="lbl">Approve</span><kbd>A</kbd>
+      </button>
+      <button id="rejectBtn" type="button" class="reject tip tip-left" data-tip="Reject selected box (R)" aria-label="Reject selected box (R)" disabled>
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span class="lbl">Reject</span><kbd>R</kbd>
+      </button>
+    </div>
     <div class="strip-head">
       <button id="stripToggle" type="button" class="icon ghost tip tip-left" data-tip="Hide images" aria-label="Hide image strip" aria-expanded="true" aria-controls="stripBody">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>

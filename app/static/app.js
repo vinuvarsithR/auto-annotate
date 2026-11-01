@@ -568,7 +568,16 @@ function popClasses() {
   return f ? state.classes.filter((c) => c.name.toLowerCase().includes(f)) : state.classes.slice();
 }
 
+// Approve / Reject buttons above the image strip: only for a saved, selected box.
+function renderReviewButtons() {
+  const a = selectedAnn();
+  const off = !a || a.id === PENDING;
+  $("approveBtn").disabled = off;
+  $("rejectBtn").disabled = off;
+}
+
 function renderPopup() {
+  renderReviewButtons();
   const a = selectedAnn();
   const el = $("boxPop");
   if (!a || state.loadingImage) {
@@ -1003,6 +1012,9 @@ document.addEventListener("mousedown", (e) => {
 });
 $("bpSave").addEventListener("click", savePopup);
 $("bpDelete").addEventListener("click", deleteBox);
+// Same as the A / R keys (and undone with U).
+$("approveBtn").addEventListener("click", () => setStatus("accepted"));
+$("rejectBtn").addEventListener("click", () => setStatus("rejected"));
 $("bpClass").addEventListener("input", (e) => { pop.filter = e.target.value; pop.hl = 0; renderPopList(); });
 $("bpClass").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); savePopup(); }

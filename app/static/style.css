@@ -245,6 +245,15 @@ input[type="range"] { accent-color: var(--text); width: 100%; margin: 0; }
 #strip.collapsed .strip-head .icon svg { transform: rotate(180deg); }
 #strip.collapsed .strip-title, #strip.collapsed .strip-body { display: none; }
 .strip-title { font-weight: 500; }
+/* Approve / Reject for the selected box, above the image strip; icons only when the strip is collapsed. */
+.review-box { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px 12px; flex: none;
+  border-bottom: 1px solid var(--line); }
+.review-box button { justify-content: flex-start; gap: 8px; padding: 0 10px; min-width: 0; }
+.review-box kbd { margin-left: auto; }
+#strip.collapsed .review-box { padding: 8px 6px; }
+#strip.collapsed .review-box button { justify-content: center; }
+#strip.collapsed .review-box button { padding: 0; }
+#strip.collapsed .review-box .lbl, #strip.collapsed .review-box kbd { display: none; }
 .strip-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .strip-body .filter { padding: 0 12px 8px; }
 .strip-body .filter select { flex: 1; min-width: 0; }
