@@ -40,6 +40,7 @@ CREATE TABLE images (
   review_status TEXT NOT NULL DEFAULT 'todo'
                 CHECK (review_status IN ('todo', 'done', 'empty')),  -- set only by #20
   roboflow_image_id TEXT,               -- NULL = not pushed yet; set only by the #21 push job
+  sha256       TEXT,                    -- hex SHA-256 of the uploaded bytes (#4 duplicate check)
   UNIQUE (project_id, file_name)
 );
 
@@ -122,6 +123,10 @@ stays `empty`. The backend adds the column on startup (`ALTER TABLE ... DEFAULT 
 adds it on startup (`ALTER TABLE images ADD COLUMN roboflow_image_id TEXT`) if missing. It is not
 part of the Image JSON.
 
+`images.sha256` is the hex SHA-256 of the file bytes, set by #4. On startup `migrate()` adds the
+column (`ALTER TABLE images ADD COLUMN sha256 TEXT`) if missing, then fills it for every row where
+it is NULL by hashing the file at `path` (a missing file leaves it NULL). It is not part of the Image JSON.
+
 Export / push rules (#14 and #21):
 
 | Rule | Value |
@@ -202,8 +207,20 @@ Response is a Project, as in #1.
 The request is `multipart/form-data` with one or more `files` fields (jpg/png).
 Response 201:
 ```json
-{"images": [Image, ...], "skipped": [{"file_name": "a.jpg", "reason": "duplicate"}]}
+{"images": [Image, ...],
+ "skipped": [{"file_name": "a.jpg", "reason": "duplicate"}],
+ "renamed": [{"from": "frame_0001.jpg", "to": "frame_0001_2.jpg"}]}
 ```
+Duplicate rules (by content, not name), checked file by file in upload order:
+
+| Upload | Result |
+|---|---|
+| Same bytes (sha256) as an image already in the project, or earlier in this request, whatever the name | skipped, `reason: "duplicate"` |
+| Same name as an existing image, different bytes | saved as `stem_2.ext` (`stem_3.ext`, ... if taken); the Image has the new `file_name`; listed in `renamed` |
+| New name, new bytes | saved as now |
+| Not a jpg/png | skipped, `reason: "not an image"` |
+
+`skipped` and `renamed` are always present (empty lists when nothing applies).
 **Image**:
 ```json
 {"id": 10, "project_id": 1, "file_name": "biax__cam0_2026-09-29_18-48-25_00290.jpg", "width": 1280, "height": 720,

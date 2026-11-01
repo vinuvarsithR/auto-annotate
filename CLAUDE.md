@@ -72,7 +72,8 @@ open http://localhost:8000/. (`/?mock=1` needs a static server on the repo root,
 screens yet: do those via http://localhost:8000/docs with `"model": "fake"`.
 Next (contract 2026-11-01): export session builds #14 (export zip) and #21 (Roboflow push route +
 `push_image`); backend builds B1-B3 for #21 (roboflow_image_id column, worker runs push jobs, create_job helper).
-#15 is removed. Export worktree: D:\autoannotate\aa-export (branch export).
+#15 is removed. Contract 2026-11-01 (branch contract-dedupe until backend builds it): #4 dedupes
+by content (images.sha256, backfilled in migrate()), same name + new bytes -> stem_2.ext, `renamed` list. Export worktree: D:\autoannotate\aa-export (branch export).
 
 ## Phase 1 state
 

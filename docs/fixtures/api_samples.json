@@ -102,6 +102,12 @@
     "file_name": "notes.txt",
     "reason": "not an image"
    }
+  ],
+  "renamed": [
+   {
+    "from": "frame_0001.jpg",
+    "to": "frame_0001_2.jpg"
+   }
   ]
  },
  "GET /api/projects/1/images": {
