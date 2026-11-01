@@ -11,7 +11,7 @@ pillow               # opens images
 pyyaml               # reads classes.yaml
 
 # Phase 1: pulling a provisional gold set from Roboflow
-roboflow             # Roboflow Python SDK; checked against 1.7.3
+roboflow==1.7.3      # Roboflow Python SDK (#21 push); pinned, verified installed 2026-11-01
 python-dotenv        # reads ROBOFLOW_API_KEY from .env
 
 # Phase 2: backend (FastAPI app in app/); minimums = versions verified on Windows 2026-10-31

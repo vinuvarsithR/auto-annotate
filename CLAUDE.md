@@ -70,8 +70,9 @@ backend (endpoints 1-13), ui (review page). Run the app: `uvicorn app.main:app -
 open http://localhost:8000/. (`/?mock=1` needs a static server on the repo root, e.g.
 `python -m http.server`; uvicorn does not serve docs/fixtures/.) The UI has no upload/classes/job
 screens yet: do those via http://localhost:8000/docs with `"model": "fake"`.
-Next: backend builds GET /api/models (contract #16), #17-#19 and the #13 status change; export session builds #14 and the
-roboflow_push runner (#15, later).
+Next (contract 2026-11-01): export session builds #14 (export zip) and #21 (Roboflow push route +
+`push_image`); backend builds B1-B3 for #21 (roboflow_image_id column, worker runs push jobs, create_job helper).
+#15 is removed. Export worktree: D:\autoannotate\aa-export (branch export).
 
 ## Phase 1 state
 

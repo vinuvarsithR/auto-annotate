@@ -628,24 +628,21 @@
   "created_at": "2026-10-30T14:03:00Z",
   "updated_at": "2026-10-30T14:06:00Z"
  },
- "POST /api/projects/1/roboflow-push": {
+ "POST /api/projects/1/roboflow/push": {
   "id": 7,
   "project_id": 1,
   "kind": "roboflow_push",
   "status": "queued",
   "progress": 0.0,
   "done": 0,
-  "total": 3,
+  "total": 2,
   "error": null,
   "config": {
-   "workspace": "vinus-workspace-4ji2t",
-   "project": "eot_crane-yduh1-vhu5p-ohmpg",
    "statuses": [
     "auto_accepted",
     "accepted",
     "edited"
-   ],
-   "batch_name": "autolabel_2026-10-30"
+   ]
   },
   "created_at": "2026-10-30T14:07:00Z",
   "started_at": null,
@@ -760,6 +757,18 @@
   "error": {
    "code": "bad_request",
    "message": "review_status must be one of todo, done, empty"
+  }
+ },
+ "error example (409 conflict, #14 no done/empty images)": {
+  "error": {
+   "code": "conflict",
+   "message": "project 1 has no images with review_status done or empty"
+  }
+ },
+ "error example (409 conflict, #21 roboflow settings missing)": {
+  "error": {
+   "code": "conflict",
+   "message": "missing in .env: ROBOFLOW_WORKSPACE, ROBOFLOW_PROJECT"
   }
  },
  "all_annotations": [

@@ -39,6 +39,7 @@ CREATE TABLE images (
   uploaded_at  TEXT NOT NULL,
   review_status TEXT NOT NULL DEFAULT 'todo'
                 CHECK (review_status IN ('todo', 'done', 'empty')),  -- set only by #20
+  roboflow_image_id TEXT,               -- NULL = not pushed yet; set only by the #21 push job
   UNIQUE (project_id, file_name)
 );
 
@@ -117,6 +118,20 @@ the image to be `rejected` (#20 -> 409 `conflict` otherwise), and #12 on an `emp
 409 `conflict`. A detect job (#9) or an undo (#13) may still add boxes to an `empty` image; it
 stays `empty`. The backend adds the column on startup (`ALTER TABLE ... DEFAULT 'todo'`) if missing.
 
+`images.roboflow_image_id` is the id Roboflow returned when the image was pushed (#21). The backend
+adds it on startup (`ALTER TABLE images ADD COLUMN roboflow_image_id TEXT`) if missing. It is not
+part of the Image JSON.
+
+Export / push rules (#14 and #21):
+
+| Rule | Value |
+|---|---|
+| Images | only `review_status` `done` or `empty`; `todo` images are left out |
+| `empty` image | exported / pushed as an image with no labels |
+| Approved statuses (the default `statuses`) | `auto_accepted`, `accepted`, `edited` |
+| `statuses` allowed values | any #13 status **except** `rejected`; `rejected` or unknown -> 400 `bad_request` |
+| Class order | project class order = the order #7 returns. YOLO class index = position in that list; COCO categories in the same order |
+
 ---
 
 ## 2. REST API
@@ -142,7 +157,7 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 405 | `method_not_allowed` | wrong HTTP method for the path |
 | 409 | `name_taken` | project name already used (#1 create, #17 rename) |
 | 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
-| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12) |
+| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12), no `done`/`empty` images (#14, #21), Roboflow settings missing from `.env` (#21) |
 | 500 | `internal_error` | unexpected server error (details only in the server log) |
 
 | # | Method | Path | Purpose |
@@ -161,12 +176,13 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 12 | POST | `/images/{iid}/annotations` | add human box |
 | 13 | PATCH | `/annotations/{aid}` | review / edit a box |
 | 14 | POST | `/projects/{pid}/export` | download COCO / YOLO zip |
-| 15 | POST | `/projects/{pid}/roboflow-push` | start push job |
+| 15 | - | - | removed (replaced by #21) |
 | 16 | GET | `/models` | detector names for POST .../jobs |
 | 17 | PATCH | `/projects/{pid}` | rename project |
 | 18 | DELETE | `/projects/{pid}` | delete project and everything in it |
 | 19 | DELETE | `/annotations/{aid}` | hard-delete one box |
 | 20 | PATCH | `/images/{iid}` | set image review status |
+| 21 | POST | `/projects/{pid}/roboflow/push` | start Roboflow push job |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -270,27 +286,28 @@ this to put a box back exactly as it was (undo "accept" -> `needs_review`; undo 
 bbox and the old status in one call).
 
 ### 14. POST /projects/{pid}/export
-Request:
+Request (every field optional):
 ```json
 {"format": "coco", "statuses": ["auto_accepted", "accepted", "edited"], "include_images": false}
 ```
-`format` is `coco` or `yolo`. The response is a `application/zip` download named
-`<project>_<format>.zip`.
-An image with `review_status: "empty"` is exported with no annotations.
+| Field | Default | Rule |
+|---|---|---|
+| `format` | `"coco"` | `yolo` or `coco`; anything else -> 400 `bad_request` |
+| `statuses` | approved statuses (section 1) | never `rejected`; `rejected`, unknown or empty list -> 400 `bad_request` |
+| `include_images` | `false` | `true` puts the image files in the zip too |
+
+Only images with `review_status` `done` or `empty` are exported (section 1, export / push rules);
+an `empty` image is exported with no labels. Only boxes whose status is in `statuses` are written.
+The response is an `application/zip` download named `<project>_<format>.zip`.
+Errors: unknown pid -> 404 `not_found`; bad `format` / `statuses` / body -> 400 `bad_request`;
+no `done` or `empty` image in the project -> 409 `conflict`.
 Route rule: `app/api/export.py` defines `router = APIRouter()` with the path
 `/projects/{pid}/export` (no `/api`); `app/main.py` mounts it under `/api` when the module exists.
 The zip layout is defined by the export session in `autolabel/export/`
-and documented in its notes.
+and documented in its notes. Owner: export.
 
-### 15. POST /projects/{pid}/roboflow-push
-Request:
-```json
-{"workspace": "vinus-workspace-4ji2t", "project": "eot_crane-yduh1-vhu5p-ohmpg",
- "statuses": ["auto_accepted", "accepted", "edited"], "batch_name": "autolabel_2026-10-30"}
-```
-Response 202 is a Job with `kind: "roboflow_push"`, which you poll with #10. The push uses
-the Roboflow **Python SDK** with the `.env` key only, never the Roboflow MCP connector.
-Who runs `roboflow_push` jobs: the **export session, later**. The backend worker ignores them for now.
+### 15. (removed)
+Replaced by #21. Nothing was built for it.
 
 ### 16. GET /models
 Response `{"models": [...]}`, which is exactly `autolabel.models.list_detectors()`. Today:
@@ -336,6 +353,43 @@ Image. Any value may be set at any time, except `empty` while the image has a bo
 `rejected` -> 409 `conflict` and nothing changes. `done` is allowed with boxes still
 `needs_review`. Errors: missing or unknown `review_status`, or a bad body -> 400 `bad_request`;
 unknown iid -> 404 `not_found`. Setting the current value again is a no-op 200.
+
+### 21. POST /projects/{pid}/roboflow/push
+Start a job that uploads images and their boxes to Roboflow. Request body is optional:
+```json
+{"statuses": ["auto_accepted", "accepted", "edited"]}
+```
+`statuses` follows the same rules and default as #14. The image / box rules are the same as #14
+(section 1). Settings come **only** from `.env` on the server:
+
+| `.env` name | Meaning |
+|---|---|
+| `ROBOFLOW_API_KEY` | API key. Never in a request, response, job `config`, job `error`, log or DB row. |
+| `ROBOFLOW_WORKSPACE` | workspace id, e.g. `vinus-workspace-4ji2t` |
+| `ROBOFLOW_PROJECT` | project id, e.g. `eot_crane-yduh1-vhu5p-ohmpg` |
+
+Response 202 is a Job with `kind: "roboflow_push"`, polled with #10. Its `config` is the request
+body with defaults filled in (`{"statuses": [...]}`), never the key. `total` = the `done`/`empty`
+images whose `roboflow_image_id` is NULL; images already pushed are skipped (so a change made after
+a push is not re-sent). A job with `total` 0 finishes `done` at once.
+The job uploads one image at a time with the **roboflow Python SDK** (never the Roboflow MCP
+connector), with batch name `autolabel_<YYYY-MM-DD>` (job start, UTC), and stores the returned id in
+`images.roboflow_image_id` right after each upload, so a failed job can simply be started again.
+On an error the job becomes `failed` with a one-line `error` that never contains the key.
+Errors (checked in this order): unknown pid -> 404 `not_found`; bad `statuses` / body -> 400
+`bad_request`; any of the 3 `.env` names missing or empty -> 409 `conflict` (the message names the
+missing variables, never a value); no `done` or `empty` image -> 409 `conflict`.
+
+Who builds what:
+
+| Role | Builds |
+|---|---|
+| export | `autolabel/export/`: `to_coco`, `to_yolo`, the zip, the image/box selection rules, `roboflow_settings()` (reads the 3 `.env` names, returns the values or the list of missing names) and `push_image(...)` (one SDK upload, returns the Roboflow image id). `app/api/export.py`: routes #14 and #21 (#21 = checks + creates the job row + wakes the worker). Tests `tests/test_export_*.py` with the SDK mocked (no network in tests). |
+| backend | B1: add `images.roboflow_image_id` (startup `ALTER TABLE`). B2: the worker runs `roboflow_push` jobs: pick the images, call export's `push_image` per image, save `roboflow_image_id`, update `done`/`progress`, `failed` with a key-free one-line error. B3: a helper the export route can call to insert a job and wake the worker (e.g. `create_job(conn, pid, kind, config, total) -> Job` in `app/db/`). Tests in `tests/test_worker_*.py`. |
+| ui | nothing yet (export / push buttons come later, after the endpoints work). |
+
+Export builds against B3's helper name once backend has merged it; until then it may insert the job
+row itself in its tests only.
 
 ---
 
