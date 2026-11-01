@@ -136,6 +136,19 @@ None (plain JS, no libraries).
 
 ## Contract change requests
 
+### 2026-11-01: duplicate uploads by content, not name (for backend + integrator)
+Today #4 skips any file whose name already exists in the project (`reason: "duplicate"`), and
+`images` has `UNIQUE (project_id, file_name)`. So a different picture that happens to share a
+name (e.g. `frame_0001.jpg` from a second camera) is silently lost. The UI can't fix this alone.
+Proposal for **#4 POST /projects/{pid}/images**:
+- New column `images.sha256 TEXT` (hash of the uploaded bytes; backfilled for old rows on startup).
+- Same name AND same sha256 as an image in the project -> skipped, `reason: "duplicate"` (as now).
+- Same name, different content -> stored anyway under a free name `stem_2.ext`, `stem_3.ext`, ...
+  (keeps the UNIQUE constraint; file names stay unique for COCO/YOLO export). The returned Image
+  has the new `file_name`; the response gets `renamed: [{"from": "frame_0001.jpg", "to": "frame_0001_2.jpg"}]`.
+- Different name, same content: uploaded as now (not asked for; can be a later option).
+The UI will show renamed files in the upload summary. Until then the UI keeps the current behaviour.
+
 ### 2026-11-01: mark an image as empty / reviewed (for backend + integrator)
 The editor has a "Mark image empty" tool (N). The contract has no image-level state, so the
 button is disabled and N only shows a message. Today "done" in the strip = no box needs review,

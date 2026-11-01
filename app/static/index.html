@@ -6,7 +6,12 @@
 <title>Auto-annotate review</title>
 <link rel="preload" href="fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/ibm-plex-sans-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="style.css">
+<script>
+  // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
+  // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
+  window.ASSET_VERSION = "2026-11-01.2";
+  document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
+</script>
 </head>
 <body>
 <header id="topbar">
@@ -286,10 +291,10 @@
   <form method="dialog"><button class="primary">Close</button></form>
 </dialog>
 
-<script src="api.js"></script>
-<script src="canvas.js"></script>
-<script src="app.js"></script>
-<script src="setup.js"></script>
-<script src="projects.js"></script>
+<script>
+  // Loaded in this order (document.write keeps them synchronous and ordered), with ?v=ASSET_VERSION.
+  for (const f of ["api.js", "canvas.js", "app.js", "setup.js", "projects.js"])
+    document.write('<script src="' + f + '?v=' + ASSET_VERSION + '"><\/script>');
+</script>
 </body>
 </html>
