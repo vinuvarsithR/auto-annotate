@@ -59,6 +59,9 @@ const realApi = {
   getAnnotations: (iid) => http("GET", `/images/${iid}/annotations`),
   createAnnotation: (iid, body) => http("POST", `/images/${iid}/annotations`, body),
   patchAnnotation: (aid, body) => http("PATCH", `/annotations/${aid}`, body),
+  // #20: set the image review status ("todo" | "done" | "empty"); 409 conflict when "empty"
+  // and the image still has a box that is not rejected.
+  patchImage: (iid, body) => http("PATCH", `/images/${iid}`, body),
   imageUrl: (img) => img.url,
 
   // ---- requested contract changes (docs/agents/ui.md): #17 rename, #18 delete project,
@@ -189,6 +192,7 @@ function mockNotFound(what, id) {
 
 function mockImageWithCounts(db, img) {
   const out = clone(img);
+  if (!out.review_status) out.review_status = "todo";
   out.counts = countStatuses(db.annotations.filter((a) => a.image_id === img.id));
   return out;
 }
@@ -235,6 +239,9 @@ const mockApi = {
     const db = await loadMock();
     const img = db.images.find((i) => i.id === Number(iid));
     if (!img) mockNotFound("image", iid);
+    if (img.review_status === "empty") {
+      throw new ApiError("conflict", `image ${img.id} is marked empty; set review_status to todo first`, 409);
+    }
     const cls = db.classes.find((c) => c.id === body.class_id);
     if (!cls) throw new ApiError("bad_request", `class ${body.class_id} not found`, 400);
     const t = now();
@@ -269,6 +276,20 @@ const mockApi = {
     if ("reviewer" in body) a.reviewer = body.reviewer;
     a.updated_at = now();
     return clone(a);
+  },
+  async patchImage(iid, body) { // #20
+    const db = await loadMock();
+    const img = db.images.find((i) => i.id === Number(iid));
+    if (!img) mockNotFound("image", iid);
+    if (!["todo", "done", "empty"].includes(body.review_status)) {
+      throw new ApiError("bad_request", `unknown review_status "${body.review_status}"`, 400);
+    }
+    if (body.review_status === "empty") {
+      const live = db.annotations.filter((a) => a.image_id === img.id && a.status !== "rejected").length;
+      if (live) throw new ApiError("conflict", `image ${img.id} has ${live} box(es) that are not rejected`, 409);
+    }
+    img.review_status = body.review_status;
+    return mockImageWithCounts(db, img);
   },
   imageUrl: (img) => img.url, // fixture urls are not served -> the canvas draws a placeholder
 
@@ -336,7 +357,7 @@ const mockApi = {
       const { width, height } = await imageSize(f);
       // A blob: URL, so uploaded images really show on the review canvas in mock mode.
       const img = { id: db.nextImageId++, project_id: Number(pid), file_name: f.name, width, height,
-                    url: URL.createObjectURL(f), uploaded_at: now() };
+                    url: URL.createObjectURL(f), uploaded_at: now(), review_status: "todo" };
       db.images.push(img);
       images.push(mockImageWithCounts(db, img));
     }

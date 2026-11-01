@@ -294,7 +294,8 @@ function buildImageList() {
     const li = document.createElement("li");
     li.innerHTML =
       `<button type="button" class="thumb"><span class="frame"><img alt="" loading="lazy" decoding="async">` +
-      `<span class="ph"></span><span class="dot"></span><span class="idx"></span></span><span class="name"></span></button>`;
+      `<span class="ph"></span><span class="marks"><span class="nr"></span><span class="dot"></span></span>` +
+      `<span class="idx"></span></span><span class="name"></span></button>`;
     const frame = li.querySelector(".frame");
     const im = li.querySelector("img");
     im.addEventListener("error", () => frame.classList.add("missing"));
@@ -309,24 +310,31 @@ function buildImageList() {
   renderImageList();
 }
 
-// "Done" = no box on the image still needs review (the contract has no image-level status).
+// Strip marks come from the stored review_status (#5 / #20): check = done, empty-set = empty, none = todo.
+const REVIEW_MARK = { done: "Reviewed (done)", empty: "Marked empty: nothing to label" };
 function renderImageList() {
   const ul = $("imageList");
   state.images.forEach((img, i) => {
     const li = ul.children[i];
     if (!li) return;
     li.classList.toggle("current", i === state.imageIndex);
-    const nr = img.counts ? img.counts.needs_review : 0;
+    const rs = img.review_status || "todo";
     const dot = li.querySelector(".dot");
-    dot.classList.toggle("todo", nr > 0);
-    dot.classList.toggle("done", nr === 0);
-    dot.textContent = nr > 0 ? String(nr) : "";
-    dot.title = nr > 0 ? `${nr} box(es) need review` : "Reviewed: no box needs review";
+    dot.classList.toggle("done", rs === "done");
+    dot.classList.toggle("empty", rs === "empty");
+    dot.hidden = !REVIEW_MARK[rs];
+    dot.title = REVIEW_MARK[rs] || "";
+    const n = img.counts ? img.counts.needs_review : 0;
+    const nr = li.querySelector(".nr");
+    nr.hidden = !n;
+    nr.textContent = n ? String(n) : "";
+    nr.title = n ? `${n} box(es) need review` : "";
   });
   const pos = state.imageIndex >= 0 ? state.offset + state.imageIndex + 1 : 0;
   $("imgCounter").textContent = `${pos} / ${state.total}`;
   $("imgPrev").disabled = pos <= 1;
   $("imgNext").disabled = pos >= state.total;
+  renderReviewStatusBtns();
 }
 
 function setStripOpen(on) {
@@ -362,6 +370,7 @@ async function openImage(i) {
   state.image = data.image;
   state.anns = data.annotations;
   syncCanvas();
+  renderReviewStatusBtns();
   renderLabels();
   renderRepeat();
   // Start on the first box that still needs review.
@@ -542,11 +551,24 @@ function dropPending() {
   renderPopup();
 }
 
+const EMPTY_MSG = "Image is marked empty - press N to unmark it first.";
+
+// POST #12. On an image marked empty the server answers 409: say how to fix it.
+async function postBox(iid, body) {
+  try { return await api.createAnnotation(iid, body); }
+  catch (e) {
+    if (e instanceof ApiError && e.httpStatus === 409) { showBanner(EMPTY_MSG); return null; } // expected, handled
+    console.error(e);
+    showBanner(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
+    return null;
+  }
+}
+
 async function savePending(cls) {
   const p = state.pending;
   const iid = p.image_id;
-  const created = await guard(() => api.createAnnotation(iid,
-    { class_id: cls.id, bbox: p.bbox, mask: null, reviewer: reviewer() }));
+  const created = await postBox(iid, { class_id: cls.id, bbox: p.bbox, mask: null, reviewer: reviewer() });
+  if (!created && state.pending === p) { dropPending(); return null; } // nothing saved: remove the unsaved box
   if (!created || !state.image || state.image.id !== iid || state.pending !== p) return null;
   state.pending = null;
   state.anns.push(created);
@@ -703,7 +725,7 @@ function popupOpen() { return !$("boxPop").hidden && pop.forId != null; }
 async function createBoxes(img, boxes, label) {
   const created = [];
   for (const t of boxes) {
-    const c = await guard(() => api.createAnnotation(img.id, { ...t, mask: null, reviewer: reviewer() }));
+    const c = await postBox(img.id, { ...t, mask: null, reviewer: reviewer() });
     if (!c) break;
     created.push(c);
     if (state.image === img) state.anns.push(c);
@@ -911,8 +933,43 @@ function setTool(tool) {
   $("toolBox").setAttribute("aria-pressed", String(tool === "box"));
 }
 
-function markEmpty() {
-  showBanner("Mark image empty is not available yet: the backend has no way to store it (see docs/agents/ui.md).", "info");
+// Image review status via #20. N toggles "empty", Ctrl+Enter toggles "done"; pressing again
+// sets "todo". A 409 (boxes that are not rejected, for "empty") shows the server's message and
+// changes nothing here. Marking done moves on to the next image.
+async function toggleReview(kind) {
+  const img = state.image;
+  if (!img || state.busy || state.loadingImage) return;
+  const target = img.review_status === kind ? "todo" : kind;
+  state.busy = true;
+  let updated = null;
+  try { updated = await api.patchImage(img.id, { review_status: target, reviewer: reviewer() }); }
+  catch (e) {
+    if (!(e instanceof ApiError && e.httpStatus === 409)) console.error(e); // 409 is expected, shown as a toast
+    showBanner(e instanceof ApiError ? e.message : String(e));
+  } finally { state.busy = false; }
+  if (!updated) return;
+  img.review_status = updated.review_status;
+  const row = state.images.find((i) => i.id === updated.id);
+  if (row) row.review_status = updated.review_status;
+  if (updated.review_status === "empty") dropPending();
+  renderImageList();
+  const msg = { empty: "Image marked empty.", done: "Image marked done.", todo: "Image set back to to-do." };
+  showBanner(msg[updated.review_status], "info");
+  if (updated.review_status === "done" && state.image === img) await stepImage(1);
+}
+
+function renderReviewStatusBtns() {
+  const img = state.image;
+  const rs = img ? img.review_status : null;
+  const set = (id, on, tipOn, tipOff) => {
+    const b = $(id);
+    b.disabled = !img;
+    b.setAttribute("aria-pressed", String(on));
+    b.dataset.tip = on ? tipOn : tipOff;
+    b.setAttribute("aria-label", b.dataset.tip);
+  };
+  set("emptyBtn", rs === "empty", "Unmark empty (N): set back to to-do", "Mark image empty (N)");
+  set("doneBtn", rs === "done", "Unmark done (Ctrl+Enter): set back to to-do", "Mark image done (Ctrl+Enter), then next image");
 }
 
 // ------------------------------------------------------------ zoom + adjust
@@ -995,6 +1052,8 @@ $("toolBox").addEventListener("click", () => setTool("box"));
 $("undoBtn").addEventListener("click", () => runHistory("undo"));
 $("redoBtn").addEventListener("click", () => runHistory("redo"));
 $("repeatBtn").addEventListener("click", repeatPrevious);
+$("emptyBtn").addEventListener("click", () => toggleReview("empty"));
+$("doneBtn").addEventListener("click", () => toggleReview("done"));
 $("zoomIn").addEventListener("click", () => canvas.zoomAt(1.25));
 $("zoomOut").addEventListener("click", () => canvas.zoomAt(0.8));
 $("zoomReset").addEventListener("click", () => canvas.resetView());
@@ -1046,6 +1105,7 @@ document.addEventListener("keydown", (e) => {
     else if ((key === "z" && e.shiftKey) || key === "y") runHistory("redo");
     else if (key === "c" && !e.shiftKey) { if (!copyBox()) return; }
     else if (key === "v" && !e.shiftKey) pasteBoxes();
+    else if (key === "enter" && !e.shiftKey) toggleReview("done");
     else return;
     e.preventDefault();
     return;
@@ -1065,7 +1125,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "Enter" && popupOpen() && !onButton) savePopup();
   else if (k === "d" || k === "D") setTool("drag");
   else if (k === "b" || k === "B") setTool("box");
-  else if (k === "n" || k === "N") markEmpty();
+  else if (k === "n" || k === "N") toggleReview("empty");
   else if (k === "p" || k === "P") repeatPrevious();
   else if (k === "+" || k === "=") canvas.zoomAt(1.25);
   else if (k === "-" || k === "_") canvas.zoomAt(0.8);
