@@ -1,6 +1,8 @@
 # PyTorch is NOT listed here. Install it first with:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-# (see README.md, step 4)
+# CPU-only machine (e.g. the Windows box) instead:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# torchvision is needed by autolabel/owlv2.py (NMS). (see README.md, step 4)
 
 # Arrays (PyTorch uses it to convert data; not installed automatically by the cu128 wheel)
 numpy
