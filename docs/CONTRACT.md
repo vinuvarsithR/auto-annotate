@@ -404,7 +404,7 @@ Who builds what:
 |---|---|
 | export | `autolabel/export/`: `to_coco`, `to_yolo`, the zip, the image/box selection rules, `roboflow_settings()` (reads the 3 `.env` names, returns the values or the list of missing names) and `push_image(...)` (one SDK upload, returns the Roboflow image id). `app/api/export.py`: routes #14 and #21 (#21 = checks + creates the job row + wakes the worker). Tests `tests/test_export_*.py` with the SDK mocked (no network in tests). |
 | backend | B1: add `images.roboflow_image_id` (startup `ALTER TABLE`). B2: the worker runs `roboflow_push` jobs: pick the images, call export's `push_image` per image, save `roboflow_image_id`, update `done`/`progress`, `failed` with a key-free one-line error. B3: a helper the export route can call to insert a job and wake the worker (e.g. `create_job(conn, pid, kind, config, total) -> Job` in `app/db/`). Tests in `tests/test_worker_*.py`. |
-| ui | nothing yet (export / push buttons come later, after the endpoints work). |
+| ui | Projects page buttons (Export, Push to Roboflow). |
 
 Export builds against B3's helper name once backend has merged it; until then it may insert the job
 row itself in its tests only.
