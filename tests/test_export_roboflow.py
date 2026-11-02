@@ -119,10 +119,32 @@ def test_push_uploads_image_and_boxes(fake_sdk, settings, image, capsys, caplog)
     no_key_anywhere(capsys, caplog, json.dumps(call["annotation"]))
 
 
-def test_push_no_boxes(fake_sdk, settings, image):
+def test_push_boxes_annotation_content(fake_sdk, settings, image):
+    push_image(settings, image, BOXES, CLASSES, "b")
+    ann = fake_sdk.calls[0]["annotation"]
+    assert ann["name"] == "annotation.coco.json"
+    coco = json.loads(ann["rawText"])
+    assert coco["images"] == [{"id": 1, "file_name": "biax__cam0_00290.jpg",
+                               "width": 1280, "height": 720}]
+    assert {a["image_id"] for a in coco["annotations"]} == {1}   # no null placeholder
+    assert [a["area"] for a in coco["annotations"]] == [690.0 * 58.0, 40.0 * 50.0]
+    assert "info" in coco and "licenses" in coco
+
+
+def test_push_no_boxes_is_null_image(fake_sdk, settings, image):
+    # Real Roboflow rejected `"annotations": []` ("Unrecognized annotation format"). The
+    # SDK's own importer sends one placeholder that points at a non-existent image id.
     push_image(settings, image, [], CLASSES, "b")
-    coco = json.loads(fake_sdk.calls[0]["annotation"]["rawText"])
-    assert len(coco["images"]) == 1 and coco["annotations"] == []
+    ann = fake_sdk.calls[0]["annotation"]
+    assert ann["name"] == "annotation.coco.json"
+    coco = json.loads(ann["rawText"])
+    assert coco["images"] == [{"id": 1, "file_name": "biax__cam0_00290.jpg",
+                               "width": 1280, "height": 720}]
+    assert [c["name"] for c in coco["categories"]] == CLASSES
+    (placeholder,) = coco["annotations"]
+    assert placeholder == roboflow_push.NULL_PLACEHOLDER
+    assert placeholder["image_id"] not in {i["id"] for i in coco["images"]}
+    assert "bbox" not in placeholder
 
 
 def test_project_opened_once(fake_sdk, settings, image):

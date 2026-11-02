@@ -110,8 +110,20 @@ def _project(settings: RoboflowSettings):
     return _projects[k]
 
 
+# The Roboflow backend only recognises a COCO file that has at least one annotation. For
+# an image with no boxes, the SDK's own COCO importer (roboflow.util.folderparser,
+# _filterIndividualAnnotations, SDK 1.7.3) adds this placeholder, which points at an image id
+# that does not exist, so the uploaded image is saved as a null (no-object) image.
+NULL_PLACEHOLDER = {"id": 999999999, "image_id": 999999999, "category_id": 0,
+                    "area": 1, "segmentation": [], "iscrowd": 0}
+ANNOTATION_NAME = "annotation.coco.json"   # same name the SDK importer uses
+
+
 def coco_for_image(image: dict, boxes: list[dict], class_names: list[str]) -> dict:
-    """One-image COCO dict; categories 1-based in class_names order."""
+    """
+    One-image COCO dict; categories 1-based in class_names order. No boxes -> only the
+    NULL_PLACEHOLDER annotation (Roboflow then marks the image as null).
+    """
     idx = {n: i for i, n in enumerate(class_names)}
     anns = []
     for i, b in enumerate(boxes, start=1):
@@ -121,10 +133,12 @@ def coco_for_image(image: dict, boxes: list[dict], class_names: list[str]) -> di
         anns.append({"id": i, "image_id": 1, "category_id": idx[b["class_name"]] + 1,
                      "bbox": [x, y, w, h], "area": w * h, "iscrowd": 0, "segmentation": []})
     return {
+        "info": {},
+        "licenses": [],
         "images": [{"id": 1, "file_name": image["file_name"],
                     "width": image["width"], "height": image["height"]}],
         "categories": [{"id": i + 1, "name": n} for i, n in enumerate(class_names)],
-        "annotations": anns,
+        "annotations": anns or [dict(NULL_PLACEHOLDER)],
     }
 
 
@@ -138,14 +152,13 @@ def push_image(
     """
     Upload one image with its boxes to Roboflow; return the Roboflow image id.
     The file at image["path"] is uploaded under its original image["file_name"], with a
-    one-image COCO annotation (no boxes for an empty list). Raises PushError (one line,
+    one-image COCO annotation (an empty list uploads a null image). Raises PushError (one line,
     key-free) on any failure.
     """
     secrets = [settings.api_key]
     project = _project(settings)
     coco = coco_for_image(image, boxes, class_names)
-    stem = PurePosixPath(image["file_name"]).stem
-    ann = {"name": f"{stem}.json", "rawText": json.dumps(coco)}
+    ann = {"name": ANNOTATION_NAME, "rawText": json.dumps(coco)}
 
     with tempfile.TemporaryDirectory() as tmp:
         # Roboflow names the image after the uploaded file; the file on disk is

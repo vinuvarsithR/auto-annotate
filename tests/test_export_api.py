@@ -239,7 +239,7 @@ def test_push_job_through_real_worker(tmp_path, env, monkeypatch, capsys, caplog
         coco0, coco1 = proj.calls[0]["coco"], proj.calls[1]["coco"]
         assert [a["category_id"] for a in coco0["annotations"]] == [1]   # person only
         assert coco0["annotations"][0]["bbox"] == [10.0, 20.0, 30.0, 40.0]
-        assert coco1["annotations"] == []                                 # empty image
+        assert coco1["annotations"] == [roboflow_push.NULL_PLACEHOLDER]   # empty -> null image
 
         # second push: nothing left, job done at once, SDK not called again
         job2 = c.post(f"/api/projects/{s['pid']}/roboflow/push").json()
