@@ -413,6 +413,15 @@ table.grid .c-del:hover { color: var(--rejected); }
 .p-confirm { grid-column: 1 / -1; border-top: 1px dashed var(--line); padding-top: 12px; margin-top: -2px; }
 .p-confirm p { margin: 0 0 10px; color: var(--rejected); }
 .p-confirm .row { margin: 0; }
+.p-panel { grid-column: 1 / -1; border-top: 1px dashed var(--line); padding-top: 12px; margin-top: -2px; }
+.p-panel .row { margin: 0; flex-wrap: wrap; gap: 10px; }
+.p-panel p { margin: 0 0 10px; font-size: 12px; }
+.p-panel .p-note, .p-panel .p-msg { margin: 8px 0 0; }
+.p-panel .bar { margin: 0 0 5px; }
+.p-job { margin: 0 0 10px; font-size: 12px; }
+.p-panel .err { color: var(--rejected); }
+.p-panel .seg { display: inline-flex; gap: 12px; }
+.p-panel .seg label, .p-panel label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
 .empty { text-align: center; padding: 40px 0; border: 1px dashed var(--line); border-radius: var(--radius); }
 
 /* ---------------------------------------------------------------- reduced motion */

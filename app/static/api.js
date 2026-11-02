@@ -50,9 +50,10 @@ const realApi = {
   mock: false,
   listProjects: () => http("GET", "/projects"),
   getProject: (pid) => http("GET", `/projects/${pid}`),
-  listImages(pid, { status = null, offset = 0, limit = 50 } = {}) {
+  listImages(pid, { status = null, reviewStatus = null, offset = 0, limit = 50 } = {}) {
     const q = new URLSearchParams({ offset, limit });
     if (status) q.set("status", status);
+    if (reviewStatus) q.set("review_status", reviewStatus);
     return http("GET", `/projects/${pid}/images?${q}`);
   },
   listClasses: (pid) => http("GET", `/projects/${pid}/classes`),
@@ -95,6 +96,28 @@ const realApi = {
   putClasses: (pid, classes) => http("PUT", `/projects/${pid}/classes`, { classes }),
   startJob: (pid, body) => http("POST", `/projects/${pid}/jobs`, body),
   getJob: (jid) => http("GET", `/jobs/${jid}`),
+
+  // ---- export (#14) and Roboflow push (#21)
+  // #14 answers a zip, so this uses fetch directly. Returns {blob, filename}; errors -> ApiError.
+  async exportZip(pid, body) {
+    let res;
+    try {
+      res = await fetch(`/api/projects/${pid}/export`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } catch (e) {
+      throw new ApiError("network", "cannot reach the server: " + e.message, 0);
+    }
+    if (!res.ok) {
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* non-JSON body */ }
+      const err = (data && data.error) || {};
+      throw new ApiError(err.code || "http_" + res.status, err.message || res.status + " " + res.statusText, res.status);
+    }
+    const m = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+    return { blob: await res.blob(), filename: m ? m[1] : `project_${pid}_${body.format}.zip` };
+  },
+  // #21: no body = the default approved statuses. Response 202 is a Job, polled with getJob.
+  startPush: (pid) => http("POST", `/projects/${pid}/roboflow/push`),
   // Endpoint 16 (contract on main): GET /api/models -> {"models": [...]} = list_detectors().
   // If an older backend answers 404, fall back to the one detector that always exists.
   async listModels() {
@@ -128,6 +151,7 @@ async function loadMock() {
     classes: clone(fx["GET /api/projects/1/classes"].classes).map((c) => ({ ...c, project_id: 1 })),
     annotations: clone(fx["all_annotations"]),
     jobs: [],
+    pushed: new Set(),   // image ids "sent to Roboflow" by a mock push job (no SDK call in mock mode)
   };
   const nextOf = (rows) => Math.max(0, ...rows.map((r) => r.id)) + 1;
   mockDb.nextId = nextOf(mockDb.annotations);
@@ -197,6 +221,11 @@ function mockImageWithCounts(db, img) {
   return out;
 }
 
+function mockReadyImages(db, pid) {
+  return db.images.filter((i) => i.project_id === Number(pid) &&
+                                 (i.review_status === "done" || i.review_status === "empty"));
+}
+
 function mockProject(db, pid) {
   const p = db.projects.find((x) => x.id === Number(pid));
   if (!p) mockNotFound("project", pid);
@@ -215,12 +244,13 @@ const mockApi = {
     return { projects: db.projects.map((p) => mockProject(db, p.id)) };
   },
   async getProject(pid) { return mockProject(await loadMock(), pid); },
-  async listImages(pid, { status = null, offset = 0, limit = 50 } = {}) {
+  async listImages(pid, { status = null, reviewStatus = null, offset = 0, limit = 50 } = {}) {
     const db = await loadMock();
     mockProject(db, pid);
     let imgs = db.images.filter((i) => i.project_id === Number(pid))
                         .map((i) => mockImageWithCounts(db, i));
     if (status) imgs = imgs.filter((i) => i.counts[status] > 0);
+    if (reviewStatus) imgs = imgs.filter((i) => i.review_status === reviewStatus);
     return { images: imgs.slice(offset, offset + limit), total: imgs.length, offset, limit };
   },
   async listClasses(pid) {
@@ -414,6 +444,33 @@ const mockApi = {
     db.jobs.push(job);
     return stripJob(job);
   },
+  // #14 in mock mode: same 409 rule; the "zip" is a small text file, since mock mode has no exporter.
+  async exportZip(pid, body) {
+    const db = await loadMock();
+    const p = mockProject(db, pid);
+    const ready = mockReadyImages(db, pid);
+    if (!ready.length) throw new ApiError("conflict", `project ${pid} has no done or empty images to export`, 409);
+    const text = `Mock export of "${p.name}": ${ready.length} image(s), format ${body.format}, ` +
+                 `include_images ${body.include_images}.
+The real server sends a zip here.
+`;
+    return { blob: new Blob([text], { type: "text/plain" }), filename: `${p.name}_${body.format}_MOCK.txt` };
+  },
+  // #21 in mock mode: same 409 rule, a job that only marks images as pushed (no Roboflow call).
+  async startPush(pid) {
+    const db = await loadMock();
+    mockProject(db, pid);
+    pid = Number(pid);
+    const ready = mockReadyImages(db, pid);
+    if (!ready.length) throw new ApiError("conflict", `project ${pid} has no done or empty images to push`, 409);
+    const ids = ready.filter((i) => !db.pushed.has(i.id)).map((i) => i.id);
+    const job = { id: db.nextJobId++, project_id: pid, kind: "roboflow_push", status: "queued", progress: 0,
+                  done: 0, total: ids.length, error: null,
+                  config: { statuses: ["auto_accepted", "accepted", "edited"] },
+                  created_at: now(), started_at: null, finished_at: null, _ids: ids };
+    db.jobs.push(job);
+    return stripJob(job);
+  },
   // Each poll moves a mock job forward by one image, so the progress bar is visible.
   async getJob(jid) {
     const db = await loadMock();
@@ -423,7 +480,8 @@ const mockApi = {
       job.status = "running";
       job.started_at = now();
     } else if (job.status === "running" && job.done < job.total) {
-      mockDetectOne(db, job, job._ids[job.done]);
+      if (job.kind === "roboflow_push") db.pushed.add(job._ids[job.done]);
+      else mockDetectOne(db, job, job._ids[job.done]);
       job.done += 1;
       job.progress = Math.round((job.done / job.total) * 10000) / 10000;
     }
