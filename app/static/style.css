@@ -188,6 +188,9 @@ label.check { display: inline-flex; align-items: center; gap: 6px; color: var(--
 .image-title { position: absolute; top: 8px; left: 10px; max-width: calc(100% - 20px); z-index: 2;
   padding: 2px 8px; border-radius: 4px; background: rgba(26,32,38,0.78); color: var(--muted); font-size: 12px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.review-empty { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px; padding: 24px; background: var(--base); text-align: center; }
+.review-empty p { margin: 0; }
 
 /* box editor popup */
 .boxpop { position: absolute; z-index: 5; width: 224px; padding: 10px; border-radius: var(--radius);

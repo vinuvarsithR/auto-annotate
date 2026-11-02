@@ -76,6 +76,20 @@ function reviewer() {
 
 function classById(id) { return state.classes.find((c) => c.id === id); }
 
+function showReviewEmpty(message, actionLabel, action) {
+  $("imageTitle").hidden = true;
+  $("reviewEmptyMessage").textContent = message;
+  const button = $("reviewEmptyAction");
+  button.textContent = actionLabel;
+  button.onclick = action;
+  $("reviewEmpty").hidden = false;
+}
+
+function hideReviewEmpty() {
+  $("reviewEmpty").hidden = true;
+  $("imageTitle").hidden = false;
+}
+
 // The class a new box starts with: the last one saved, else the project's first class.
 function newBoxClass() {
   return classById(state.lastClassId) || state.classes[0] || null;
@@ -169,6 +183,7 @@ function clearReview() {
                          lastClassId: null, clipboard: null });
   buildImageList();
   renderLabels();
+  hideReviewEmpty();
   $("imageTitle").textContent = "No project.";
   syncCanvas();
   canvas.setImage(null);
@@ -275,7 +290,19 @@ async function loadImages(offset, selectIndex = 0) {
     state.image = null;
     state.anns = [];
     state.pending = null;
-    $("imageTitle").textContent = status ? `No images with ${STATUS_LABEL[status].toLowerCase()} boxes.` : "No images.";
+    const projectHasImages = !!(state.project && state.project.counts.images > 0);
+    if (projectHasImages) {
+      const filterName = $("statusFilter").selectedOptions[0].textContent;
+      showReviewEmpty(`No images match '${filterName}'.`, "Show all images", () => {
+        $("statusFilter").value = "";
+        loadImages(0);
+      });
+    } else {
+      showReviewEmpty("No images yet", "Upload images", () => {
+        showScreen("setup");
+        showStep(2);
+      });
+    }
     syncCanvas();
     canvas.setImage(null);
     resetHistory(null);
@@ -351,6 +378,7 @@ async function openImage(i) {
   const img = state.images[i];
   if (state.image && state.image.id !== img.id) state.prevImageId = state.image.id;
   state.imageIndex = i;
+  hideReviewEmpty();
   const token = ++state.loadToken;
   renderImageList();
   const cur = $("imageList").children[i];

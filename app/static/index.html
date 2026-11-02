@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-02.1";
+  window.ASSET_VERSION = "2026-11-02.2";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -149,6 +149,10 @@
     <div id="canvasWrap">
       <canvas id="canvas"></canvas>
       <div id="imageTitle" class="image-title num-tab"></div>
+      <div id="reviewEmpty" class="review-empty" role="status" hidden>
+        <p id="reviewEmptyMessage"></p>
+        <button id="reviewEmptyAction" type="button" class="primary"></button>
+      </div>
 
       <!-- box editor popup: follows the selected box -->
       <div id="boxPop" class="boxpop" role="dialog" aria-label="Edit box" hidden>
