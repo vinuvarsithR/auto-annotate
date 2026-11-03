@@ -39,6 +39,13 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   Tests: `tests/test_models_yolo.py` (14 mocked + 1 slow with stock `yolo11n.pt` on ultralytics' bus.jpg).
   VERIFIED 2026-11-03 Windows CPU: yolo11n 0.038 s/image (810x1080, default imgsz 640). The Colab best.pt
   will be slower if it is a bigger model or trained at imgsz 1280 (GUESS until measured).
+- 2026-11-03: **yolo image size.** `imgsz` = option, else env `AUTOLABEL_YOLO_IMGSZ` (positive int, else
+  `ValueError`), else the checkpoint's `train_args["imgsz"]` (then `model.overrides["imgsz"]`), else 640.
+  Always passed to `predict`. Tests: 8 new mocked tests (precedence, bad env values); the slow test checks the
+  real yolo11n.pt reports 640. `D:utoannotate\weights\yolo11s_960_v2.pt` was NOT on this machine, so its
+  speed is not measured. Stand-in (same architecture and size): stock yolo11s.pt at imgsz 960 on a 1280x720
+  frame, Windows CPU = 0.133 s/image (0.072 s at 640). VERIFIED for the stand-in only; the real file should be
+  close (GUESS).
 
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->

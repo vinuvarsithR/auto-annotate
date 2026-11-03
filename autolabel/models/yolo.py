@@ -11,6 +11,9 @@ Plain-English summary
   (ClassSpec.description is not used: YOLO has no text prompts.)
 * Score floor per class: the class's `min_score`, else DEFAULT_MIN_SCORE (0.05,
   recall-first, same default as "owlv2"; not tuned for YOLO).
+* Image size: the `imgsz` option, else env AUTOLABEL_YOLO_IMGSZ, else the size the
+  weights were trained with (checkpoint train_args), else 640. YOLO accuracy drops when
+  run at a different size than it was trained at.
 * Runs on CPU by default (`device` option). get_detector() keeps one loaded model
   per process. ultralytics / torch are imported in the constructor, not at module level.
 """
@@ -24,7 +27,35 @@ from PIL import Image
 from autolabel.models.base import ClassSpec, Prediction
 
 ENV_WEIGHTS = "AUTOLABEL_YOLO_WEIGHTS"
+ENV_IMGSZ = "AUTOLABEL_YOLO_IMGSZ"
 DEFAULT_MIN_SCORE = 0.05
+DEFAULT_IMGSZ = 640
+
+
+def trained_imgsz(model):
+    """The training image size stored in an ultralytics model, or None."""
+    ckpt = getattr(model, "ckpt", None)
+    args = ckpt.get("train_args") if isinstance(ckpt, dict) else None
+    size = (args or {}).get("imgsz")
+    if size is None:
+        size = (getattr(model, "overrides", None) or {}).get("imgsz")
+    return size
+
+
+def choose_imgsz(option, model):
+    """option > AUTOLABEL_YOLO_IMGSZ > checkpoint train_args > 640."""
+    if option:
+        return option
+    env = os.environ.get(ENV_IMGSZ, "").strip()
+    if env:
+        try:
+            value = int(env)
+        except ValueError:
+            raise ValueError(f"{ENV_IMGSZ} must be a whole number, got {env!r}") from None
+        if value <= 0:
+            raise ValueError(f"{ENV_IMGSZ} must be positive, got {value}")
+        return value
+    return trained_imgsz(model) or DEFAULT_IMGSZ
 
 
 def _as_list(x) -> list:
@@ -44,7 +75,6 @@ class YoloDetector:
         ultralytics.YOLO. Left as None, the weights file is loaded with ultralytics."""
         self.device = device
         self.min_score = min_score
-        self.imgsz = imgsz
         if model is None:
             weights = weights or os.environ.get(ENV_WEIGHTS, "").strip()
             if not weights:
@@ -55,6 +85,7 @@ class YoloDetector:
             from ultralytics import YOLO
             model = YOLO(weights)
         self.model = model
+        self.imgsz = choose_imgsz(imgsz, model)
         names = model.names
         pairs = names.items() if isinstance(names, dict) else enumerate(names)
         # model class name -> model class index
@@ -68,9 +99,7 @@ class YoloDetector:
             return []
         wanted = {self.index_by_name[n]: n for n in floors}   # model index -> project class name
         kwargs = dict(conf=min(floors.values()), classes=sorted(wanted),
-                      device=self.device, verbose=False)
-        if self.imgsz:
-            kwargs["imgsz"] = self.imgsz
+                      device=self.device, verbose=False, imgsz=self.imgsz)
         results = self.model.predict(image, **kwargs)
         out: list[Prediction] = []
         for r in results:

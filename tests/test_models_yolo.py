@@ -19,7 +19,8 @@ import autolabel.models as models
 from autolabel import pipeline
 from autolabel.models import get_detector, list_detectors
 from autolabel.models.base import ClassSpec, Prediction
-from autolabel.models.yolo import DEFAULT_MIN_SCORE, ENV_WEIGHTS, YoloDetector
+from autolabel.models.yolo import (DEFAULT_IMGSZ, DEFAULT_MIN_SCORE, ENV_IMGSZ, ENV_WEIGHTS,
+                                   YoloDetector, trained_imgsz)
 
 CLASSES = [
     ClassSpec("person", "a worker wearing a hard hat, seen from above"),
@@ -43,10 +44,12 @@ class FakeResult:
 class FakeModel:
     """Stands in for ultralytics.YOLO: .names and .predict(), records the calls."""
 
-    def __init__(self, names, rows):
+    def __init__(self, names, rows, train_imgsz=None, overrides_imgsz=None):
         self.names = names
         self.rows = rows
         self.calls = []
+        self.ckpt = {"train_args": {"imgsz": train_imgsz}} if train_imgsz else {}
+        self.overrides = {"imgsz": overrides_imgsz} if overrides_imgsz else {}
 
     def predict(self, image, **kw):
         self.calls.append(kw)
@@ -61,6 +64,11 @@ NAMES = {0: "biax", 1: "forklift", 2: "person", 3: "sb", 4: "rb"}
 @pytest.fixture
 def image():
     return Image.new("RGB", (640, 480), "gray")
+
+
+@pytest.fixture(autouse=True)
+def no_imgsz_env(monkeypatch):
+    monkeypatch.delenv(ENV_IMGSZ, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -114,14 +122,41 @@ def test_detector_min_score_option_and_cpu(image):
     assert det.detect(image, "i", CLASSES[:1]) == []
     kw = m.calls[0]
     assert kw["conf"] == 0.2 and kw["device"] == "cpu" and kw["verbose"] is False
-    assert "imgsz" not in kw
 
 
-def test_imgsz_option_and_list_names(image):
+def test_list_names(image):
     m = FakeModel(["person", "rb"], [(0, 0, 5, 5, 0.9, 1)])  # names may be a list
-    preds = YoloDetector(model=m, imgsz=1280).detect(image, "i", CLASSES)
-    assert [p.category for p in preds] == ["rb"]
-    assert m.calls[0]["imgsz"] == 1280
+    assert [p.category for p in YoloDetector(model=m).detect(image, "i", CLASSES)] == ["rb"]
+
+
+def test_imgsz_from_checkpoint_train_args(image):
+    m = FakeModel(NAMES, [], train_imgsz=960, overrides_imgsz=640)
+    det = YoloDetector(model=m)
+    assert det.imgsz == 960
+    det.detect(image, "i", CLASSES)
+    assert m.calls[0]["imgsz"] == 960                       # passed to predict
+
+
+def test_imgsz_falls_back_to_overrides_then_640():
+    assert YoloDetector(model=FakeModel(NAMES, [], overrides_imgsz=1280)).imgsz == 1280
+    assert YoloDetector(model=FakeModel(NAMES, [])).imgsz == DEFAULT_IMGSZ == 640
+
+
+def test_imgsz_env_overrides_checkpoint(monkeypatch):
+    monkeypatch.setenv(ENV_IMGSZ, " 1280 ")
+    assert YoloDetector(model=FakeModel(NAMES, [], train_imgsz=960)).imgsz == 1280
+
+
+def test_imgsz_option_beats_env(monkeypatch):
+    monkeypatch.setenv(ENV_IMGSZ, "1280")
+    assert YoloDetector(model=FakeModel(NAMES, [], train_imgsz=960), imgsz=320).imgsz == 320
+
+
+@pytest.mark.parametrize("bad", ["big", "0", "-640", "9.5"])
+def test_imgsz_env_invalid(monkeypatch, bad):
+    monkeypatch.setenv(ENV_IMGSZ, bad)
+    with pytest.raises(ValueError, match=ENV_IMGSZ):
+        YoloDetector(model=FakeModel(NAMES, []))
 
 
 def test_score_clamped(image):
@@ -182,6 +217,7 @@ def test_real_stock_model_cpu(monkeypatch, tmp_path):
     img = Image.open(path).convert("RGB")
     classes = [ClassSpec("person", ""), ClassSpec("rb", "")]   # rb is not a COCO class
     det = YoloDetector(weights="yolo11n.pt", device="cpu")
+    assert trained_imgsz(det.model) == 640 and det.imgsz == 640   # read from the real checkpoint
     det.detect(img, "warmup", classes)
     n, t0 = 5, time.perf_counter()
     for _ in range(n):
