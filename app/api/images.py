@@ -65,26 +65,15 @@ def upload_images(pid: int, request: Request, files: list[UploadFile] = File(...
         if size is None:
             skipped.append({"file_name": name or (f.filename or ""), "reason": "not an image"})
             continue
-        digest = db.sha256_hex(data)
-
-        target = None
         conn.execute("BEGIN IMMEDIATE")  # no other upload can take the name/hash meanwhile
+        target = None
         try:
-            if conn.execute("SELECT 1 FROM images WHERE project_id=? AND sha256=?",
-                            (pid, digest)).fetchone():
+            added_row = db.insert_image(conn, pid, folder, name, data, size)
+            if added_row is None:
                 conn.rollback()
                 skipped.append({"file_name": name, "reason": "duplicate"})
                 continue
-            final = free_name(conn, pid, name)
-            cur = conn.execute(
-                "INSERT INTO images (project_id, file_name, path, width, height, uploaded_at, "
-                "sha256) VALUES (?, ?, '', ?, ?, ?, ?)",
-                (pid, final, size[0], size[1], db.now(), digest),
-            )
-            iid = cur.lastrowid
-            target = folder / f"{iid}_{final}"
-            target.write_bytes(data)
-            conn.execute("UPDATE images SET path=? WHERE id=?", (target.as_posix(), iid))
+            iid, final, target = added_row
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -96,20 +85,6 @@ def upload_images(pid: int, request: Request, files: list[UploadFile] = File(...
         added.append(require_image(conn, iid))
 
     return {"images": db.images_dicts(conn, added), "skipped": skipped, "renamed": renamed}
-
-
-def free_name(conn: sqlite3.Connection, pid: int, name: str) -> str:
-    """`name` if no image in the project has it, else the first free stem_2.ext, stem_3.ext, ..."""
-    def taken(n: str) -> bool:
-        return conn.execute("SELECT 1 FROM images WHERE project_id=? AND file_name=?",
-                            (pid, n)).fetchone() is not None
-    if not taken(name):
-        return name
-    p = Path(name)
-    k = 2
-    while taken(f"{p.stem}_{k}{p.suffix}"):
-        k += 1
-    return f"{p.stem}_{k}{p.suffix}"
 
 
 @router.get("/projects/{pid}/images")

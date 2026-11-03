@@ -51,6 +51,22 @@ Tests use their own fake (`tests/test_api_helpers.py`: FakeClassSpec/FakePredict
 The #9 detect route is unchanged (still inserts its own row), so detect behaviour did not change.
 Tests: `tests/test_worker_push.py`, migration tests in `tests/test_db_schema.py`. Pusher faked, no network.
 
+### #22 import + Job.result (2026-11-03)
+
+| What | Where |
+|---|---|
+| Route `POST /projects/{pid}/import`: 404, then 400 for no files / bad zip / unsafe or repeated path / above `AUTOLABEL_IMPORT_MAX_GB`. Upload saved in `data/imports/staging_*`, moved to `data/imports/<job_id>/` inside the job's insert transaction (`create_job(..., before_commit=)`), so the worker never sees a job without files | `app/api/imports.py` |
+| Worker `import` jobs: extract zip, `plan_import`, add missing classes at the end, per image one transaction (#4 rule via shared `db.insert_image`, boxes `needs_review`/`import`), `result`, folder deleted in `finally` | `app/worker/worker.py` |
+| `jobs.result` + kind `'import'`: `migrate_jobs()` rebuilds `jobs` (FK off, one transaction, row count + new-FK-problem checks, rollback on error, ids kept). Verified on copies of both real old DBs (auto-annotate 10 jobs, aa-ui 1 job): every row kept | `app/db/db.py` |
+| Detect jobs no longer delete `source='import'` boxes (section 1 rule) | worker |
+| Startup deletes `data/imports/*` folders no queued job needs | `app/main.py` |
+
+Importers are loaded lazily (`Worker.load_importers`, default `autolabel.importers`); tests use
+`tests/test_api_import_stub.py`. Until export merges, the live route returns 500 "autolabel.importers is not installed".
+Not done here: the #9 `drop_overlapping` call (waits for models' `pipeline.drop_overlapping`).
+Note: python-multipart cuts a part name like `C:\x\a.jpg` to `a.jpg` before the route sees it.
+An import job with 0 images is still queued (not stored `done` at once) so it writes `result` and cleans up.
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 

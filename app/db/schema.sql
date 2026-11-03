@@ -34,13 +34,14 @@ CREATE TABLE classes (
 CREATE TABLE jobs (
   id           INTEGER PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  kind         TEXT NOT NULL CHECK (kind IN ('detect', 'roboflow_push')),
+  kind         TEXT NOT NULL CHECK (kind IN ('detect', 'roboflow_push', 'import')),
   status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
   progress     REAL NOT NULL DEFAULT 0,   -- 0..1 = done / total
   done         INTEGER NOT NULL DEFAULT 0,
   total        INTEGER NOT NULL DEFAULT 0,
   error        TEXT,                      -- one-line message when status = failed
   config       TEXT NOT NULL,             -- JSON: the request body of POST .../jobs
+  result       TEXT,                      -- JSON summary; set by import jobs (#22), NULL otherwise
   created_at   TEXT NOT NULL,
   started_at   TEXT,
   finished_at  TEXT
@@ -53,7 +54,7 @@ CREATE TABLE annotations (
   x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
   mask        TEXT,                       -- COCO RLE JSON or NULL
   score       REAL,                       -- NULL for human-drawn boxes
-  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human'
+  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human' | 'import'
   status      TEXT NOT NULL CHECK (status IN
                 ('auto_accepted', 'needs_review', 'accepted', 'rejected', 'edited')),
   job_id      INTEGER REFERENCES jobs(id),  -- NULL for human-drawn boxes

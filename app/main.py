@@ -6,7 +6,7 @@ Run it (from the repo root, inside .venv):
 
 * API under /api (docs/CONTRACT.md section 2), UI from app/static at /.
 * data/app.db and data/uploads/ are created on startup.
-* A background worker thread runs detect and roboflow_push jobs (app/worker/worker.py).
+* A background worker thread runs detect, roboflow_push and import jobs (app/worker/worker.py).
 * create_app(...) lets tests use a temp folder, a fake detector and no thread.
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
@@ -21,10 +22,10 @@ from typing import Callable
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import annotations, classes, images, jobs, models, projects
+from app.api import annotations, classes, images, imports, jobs, models, projects
 from app.api.errors import install_error_handlers
 from app.db import db
-from app.worker.worker import PipelineLoader, PusherLoader, Worker
+from app.worker.worker import ImporterLoader, PipelineLoader, PusherLoader, Worker
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -34,9 +35,24 @@ def default_list_detectors() -> list[str]:
     return list(list_detectors())
 
 
+def clean_imports(imports_dir: Path, conn) -> int:
+    """#22: delete upload folders no queued job needs (left by a crash or restart)."""
+    if not imports_dir.is_dir():
+        return 0
+    queued = {str(r[0]) for r in conn.execute(
+        "SELECT id FROM jobs WHERE kind='import' AND status='queued'")}
+    removed = 0
+    for d in imports_dir.iterdir():
+        if d.is_dir() and d.name not in queued:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                load_pipeline: PipelineLoader | None = None,
                load_pusher: PusherLoader | None = None,
+               load_importers: ImporterLoader | None = None,
                list_detectors: Callable[[], list[str]] | None = None,
                static_dir: Path | None = STATIC_DIR) -> FastAPI:
     data_dir = Path(data_dir)
@@ -48,6 +64,7 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
         conn = db.connect(db_path)
         try:
             db.fail_stale_jobs(conn)
+            clean_imports(data_dir / "imports", conn)
         finally:
             conn.close()
         if start_worker:
@@ -59,10 +76,11 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
     app.state.data_dir = data_dir
     app.state.db_path = db_path
     app.state.list_detectors = list_detectors or default_list_detectors
-    app.state.worker = Worker(db_path, load_pipeline=load_pipeline, load_pusher=load_pusher)
+    app.state.worker = Worker(db_path, load_pipeline=load_pipeline, load_pusher=load_pusher,
+                              load_importers=load_importers)
 
     install_error_handlers(app)
-    for module in (projects, images, classes, jobs, annotations, models):
+    for module in (projects, images, imports, classes, jobs, annotations, models):
         app.include_router(module.router, prefix="/api")
 
     # Endpoint 14 belongs to the export session; include it once it exists.

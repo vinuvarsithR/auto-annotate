@@ -17,6 +17,12 @@ Plain-English summary
   roboflow_image_id yet, one at a time: push(image, boxes, class_names, batch_name)
   returns the Roboflow id, which is saved at once (so a failed job can just be
   started again). Errors become a one-line message with the API key removed.
+* import jobs (#22): the upload in data/imports/<job_id>/ (a zip is extracted first) is
+  read by autolabel.importers.plan_import (export's code). Missing classes are added
+  at the end of the class list, then image by image, in ONE transaction each: the #4
+  duplicate rule (db.insert_image), the image's boxes as needs_review / source 'import',
+  done / progress. At the end `result` is stored and the folder is deleted (also when
+  the job fails).
 * run_once() processes a single job without a thread (used by tests).
 * The model code is loaded lazily through load_pipeline(), and the Roboflow
   code through load_pusher(), so the API starts without them and tests can
@@ -29,6 +35,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 from pathlib import Path
@@ -46,6 +53,9 @@ PipelineLoader = Callable[[], tuple[Callable, type]]
 #   secrets: strings that must never appear in a job error (the API key)
 PusherLoader = Callable[[], tuple[Callable[..., str], list[str]]]
 
+# load_importers() -> the autolabel.importers module (or a stub with the same names)
+ImporterLoader = Callable[[], object]
+
 PUSH_REVIEW_STATUSES = ("done", "empty")
 DEFAULT_PUSH_STATUSES = ("auto_accepted", "accepted", "edited")
 
@@ -54,6 +64,11 @@ def default_load_pipeline() -> tuple[Callable, type]:
     from autolabel import pipeline
     from autolabel.models.base import ClassSpec
     return pipeline.run, ClassSpec
+
+
+def default_load_importers():
+    import autolabel.importers as importers
+    return importers
 
 
 def default_load_pusher() -> tuple[Callable[..., str], list[str]]:
@@ -87,10 +102,12 @@ def one_line(exc: BaseException, limit: int = 300, secrets=()) -> str:
 
 class Worker:
     def __init__(self, db_path: str | Path, load_pipeline: PipelineLoader | None = None,
-                 poll_seconds: float = 2.0, load_pusher: PusherLoader | None = None):
+                 poll_seconds: float = 2.0, load_pusher: PusherLoader | None = None,
+                 load_importers: ImporterLoader | None = None):
         self.db_path = db_path
         self.load_pipeline = load_pipeline or default_load_pipeline
         self.load_pusher = load_pusher or default_load_pusher
+        self.load_importers = load_importers or default_load_importers
         self._secrets: list[str] = []
         self.poll_seconds = poll_seconds
         self._wake = threading.Event()
@@ -138,6 +155,8 @@ class Worker:
             try:
                 if job["kind"] == "roboflow_push":
                     self._process_push(conn, job)
+                elif job["kind"] == "import":
+                    self._process_import(conn, job)
                 else:
                     self._process(conn, job)
             except Exception as exc:
@@ -204,7 +223,8 @@ class Worker:
             t = db.now()
             with conn:
                 conn.execute(
-                    "DELETE FROM annotations WHERE image_id=? AND source != 'human' "
+                    "DELETE FROM annotations WHERE image_id=? "
+                    "AND source NOT IN ('human', 'import') "
                     "AND status IN (?, ?)", (int(image_id), *db.MODEL_PENDING))
                 for r in rows_to_add:
                     if r is None:
@@ -266,6 +286,115 @@ class Worker:
         with conn:
             conn.execute("UPDATE jobs SET status='done', progress=1.0, finished_at=? WHERE id=?",
                          (db.now(), jid))
+
+    def imports_dir(self) -> Path:
+        return Path(self.db_path).parent / "imports"
+
+    def _process_import(self, conn: sqlite3.Connection, job: sqlite3.Row) -> None:
+        """#22: add the images and boxes of an uploaded zip / folder. Folder deleted at the end."""
+        folder = self.imports_dir() / str(job["id"])
+        try:
+            self._run_import(conn, job, folder)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def _run_import(self, conn: sqlite3.Connection, job: sqlite3.Row, folder: Path) -> None:
+        from app.api.images import read_image_size  # same JPEG/PNG check as #4
+        from app.api.imports import max_import_bytes
+
+        jid, pid = job["id"], job["project_id"]
+        config = json.loads(job["config"])
+        if not folder.is_dir():
+            raise FileNotFoundError(f"upload folder of import job {jid} is missing")
+        imp = self.load_importers()
+        root = folder / "files"
+        skipped: list[dict] = []
+        if config.get("upload") == "zip":
+            skipped += list(imp.extract_zip(folder / "upload.zip", root, max_import_bytes()))
+        root.mkdir(parents=True, exist_ok=True)
+
+        plan = imp.plan_import(root)
+        skipped += list(plan.skipped)
+        items = list(plan.items)
+        total = len(items)
+        with conn:
+            conn.execute("UPDATE jobs SET total=? WHERE id=?", (total, jid))
+
+        # classes: exact-name match; missing names go at the end, in file order
+        have = {r["name"] for r in conn.execute(
+            "SELECT name FROM classes WHERE project_id=?", (pid,))}
+        created = [n for n in dict.fromkeys(plan.class_names) if n not in have]
+        with conn:
+            for name in created:
+                conn.execute("INSERT INTO classes (project_id, name, description, min_score, "
+                             "accept_score) VALUES (?, ?, ?, NULL, NULL)", (pid, name, name))
+        class_ids = {r["name"]: r["id"] for r in conn.execute(
+            "SELECT id, name FROM classes WHERE project_id=?", (pid,))}
+
+        uploads = self.imports_dir().parent / "uploads" / str(pid)
+        uploads.mkdir(parents=True, exist_ok=True)
+        added = 0
+        duplicates: list[str] = []
+        renamed: list[dict] = []
+        boxes_by_class: dict[str, int] = {}
+
+        for done, item in enumerate(items, start=1):
+            name = item.rel_path.replace("\\", "/").rsplit("/", 1)[-1]
+            try:
+                data = (root / item.rel_path).read_bytes()
+            except OSError:
+                data = None
+            size = read_image_size(data, name) if data is not None else None
+            progress = done / total
+            if size is None:
+                skipped.append({"file_name": item.rel_path, "reason": "not an image"})
+                with conn:
+                    conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
+                                 (done, progress, jid))
+                continue
+
+            conn.execute("BEGIN IMMEDIATE")  # same lock as #4 uploads
+            target = None
+            stored: list[str] = []
+            try:
+                row = db.insert_image(conn, pid, uploads, name, data, size)
+                if row is None:
+                    duplicates.append(item.rel_path)  # its boxes are not imported
+                else:
+                    iid, final, target = row
+                    if final != name:
+                        renamed.append({"from": name, "to": final})
+                    t = db.now()
+                    for box in item.boxes:
+                        x, y, w, h = (float(v) for v in box["bbox"])
+                        if w <= 0 or h <= 0:
+                            continue
+                        conn.execute(
+                            "INSERT INTO annotations (image_id, class_id, x, y, w, h, mask, "
+                            "score, source, status, job_id, reviewer, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'import', 'needs_review', ?, "
+                            "NULL, ?, ?)",
+                            (iid, class_ids[box["class_name"]], x, y, w, h, jid, t, t))
+                        stored.append(box["class_name"])
+                conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
+                             (done, progress, jid))
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                if target is not None:
+                    target.unlink(missing_ok=True)
+                raise
+            if row is not None:
+                added += 1
+                for n in stored:
+                    boxes_by_class[n] = boxes_by_class.get(n, 0) + 1
+
+        result = {"format": plan.format, "images_added": added, "duplicates": duplicates,
+                  "renamed": renamed, "boxes_by_class": boxes_by_class,
+                  "classes_created": created, "skipped": skipped}
+        with conn:
+            conn.execute("UPDATE jobs SET status='done', progress=1.0, done=?, result=?, "
+                         "finished_at=? WHERE id=?", (total, json.dumps(result), db.now(), jid))
 
     @staticmethod
     def _row(pred, by_name: dict, image_id: str) -> dict | None:

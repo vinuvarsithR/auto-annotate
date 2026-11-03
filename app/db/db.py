@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,7 +66,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     | #20   | images.review_status     | 'todo'       |
     | #21   | images.roboflow_image_id | NULL         |
     | #4    | images.sha256            | hash of the file at `path` (NULL if the file is missing) |
+    | #22   | jobs.result              | NULL (and the kind CHECK gains 'import': table rebuilt) |
     """
+    migrate_jobs(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
     if "review_status" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN review_status TEXT NOT NULL DEFAULT 'todo' "
@@ -75,6 +78,68 @@ def migrate(conn: sqlite3.Connection) -> None:
     if "sha256" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN sha256 TEXT")
     backfill_sha256(conn)
+
+
+def _jobs_schema_sql(table: str) -> str:
+    """The CREATE TABLE jobs statement from schema.sql, for a table named `table`."""
+    m = re.search(r"CREATE TABLE jobs \(.*?\n\);", SCHEMA.read_text(encoding="utf-8"), re.S)
+    if m is None:
+        raise RuntimeError("schema.sql has no CREATE TABLE jobs")
+    return m.group(0).replace("CREATE TABLE jobs", f"CREATE TABLE {table}", 1)
+
+
+def _fk_problems(conn: sqlite3.Connection) -> set[tuple]:
+    return {tuple(r) for r in conn.execute("PRAGMA foreign_key_check")}
+
+
+def migrate_jobs(conn: sqlite3.Connection) -> str:
+    """#22: make `jobs` allow kind 'import' and have a `result` column. Never loses a row.
+
+    Returns what it did: "ok" (nothing to do), "added_result" or "rebuilt".
+    * CHECK already allows 'import', only `result` missing -> ALTER TABLE ADD COLUMN.
+    * CHECK lacks 'import' -> SQLite cannot change a CHECK, so the table is rebuilt:
+      foreign keys off, one transaction: create jobs_new (schema.sql), copy every row with
+      its id, check the row count, drop jobs, rename jobs_new, foreign_key_check, commit.
+      Any error rolls everything back, so the old table stays as it was.
+    """
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+                       ).fetchone()
+    if row is None:
+        return "ok"
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(jobs)")]
+    if "'import'" in row["sql"]:
+        if "result" in cols:
+            return "ok"
+        conn.execute("ALTER TABLE jobs ADD COLUMN result TEXT")
+        return "added_result"
+
+    conn.commit()  # PRAGMA foreign_keys is ignored inside a transaction
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            fk_before = _fk_problems(conn)
+            conn.execute("DROP TABLE IF EXISTS jobs_new")
+            conn.execute(_jobs_schema_sql("jobs_new"))
+            new_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs_new)")}
+            keep = ", ".join(c for c in cols if c in new_cols)  # result is NULL for old rows
+            conn.execute(f"INSERT INTO jobs_new ({keep}) SELECT {keep} FROM jobs")
+            old_n = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            new_n = conn.execute("SELECT COUNT(*) FROM jobs_new").fetchone()[0]
+            if old_n != new_n:
+                raise RuntimeError(f"jobs rebuild copied {new_n} of {old_n} rows")
+            conn.execute("DROP TABLE jobs")
+            conn.execute("ALTER TABLE jobs_new RENAME TO jobs")
+            new_bad = _fk_problems(conn) - fk_before  # old problems are not ours to fix
+            if new_bad:
+                raise RuntimeError(f"jobs rebuild: {len(new_bad)} new foreign key problems")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return "rebuilt"
 
 
 def sha256_hex(data: bytes) -> str:
@@ -99,21 +164,68 @@ def backfill_sha256(conn: sqlite3.Connection) -> int:
     return filled
 
 
-JOB_KINDS = ("detect", "roboflow_push")
+def free_name(conn: sqlite3.Connection, pid: int, name: str) -> str:
+    """`name` if no image in the project has it, else the first free stem_2.ext, stem_3.ext, ..."""
+    def taken(n: str) -> bool:
+        return conn.execute("SELECT 1 FROM images WHERE project_id=? AND file_name=?",
+                            (pid, n)).fetchone() is not None
+    if not taken(name):
+        return name
+    p = Path(name)
+    k = 2
+    while taken(f"{p.stem}_{k}{p.suffix}"):
+        k += 1
+    return f"{p.stem}_{k}{p.suffix}"
+
+
+def insert_image(conn: sqlite3.Connection, pid: int, folder: Path, name: str, data: bytes,
+                 size: tuple[int, int]) -> tuple[int, str, Path] | None:
+    """The #4 rule, shared by upload (#4) and import (#22). Call inside BEGIN IMMEDIATE.
+
+    Same sha256 as an image in the project -> None (duplicate, nothing written).
+    Otherwise inserts the row (same name taken -> stem_2.ext), writes the file to
+    folder/<id>_<final name> and returns (image id, final name, file path).
+    The caller commits, or rolls back and deletes the returned file.
+    """
+    digest = sha256_hex(data)
+    if conn.execute("SELECT 1 FROM images WHERE project_id=? AND sha256=?",
+                    (pid, digest)).fetchone():
+        return None
+    final = free_name(conn, pid, name)
+    cur = conn.execute(
+        "INSERT INTO images (project_id, file_name, path, width, height, uploaded_at, sha256) "
+        "VALUES (?, ?, '', ?, ?, ?, ?)", (pid, final, size[0], size[1], now(), digest))
+    iid = cur.lastrowid
+    target = Path(folder) / f"{iid}_{final}"
+    try:
+        target.write_bytes(data)
+        conn.execute("UPDATE images SET path=? WHERE id=?", (target.as_posix(), iid))
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return iid, final, target
+
+
+JOB_KINDS = ("detect", "roboflow_push", "import")
 
 
 def create_job(conn: sqlite3.Connection, pid: int, kind: str, config: dict, total: int,
-               wake: Callable[[], None] | None = None) -> dict:
-    """Insert a 'queued' job and return it as Job JSON (B3, used by #9 and #21).
+               wake: Callable[[], None] | None = None,
+               before_commit: Callable[[int], None] | None = None) -> dict:
+    """Insert a 'queued' job and return it as Job JSON (B3, used by #9, #21 and #22).
 
-    * total 0 -> the job is stored 'done' at once (progress 1, finished_at set).
+    * total 0 -> the job is stored 'done' at once (progress 1, finished_at set),
+      except kind 'import': the worker must still write `result` and delete the upload.
+    * before_commit(job_id) runs inside the insert transaction (#22 moves the upload into
+      data/imports/<job_id>/ there); if it raises, the job is not created. The open write
+      transaction keeps the worker from claiming the job before that is done.
     * wake: pass request.app.state.worker.wake so the worker starts right away.
     """
     if kind not in JOB_KINDS:
         raise ValueError(f"unknown job kind '{kind}'")
     t = now()
     with conn:
-        if total == 0:
+        if total == 0 and kind != "import":
             cur = conn.execute(
                 "INSERT INTO jobs (project_id, kind, status, progress, done, total, config, "
                 "created_at, started_at, finished_at) VALUES (?, ?, 'done', 1.0, 0, 0, ?, ?, ?, ?)",
@@ -123,7 +235,9 @@ def create_job(conn: sqlite3.Connection, pid: int, kind: str, config: dict, tota
                 "INSERT INTO jobs (project_id, kind, status, progress, done, total, config, "
                 "created_at) VALUES (?, ?, 'queued', 0, 0, ?, ?, ?)",
                 (pid, kind, total, json.dumps(config), t))
-    if wake is not None and total:
+        if before_commit is not None:
+            before_commit(cur.lastrowid)
+    if wake is not None and (total or kind == "import"):
         wake()
     return job_dict(conn.execute("SELECT * FROM jobs WHERE id=?", (cur.lastrowid,)).fetchone())
 
@@ -208,6 +322,7 @@ def job_dict(row: sqlite3.Row) -> dict:
         "status": row["status"], "progress": round(float(row["progress"]), 4),
         "done": row["done"], "total": row["total"], "error": row["error"],
         "config": json.loads(row["config"]),
+        "result": json.loads(row["result"]) if row["result"] is not None else None,
         "created_at": row["created_at"], "started_at": row["started_at"],
         "finished_at": row["finished_at"],
     }
