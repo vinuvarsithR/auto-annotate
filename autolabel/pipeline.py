@@ -12,6 +12,7 @@ from typing import Callable, Iterable, Iterator
 
 from PIL import Image
 
+from autolabel.evaluate import Box, iou
 from autolabel.models import get_detector, list_detectors
 from autolabel.models.base import ClassSpec, Prediction
 
@@ -37,3 +38,19 @@ def run(images: Iterable[tuple[str, str]],            # (image_id, path on disk)
         if on_progress is not None:
             on_progress(done, total)
         yield image_id, preds
+
+
+def drop_overlapping(predictions: list[Prediction],
+                     existing: list[Box],              # the image's non-rejected boxes, category = class name
+                     iou_threshold: float = 0.5,
+                     ) -> list[Prediction]:
+    """Drop each prediction that overlaps an existing box of the same class at IoU >= iou_threshold.
+
+    The caller passes only non-rejected boxes, so a rejected box never blocks a new one.
+    Any source counts (human, import, reviewed model box). Order of the kept ones is unchanged.
+    """
+    return [
+        p for p in predictions
+        if not any(b.category == p.category and iou(p.bbox, b.bbox) >= iou_threshold
+                   for b in existing)
+    ]
