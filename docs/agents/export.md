@@ -41,6 +41,16 @@ Part 2 (2026-11-01): `app/api/export.py` routes #14 and #21, tests `tests/test_e
 - One test runs a push job through the real worker + real `push_image` with the SDK faked
   (success and a failing upload whose error has the key in it).
 
+#22 importers (2026-11-03): `autolabel/importers/` (base, safety, coco, yolo, plan), tests
+`tests/test_importers_safety.py` + `tests/test_importers_plan.py` (45 tests).
+- Choices inside the contract: COCO image covered by nested jsons -> deepest json listing its base
+  name wins; YOLO also pairs `images/<sub>/x.jpg` with `labels/<sub>/x.txt` (last `images` folder);
+  an unreadable data.yaml falls back to the next config (skipped "could not read class names");
+  boxes with no area after clipping are dropped without a `skipped` entry; corrupt zip entries are
+  skipped ("cannot unpack"); unreadable images "cannot open image". Duplicate names are exact
+  (after `\` -> `/`), not case-insensitive.
+- `ImportItem` has no width/height (contract), so the worker re-reads the size when inserting.
+
 ## Packages needed
 - roboflow==1.7.3 (already pinned by integrator). `single_upload(image_path, annotation_path={"name","rawText"}, batch_name, annotation_overwrite)` checked in the installed 1.7.3 source: VERIFIED.
 - python-dotenv (already listed).
