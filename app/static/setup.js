@@ -1,5 +1,5 @@
 // setup.js - the Setup screen: create project (1), upload images (4), edit classes (7, 8),
-// run detection (9) and poll the job (10); the model list comes from endpoint 16.
+// run detection (9) and poll the job (10); bulk import (22) in step 2; the model list comes from endpoint 16.
 // Shown as one guided 4-step flow (create, upload, classes, run); uploads start as soon as
 // files are dropped or chosen, and thumbnails appear as each batch lands.
 // Uses globals from app.js: $, state, guard, showBanner, showScreen, loadProjects, openProject.
@@ -25,7 +25,11 @@ const setup = {
 function onProjectOpened(p) {
   const changed = (setup.project && setup.project.id) !== (p && p.id);
   setup.project = p;
-  if (changed) { setup.lastJob = null; clearTiles(); }
+  if (changed) {
+    setup.lastJob = null;
+    clearTiles();
+    if (!imp.sending && !imp.jobId) { setImportParts([], ""); $("importBox").hidden = true; $("importResult").hidden = true; }
+  }
   renderProjectBox();
   updateButtons();
   if (p) loadClasses(p.id);
@@ -208,6 +212,7 @@ async function uploadFiles(list) {
   const files = Array.from(list || []);
   if (!pid || !files.length) return;
   if (setup.uploading) { showBanner("An upload is still running. Wait for it to finish.", "info"); return; }
+  if (imp.sending || imp.jobId) { showBanner("An import is still running. Wait for it to finish.", "info"); return; }
   setup.uploading = true;
   updateButtons();
   clearTiles();
@@ -252,6 +257,215 @@ async function uploadFiles(list) {
     const n = setup.project.counts.images;
     setBar("uploadBar", "uploadText", done / files.length, `${msg} Project now has ${n} image${n === 1 ? "" : "s"}.`);
   }
+}
+
+// ------------------------------------------------------------ bulk import (#22)
+// The picked set is a list of [File, partName]. partName = relative path for a folder
+// (webkitRelativePath, or the dropped entry path), the plain file name otherwise.
+const imp = { parts: [], label: "", jobId: null, sending: false };
+
+function fmtBytes(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
+  return Math.max(1, Math.round(n / 1e3)) + " kB";
+}
+
+function setImportParts(parts, label) {
+  imp.parts = parts;
+  imp.label = label;
+  const bytes = parts.reduce((t, [f]) => t + f.size, 0);
+  $("importPicked").textContent = parts.length ? `${label} (${fmtBytes(bytes)})` : "Nothing picked.";
+  $("importClearBtn").hidden = !parts.length;
+  updateButtons();
+}
+
+// What a set of plain files means: one .zip, or loose files (images; #22 skips anything else).
+function pickFiles(files) {
+  if (!files.length) return;
+  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
+    setImportParts([[files[0], files[0].name]], `Zip: ${files[0].name}`);
+  } else {
+    setImportParts(files.map((f) => [f, f.name]), `${files.length} file${files.length === 1 ? "" : "s"}`);
+  }
+}
+
+function pickFolder(files) {
+  if (!files.length) { showBanner("That folder is empty."); return; }
+  const top = (files[0].webkitRelativePath || "").split("/")[0];
+  setImportParts(files.map((f) => [f, f.webkitRelativePath || f.name]),
+                 `Folder ${top || "?"}: ${files.length} file${files.length === 1 ? "" : "s"}`);
+}
+
+// Dropped folders: walk the entries (readEntries returns at most ~100 per call, so loop).
+function readAllEntries(dir) {
+  const reader = dir.createReader();
+  const out = [];
+  return new Promise((resolve, reject) => {
+    const next = () => reader.readEntries((batch) => {
+      if (!batch.length) return resolve(out);
+      out.push(...batch);
+      next();
+    }, reject);
+    next();
+  });
+}
+
+async function walkEntry(entry, out) {
+  if (entry.isFile) {
+    const f = await new Promise((res, rej) => entry.file(res, rej));
+    out.push([f, entry.fullPath.replace(/^\/+/, "")]);
+  } else if (entry.isDirectory) {
+    for (const e of await readAllEntries(entry)) await walkEntry(e, out);
+  }
+}
+
+async function onImportDrop(dt) {
+  // Entries must be taken synchronously, before the first await (the list is cleared after).
+  const entries = Array.from(dt.items || []).map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  const files = Array.from(dt.files || []);
+  if (!entries.some((e) => e.isDirectory)) { pickFiles(files); return; }
+  const parts = [];
+  try {
+    for (const e of entries) await walkEntry(e, parts);
+  } catch (err) {
+    showBanner(`Could not read the dropped folder: ${err.message || err}`);
+    return;
+  }
+  if (!parts.length) { showBanner("That folder is empty."); return; }
+  const dirs = entries.filter((e) => e.isDirectory).map((e) => e.name);
+  setImportParts(parts, `Folder ${dirs.join(", ")}: ${parts.length} file${parts.length === 1 ? "" : "s"}`);
+}
+
+async function startImport() {
+  const pid = setup.project && setup.project.id;
+  if (!pid || !imp.parts.length || imp.sending || imp.jobId) return;
+  if (setup.uploading) { showBanner("An upload is still running. Wait for it to finish.", "info"); return; }
+  imp.sending = true;
+  updateButtons();
+  $("importBox").hidden = false;
+  $("importResult").hidden = true;
+  $("importBar").classList.remove("failed");
+  const n = imp.parts.length;
+  setBar("importBar", "importText", 0, `Sending ${n} file${n === 1 ? "" : "s"}...`);
+  let job;
+  try {
+    job = await api.startImport(pid, imp.parts, (frac) =>
+      setBar("importBar", "importText", frac, `Sending ${imp.label}: ${Math.round(frac * 100)}%`));
+  } catch (e) {
+    console.error(e);
+    // #22 400s (bad zip, unsafe path, too large) are shown as the server wrote them.
+    const msg = e instanceof ApiError ? `${e.httpStatus ? e.httpStatus + " " : ""}${e.code}: ${e.message}` : String(e);
+    $("importBar").classList.add("failed");
+    setBar("importBar", "importText", 1, "Import not started.");
+    showImportError(msg);
+    imp.sending = false;
+    updateButtons();
+    return;
+  }
+  imp.sending = false;
+  imp.jobId = job.id;
+  setImportParts([], "");
+  renderImportJob(job);
+  pollImport(job.id, 0);
+}
+
+function showImportError(msg) {
+  const box = $("importResult");
+  box.hidden = false;
+  box.innerHTML = `<p class="import-err"></p>`;
+  box.querySelector("p").textContent = msg;
+}
+
+function renderImportJob(job) {
+  const c = job.config || {};
+  const what = c.upload === "zip" ? c.file_name : `${c.count} files`;
+  const text = `Import job ${job.id} (${what}): ${job.status}, ${job.done} / ${job.total} images` +
+               (job.error ? ` - ${job.error}` : "");
+  setBar("importBar", "importText", job.status === "done" ? 1 : job.progress, text);
+  $("importBar").classList.toggle("failed", job.status === "failed");
+}
+
+async function pollImport(jid, errors) {
+  let job;
+  try {
+    job = await api.getJob(jid);
+  } catch (e) {
+    console.error(e);
+    if (errors + 1 >= 3) { // give up after 3 failed polls in a row
+      showBanner(`Lost track of import job ${jid}: ${e.message}`);
+      imp.jobId = null;
+      updateButtons();
+      return;
+    }
+    setTimeout(() => pollImport(jid, errors + 1), POLL_MS);
+    return;
+  }
+  renderImportJob(job);
+  if (job.status === "queued" || job.status === "running") {
+    setTimeout(() => pollImport(jid, 0), POLL_MS);
+    return;
+  }
+  imp.jobId = null;
+  updateButtons();
+  $("importResult").innerHTML = "";
+  if (job.status === "failed") showImportError(`Import job ${jid} failed: ${job.error || "no message"}`);
+  if (job.result) renderImportResult(job.result);
+  if (job.project_id === state.projectId) {
+    await openProject(job.project_id); // counts, review list, class legend
+    if (setup.project && setup.project.id === job.project_id) loadClasses(job.project_id);
+  }
+}
+
+// A <details> list: open when short, collapsed when long.
+function detailsList(title, items, openUpTo = 10) {
+  const d = document.createElement("details");
+  d.open = items.length <= openUpTo;
+  const s = document.createElement("summary");
+  s.textContent = `${title} (${items.length})`;
+  const ul = document.createElement("ul");
+  for (const t of items) { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); }
+  d.append(s, ul);
+  return d;
+}
+
+function numTable(head, rows) {
+  const t = document.createElement("table");
+  t.className = "grid";
+  if (head) {
+    const tr = t.createTHead().insertRow();
+    for (const h of head) { const th = document.createElement("th"); th.textContent = h; tr.appendChild(th); }
+  }
+  const body = t.createTBody();
+  for (const row of rows) {
+    const tr = body.insertRow();
+    for (const v of row) {
+      const td = tr.insertCell();
+      td.textContent = String(v);
+      if (typeof v === "number") td.className = "n";
+    }
+  }
+  return t;
+}
+
+function renderImportResult(r) {
+  const box = $("importResult");
+  box.hidden = false;
+  const dups = r.duplicates || [], ren = r.renamed || [], skip = r.skipped || [];
+  const created = r.classes_created || [];
+  box.appendChild(numTable(null, [
+    ["Format", r.format],
+    ["Images added", r.images_added],
+    ["Duplicates (not added)", dups.length],
+    ["Renamed", ren.length],
+    ["Classes created", created.length ? created.join(", ") : "none"],
+    ["Skipped files", skip.length],
+  ]));
+  const byClass = Object.entries(r.boxes_by_class || {});
+  box.appendChild(numTable(["Class", "Boxes imported"],
+                           byClass.length ? byClass : [["No boxes imported", ""]]));
+  if (dups.length) box.appendChild(detailsList("Duplicates", dups));
+  if (ren.length) box.appendChild(detailsList("Renamed", ren.map((x) => `${x.from} -> ${x.to}`)));
+  if (skip.length) box.appendChild(detailsList("Skipped", skip.map((x) => `${x.file_name}: ${x.reason}`)));
 }
 
 // ------------------------------------------------------------ classes
@@ -399,7 +613,12 @@ async function pollJob(jid, errors) {
 // ------------------------------------------------------------ buttons
 function updateButtons() {
   const hasProject = !!(setup.project && setup.project.id);
-  $("fileInput").disabled = !hasProject || setup.uploading;
+  const importBusy = imp.sending || !!imp.jobId;
+  $("fileInput").disabled = !hasProject || setup.uploading || importBusy;
+  $("importFileInput").disabled = $("importDirInput").disabled = !hasProject || importBusy;
+  $("importZone").classList.toggle("disabled", !hasProject);
+  $("importBtn").disabled = !hasProject || !imp.parts.length || importBusy || setup.uploading;
+  $("importBtn").textContent = imp.sending ? "Sending..." : imp.jobId ? "Importing..." : "Import";
   $("dropZone").classList.toggle("disabled", !hasProject);
   $("addClassBtn").disabled = !hasProject;
   $("saveClassesBtn").disabled = !hasProject;
@@ -431,6 +650,33 @@ drop.addEventListener("drop", (e) => {
   if (!setup.project) { showBanner("Create or pick a project first."); return; }
   uploadFiles(e.dataTransfer.files);
 });
+$("importFileInput").addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  pickFiles(files);
+});
+$("importDirInput").addEventListener("change", (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  pickFolder(files);
+});
+const importZone = $("importZone");
+importZone.addEventListener("dragover", (e) => {
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = setup.project ? "copy" : "none";
+  importZone.classList.add("over");
+});
+importZone.addEventListener("dragleave", (e) => { if (!importZone.contains(e.relatedTarget)) importZone.classList.remove("over"); });
+importZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  importZone.classList.remove("over");
+  if (!setup.project) { showBanner("Create or pick a project first."); return; }
+  if (imp.sending || imp.jobId) { showBanner("An import is still running.", "info"); return; }
+  onImportDrop(e.dataTransfer);
+});
+$("importBtn").addEventListener("click", startImport);
+$("importClearBtn").addEventListener("click", () => setImportParts([], ""));
 // A file dropped anywhere else would make the browser open it and leave the page.
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());

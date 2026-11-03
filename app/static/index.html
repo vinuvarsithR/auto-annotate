@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-02.2";
+  window.ASSET_VERSION = "2026-11-03.1";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -90,6 +90,29 @@
         <div id="uploadText" class="muted num-tab"></div>
       </div>
       <ul id="skippedList" class="skipped"></ul>
+
+      <h3 class="import-h">Bulk import <span class="muted">(labels included)</span></h3>
+      <p class="muted">A YOLO or COCO export (e.g. from Roboflow) as one .zip or as a folder, or many
+        images. Boxes come in as "needs review"; missing classes are added at the end of the list.</p>
+      <div id="importZone" class="drop">
+        <div class="drop-msg">
+          <span>Drop a .zip, images or a folder here, or</span>
+          <label class="btn" for="importFileInput">Choose zip / images</label>
+          <input id="importFileInput" class="visually-hidden" type="file" accept=".zip,image/jpeg,image/png" multiple>
+          <label class="btn" for="importDirInput">Choose folder</label>
+          <input id="importDirInput" class="visually-hidden" type="file" webkitdirectory multiple>
+        </div>
+      </div>
+      <div class="row buttons">
+        <span id="importPicked" class="muted num-tab">Nothing picked.</span>
+        <button id="importBtn" type="button" class="primary" disabled>Import</button>
+        <button id="importClearBtn" type="button" hidden>Clear</button>
+      </div>
+      <div id="importBox" hidden>
+        <div class="bar"><div id="importBar"></div></div>
+        <div id="importText" class="muted num-tab"></div>
+      </div>
+      <div id="importResult" class="import-result" hidden></div>
     </section>
 
     <section class="step" data-step="3" hidden>

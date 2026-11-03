@@ -434,3 +434,16 @@ table.grid .c-del:hover { color: var(--rejected); }
 
 /* Setup step 1: small text-style button ("create a different project") */
 button.linkish { border: 0; background: none; padding: 0; height: auto; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+
+/* bulk import (#22) */
+.import-h { margin-top: 28px; }
+.import-h .muted { font-weight: normal; font-size: 0.85em; }
+.import-result { margin-top: 10px; }
+.import-result table.grid { margin: 6px 0 10px; width: auto; min-width: 280px; }
+.import-result table.grid td, .import-result table.grid th { white-space: nowrap; padding-right: 24px; }
+.import-result table.grid td:nth-child(2) { width: auto; }
+.import-result td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.import-result details { margin: 6px 0; }
+.import-result summary { cursor: pointer; }
+.import-result ul { margin: 4px 0 0; padding-left: 20px; max-height: 260px; overflow: auto; }
+.import-err { color: var(--rejected); white-space: pre-wrap; }

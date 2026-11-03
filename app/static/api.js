@@ -46,6 +46,27 @@ async function http(method, path, body) {
   return data;
 }
 
+// multipart POST of "files" parts with upload progress (fetch has none). onProgress(0..1).
+function sendForm(url, parts, onProgress) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    for (const [f, name] of parts) form.append("files", f, name);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    xhr.onerror = () => reject(new ApiError("network", "cannot reach the server", 0));
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON body */ }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+      const err = (data && data.error) || {};
+      reject(new ApiError(err.code || "http_" + xhr.status,
+                          err.message || `${xhr.status} ${xhr.statusText}`, xhr.status));
+    };
+    xhr.send(form);
+  });
+}
+
 const realApi = {
   mock: false,
   listProjects: () => http("GET", "/projects"),
@@ -75,24 +96,11 @@ const realApi = {
   createProject: (name) => http("POST", "/projects", { name }),
   // Upload one batch of File objects. onProgress(fraction 0..1) follows the bytes sent.
   uploadImages(pid, files, onProgress) {
-    return new Promise((resolve, reject) => {
-      const form = new FormData();
-      for (const f of files) form.append("files", f, f.name);
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `/api/projects/${pid}/images`);
-      xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
-      xhr.onerror = () => reject(new ApiError("network", "cannot reach the server", 0));
-      xhr.onload = () => {
-        let data = null;
-        try { data = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON body */ }
-        if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
-        const err = (data && data.error) || {};
-        reject(new ApiError(err.code || "http_" + xhr.status,
-                            err.message || `${xhr.status} ${xhr.statusText}`, xhr.status));
-      };
-      xhr.send(form);
-    });
+    return sendForm(`/api/projects/${pid}/images`, files.map((f) => [f, f.name]), onProgress);
   },
+  // #22 bulk import. parts = [[File, partName], ...]; partName is the relative path for a folder
+  // upload (webkitRelativePath), the plain name for a zip or loose images. Response 202 is a Job.
+  startImport: (pid, parts, onProgress) => sendForm(`/api/projects/${pid}/import`, parts, onProgress),
   putClasses: (pid, classes) => http("PUT", `/projects/${pid}/classes`, { classes }),
   startJob: (pid, body) => http("POST", `/projects/${pid}/jobs`, body),
   getJob: (jid) => http("GET", `/jobs/${jid}`),
@@ -400,6 +408,9 @@ const mockApi = {
       images.push(mockImageWithCounts(db, img));
     }
     return { images, skipped, renamed };
+  },
+  async startImport() {
+    throw new ApiError("mock", "bulk import (#22) needs the real server; mock mode has no importer", 400);
   },
   async putClasses(pid, classes) {
     const db = await loadMock();
