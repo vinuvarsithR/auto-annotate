@@ -853,6 +853,40 @@
    "message": "unsafe path in zip: ../etc/passwd"
   }
  },
+ "GET /api/jobs/9 (import done, folder upload)": {
+  "id": 9,
+  "project_id": 1,
+  "kind": "import",
+  "status": "done",
+  "progress": 1.0,
+  "done": 40,
+  "total": 40,
+  "error": null,
+  "config": {
+   "upload": "files",
+   "count": 42
+  },
+  "result": {
+   "format": "coco",
+   "images_added": 40,
+   "duplicates": [],
+   "renamed": [],
+   "boxes_by_class": {
+    "person": 85,
+    "rb": 12
+   },
+   "classes_created": [],
+   "skipped": [
+    {
+     "file_name": "crane_site_b/notes.docx",
+     "reason": "not an image"
+    }
+   ]
+  },
+  "created_at": "2026-10-30T14:12:00Z",
+  "started_at": "2026-10-30T14:12:00Z",
+  "finished_at": "2026-10-30T14:12:30Z"
+ },
  "all_annotations": [
   {
    "id": 101,

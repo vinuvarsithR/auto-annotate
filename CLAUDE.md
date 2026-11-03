@@ -75,7 +75,7 @@ Next (contract 2026-11-01): export session builds #14 (export zip) and #21 (Robo
 #15 is removed. Contract 2026-11-01 (branch contract-dedupe until backend builds it): #4 dedupes
 by content (images.sha256, backfilled in migrate()), same name + new bytes -> stem_2.ext, `renamed` list. Export worktree: D:\autoannotate\aa-export (branch export).
 Contract 2026-11-03 (branch contract-import, NOT on main): #22 bulk import (zip: images / COCO / YOLO,
-or folder of images) as an `import` job with `jobs.result` (new `result` key on every Job; the
+or a folder upload treated exactly like a zip, labels included) as an `import` job with `jobs.result` (new `result` key on every Job; the
 fixture-keys test fails on that branch until backend builds it, then backend merges contract-import
 and both land on main together); #9 drops model boxes overlapping a non-rejected same-class box at
 IoU >= 0.5 (`pipeline.drop_overlapping`, models). Export also owns autolabel/importers/.

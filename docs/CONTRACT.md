@@ -455,13 +455,14 @@ The request is `multipart/form-data` with one or more `files` fields, either:
 | Upload | Meaning |
 |---|---|
 | exactly one `.zip` part, nothing else | zip import; the format is detected inside the zip (below) |
-| one or more non-zip parts (folder upload) | images only; the part file name may carry the folder path (e.g. `site_a/f_001.jpg`) |
+| any other set of parts (folder upload) | each part's file name is the file's **relative path** in the picked folder (the UI sends `webkitRelativePath`, e.g. `crane/train/labels/f_001.txt`). The server saves the parts at those paths and treats the set **exactly like the contents of a zip**: same format detection, same rules, same path safety checks. A `.zip` part in a folder upload is just a non-image file (skipped, `"not an image"`). |
 
 Response 202 is a Job with `kind: "import"`, polled with #10. Its `config` is
-`{"upload": "zip", "file_name": "crane_yolo.zip"}` or `{"upload": "files", "count": 312}`;
-`total` = number of image files (`.jpg`/`.jpeg`/`.png` names) in the zip or in the parts.
+`{"upload": "zip", "file_name": "crane_yolo.zip"}` or `{"upload": "files", "count": 312}`
+(`count` = number of parts); `total` = number of image files (`.jpg`/`.jpeg`/`.png` names) in the
+zip or in the parts.
 
-Formats inside a zip (detected in this order, first match wins):
+Formats inside a zip or a folder upload (below, "the upload"; detected in this order, first match wins):
 
 | Format | Detected when | Boxes come from |
 |---|---|---|
@@ -473,12 +474,12 @@ Rules:
 
 | Rule | Value |
 |---|---|
-| Duplicates | same rule as #4, image by image in zip order: same sha256 as an image in the project or earlier in this job -> not added, listed in `duplicates`, and its boxes are **not** imported; same name + new bytes -> `stem_2.ext`, listed in `renamed`. `file_name` = the base name (folders are dropped). |
+| Duplicates | same rule as #4, image by image in path order: same sha256 as an image in the project or earlier in this job -> not added, listed in `duplicates`, and its boxes are **not** imported; same name + new bytes -> `stem_2.ext`, listed in `renamed`. `file_name` = the base name (folders are dropped). |
 | Imported boxes | status `needs_review`, source `import`, `score` NULL (a COCO `score` is ignored), `mask` NULL (COCO segmentation is ignored), `job_id` = the import job, `reviewer` NULL. Boxes are clipped to the image; a box with no area left is skipped. |
 | Imported images | `review_status` `todo` |
 | Classes | matched to the project's classes by **exact name** (case-sensitive). Names with at least one box in the upload that the project lacks are added at the **end** of the class list (so existing YOLO export indexes do not move), in file order (COCO `categories` order, YOLO `names` order), with `description` = the name and `min_score` / `accept_score` NULL. Categories with no boxes are not created (e.g. Roboflow's COCO super-category). |
 | Bad or unknown files | never fail the job: skipped and listed in `skipped` with a reason. Non-image files are skipped (`"not an image"`), except the label files used by the detected format. A bad label line, an unknown class index / `category_id`, a label file or COCO image with no matching image, or a file that will not open as an image are skipped too. An image with no label file is imported with no boxes. |
-| Safety (checked by the route, before the job exists) | a zip entry or part file name with `..` as a path part, or an absolute path (`/x`, `\x`, `C:\x`) -> 400 `bad_request`. Total unpacked size (sum of the zip's uncompressed sizes, or of the parts) above the cap -> 400 `bad_request`. Cap: `AUTOLABEL_IMPORT_MAX_GB` env var, default **5** (GB = 10^9 bytes). While unpacking, a file that grows past its declared size or past the cap is stopped and skipped (`"too large"`). |
+| Safety (checked by the route, before the job exists) | a zip entry name or a part file name (relative path) with `..` as a path part, or an absolute path (`/x`, `\x`, `C:\x`) -> 400 `bad_request`; two parts with the same relative path -> 400 `bad_request`. Total unpacked size (sum of the zip's uncompressed sizes, or of the parts) above the cap -> 400 `bad_request`. Cap: `AUTOLABEL_IMPORT_MAX_GB` env var, default **5** (GB = 10^9 bytes). While unpacking, a file that grows past its declared size or past the cap is stopped and skipped (`"too large"`). |
 | Upload storage | the upload is saved under `data/imports/<job_id>/` and that folder is deleted when the job ends (`done` or `failed`). |
 | `failed` | only for an unexpected error; images and boxes already added stay. `result` may then be `null`. |
 
@@ -493,23 +494,22 @@ Rules:
  "skipped": [{"file_name": "README.roboflow.txt", "reason": "not an image"},
              {"file_name": "train/labels/f_0042.txt", "reason": "line 3: unknown class index 7"}]}
 ```
-`format` is `coco`, `yolo` or `images` (always `images` for a folder upload). `duplicates`, `renamed`,
+`format` is `coco`, `yolo` or `images`, for a zip and a folder upload alike. `duplicates`, `renamed`,
 `classes_created` and `skipped` are lists (empty when nothing applies); `boxes_by_class` counts only
 boxes actually stored (by class name; `{}` when none). Paths in `duplicates` / `skipped` are relative
 to the zip root or the folder.
 
-Errors (checked in this order): unknown pid -> 404 `not_found`; no `files` part, a `.zip` sent
-together with other parts, more than one `.zip`, a zip that will not open, an unsafe path or an
-upload above the cap -> 400 `bad_request`.
+Errors (checked in this order): unknown pid -> 404 `not_found`; no `files` part, a single `.zip`
+that will not open, an unsafe or repeated path, or an upload above the cap -> 400 `bad_request`.
 
 Who builds what (#22 and the #9 change):
 
 | Role | Builds |
 |---|---|
 | export | `autolabel/importers/` (pure functions, no database): the interface below + `tests/test_importers_*.py` (small zips/folders built in `tmp_path`). |
-| backend | Route #22 in `app/api/` (checks via `check_zip` / `check_names`, saves the upload, `create_job(..., kind="import")`); the worker runs `import` jobs (extract, `plan_import`, #4 duplicate rule shared with #4, add classes, insert images + boxes, `done`/`progress` per image, `result`, delete the temp folder); `jobs.result` + the `jobs` table rebuild in `migrate()`; `result` in every Job JSON; the #9 worker change (delete old model boxes, then `drop_overlapping`). Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`. |
+| backend | Route #22 in `app/api/` (checks via `check_zip` / `check_names`, saves the zip, or the folder parts at their relative paths under `data/imports/<job_id>/files/`, `create_job(..., kind="import")`); the worker runs `import` jobs (extract a zip, then `plan_import` on the folder in both cases, #4 duplicate rule shared with #4, add classes, insert images + boxes, `done`/`progress` per image, `result`, delete the temp folder); `jobs.result` + the `jobs` table rebuild in `migrate()`; `result` in every Job JSON; the #9 worker change (delete old model boxes, then `drop_overlapping`). Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`. |
 | models | `drop_overlapping` in `autolabel/pipeline.py` (section 3) + `tests/test_pipeline_*.py`. |
-| ui | A drop zone for one `.zip`, plus a folder picker (`<input webkitdirectory>`, part file name = `webkitRelativePath`) that sends the folder's files to #22; polls #10; shows `result` as a summary (images added, duplicates, renamed, boxes per class, classes created, skipped files with reason). |
+| ui | A drop zone for one `.zip`, plus a folder picker (`<input webkitdirectory>`) that sends **every** file of the folder to #22 with part file name = `webkitRelativePath` (`formData.append("files", file, file.webkitRelativePath)`), labels included; polls #10; shows `result` as a summary (images added, duplicates, renamed, boxes per class, classes created, skipped files with reason). |
 
 Import interface (owner: export; `from autolabel.importers import ...`):
 ```python
@@ -518,7 +518,8 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 class ImportRejected(ValueError): ...   # message is safe to show in a 400
 
 def check_names(names: list[str]) -> None: ...
-    # raises ImportRejected if any name has '..' as a path part or is absolute
+    # raises ImportRejected if any name has '..' as a path part, is absolute, or appears twice
+    # (used for zip entry names and for folder-upload part names)
 def check_zip(zip_path: Path, max_bytes: int) -> int: ...
     # raises ImportRejected: not a zip, unsafe entry name (check_names), sum of uncompressed
     # sizes > max_bytes. Returns the number of image entries (the job's total).
@@ -537,8 +538,8 @@ class ImportPlan:
     class_names: list[str]   # names with >= 1 box, in file order
     skipped: list[dict]      # [{"file_name", "reason"}]
 
-def plan_import(root: Path, images_only: bool = False) -> ImportPlan: ...
-    # reads an unpacked zip (or saved folder upload with images_only=True); opens images
+def plan_import(root: Path) -> ImportPlan: ...
+    # reads an unpacked zip or a saved folder upload (same rules for both); opens images
     # only to read their size. Never touches the database.
 ```
 
@@ -639,9 +640,6 @@ Rules:
 - `get_detector` caches one instance per **name**. With real models, two jobs with different
   `options` (e.g. another checkpoint) would share the first instance. Key the cache on
   `(name, options)` instead? (models session; no change yet)
-- #22 folder upload is images only (as requested). Run the zip format detection on folder uploads
-  too, so a dropped YOLO / COCO folder keeps its labels? (`plan_import(images_only=False)`; user to decide)
-
 ---
 
 ## 5. Mock data
