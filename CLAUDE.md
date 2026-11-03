@@ -54,8 +54,8 @@ Used for app work (backend / UI / export), not model runs.
 |---|---|---|
 | 0 | Setup, GPU check, repo, gold-set folders | Done (Linux) |
 | 1 | Standalone OWLv2 script, precision/recall vs gold, threshold sweep | **Parked** (model comparison, see below) |
-| 2 | FastAPI backend: upload, class descriptions, job queue, results store | **Built** (endpoints 1-13, fake detector only; 16 `GET /api/models` specced, not built) |
-| 3 | Review UI, COCO/YOLO export, Roboflow upload | Review UI **built** (app/static); export + Roboflow push not started |
+| 2 | FastAPI backend: upload, class descriptions, job queue, results store | **Built** (endpoints 1-13, 16 models list, #22 bulk import, #4 content dedupe) |
+| 3 | Review UI, COCO/YOLO export, Roboflow upload | **Built**: review UI + setup flow (app/static), #14 export zip, #21 Roboflow push. UI import screen not started |
 | 4 | SAM masks, second model (Grounding DINO) ensemble, VLM verifier, confidence routing | |
 | 5 | Train YOLO / RF-DETR on auto-labels, compare to gold, flag label errors | |
 | 6 | Docker, login, docs, demo script | |
@@ -65,20 +65,18 @@ recall over precision (humans delete junk faster than they draw missed boxes).
 
 ## Parallel sessions (2026-10-31)
 Work is split by docs/CONTRACT.md (backend, models, ui, export + integrator on main).
-Session notes: docs/agents/*.md. Merged on main: models (fake detector, pipeline.run),
-backend (endpoints 1-13), ui (review page). Run the app: `uvicorn app.main:app --port 8000`,
+Session notes: docs/agents/*.md. Merged on main (2026-11-03): models (fake + yolo detectors,
+pipeline.run, pipeline.drop_overlapping), backend (endpoints 1-13, 16, #21 push jobs, #22 import
+route + import jobs, `jobs.result`), export (#14 export zip, #21 push_image, autolabel/importers/),
+ui (setup flow, review page, export + push buttons). Run the app: `uvicorn app.main:app --port 8000`,
 open http://localhost:8000/. (`/?mock=1` needs a static server on the repo root, e.g.
-`python -m http.server`; uvicorn does not serve docs/fixtures/.) The UI has no upload/classes/job
-screens yet: do those via http://localhost:8000/docs with `"model": "fake"`.
-Next (contract 2026-11-01): export session builds #14 (export zip) and #21 (Roboflow push route +
-`push_image`); backend builds B1-B3 for #21 (roboflow_image_id column, worker runs push jobs, create_job helper).
-#15 is removed. Contract 2026-11-01 (branch contract-dedupe until backend builds it): #4 dedupes
-by content (images.sha256, backfilled in migrate()), same name + new bytes -> stem_2.ext, `renamed` list. Export worktree: D:\autoannotate\aa-export (branch export).
-Contract 2026-11-03 (branch contract-import, NOT on main): #22 bulk import (zip: images / COCO / YOLO,
-or a folder upload treated exactly like a zip, labels included) as an `import` job with `jobs.result` (new `result` key on every Job; the
-fixture-keys test fails on that branch until backend builds it, then backend merges contract-import
-and both land on main together); #9 drops model boxes overlapping a non-rejected same-class box at
-IoU >= 0.5 (`pipeline.drop_overlapping`, models). Export also owns autolabel/importers/.
+`python -m http.server`; uvicorn does not serve docs/fixtures/.) Bulk import (#22) has no UI yet:
+use http://localhost:8000/docs. Export worktree: D:utoannotatea-export (branch export).
+Next:
+- backend: wire the #9 overlap rule in app/worker/worker.py (after deleting old model boxes, pass
+  the image's non-rejected boxes to `pipeline.drop_overlapping`, store what it returns). Not wired
+  yet: nothing calls drop_overlapping (verified 2026-11-03).
+- ui: import screen for #22 (zip or folder upload, poll the import job, show `result`).
 
 ## Phase 1 state
 
