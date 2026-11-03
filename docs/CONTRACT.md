@@ -57,13 +57,14 @@ CREATE TABLE classes (
 CREATE TABLE jobs (
   id           INTEGER PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  kind         TEXT NOT NULL CHECK (kind IN ('detect', 'roboflow_push')),
+  kind         TEXT NOT NULL CHECK (kind IN ('detect', 'roboflow_push', 'import')),
   status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
   progress     REAL NOT NULL DEFAULT 0,   -- 0..1 = done / total
   done         INTEGER NOT NULL DEFAULT 0,
   total        INTEGER NOT NULL DEFAULT 0,
   error        TEXT,                      -- one-line message when status = failed
   config       TEXT NOT NULL,             -- JSON: the request body of POST .../jobs
+  result       TEXT,                      -- JSON summary; set by import jobs (#22), NULL otherwise
   created_at   TEXT NOT NULL,
   started_at   TEXT,
   finished_at  TEXT
@@ -76,7 +77,7 @@ CREATE TABLE annotations (
   x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
   mask        TEXT,                       -- COCO RLE JSON or NULL
   score       REAL,                       -- NULL for human-drawn boxes
-  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human'
+  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human' | 'import'
   status      TEXT NOT NULL CHECK (status IN
                 ('auto_accepted', 'needs_review', 'accepted', 'rejected', 'edited')),
   job_id      INTEGER REFERENCES jobs(id),  -- NULL for human-drawn boxes
@@ -95,6 +96,7 @@ Status rules (the backend enforces them):
 | Model box, `score >= accept_score` | `auto_accepted` |
 | Model box, otherwise | `needs_review` |
 | Human drew a new box | `accepted` (source `human`) |
+| Box imported by #22 | `needs_review` (source `import`, `score` NULL, `job_id` = the import job) |
 | Reviewer approves | `accepted` |
 | Reviewer deletes | `rejected` (the row is kept so we can measure precision later) |
 | Reviewer changes box, mask or class | `edited` |
@@ -105,6 +107,19 @@ bbox / mask / class change make the box `edited`.
 
 A new `detect` job on an image deletes that image's earlier **model** boxes that are
 still `auto_accepted` or `needs_review`. It never touches human-reviewed rows.
+A **model** box is one whose `source` is not `human` and not `import`, so imported boxes are
+never deleted by a detect job, even while `needs_review`.
+
+Overlap rule (#9): after that delete, a new model box is dropped (not stored) when the image
+still has a box of the **same class** whose status is not `rejected` and whose IoU with the new
+box is **>= 0.5** (`autolabel.evaluate.iou`). This keeps a detect job from duplicating imported,
+human or already reviewed boxes. The check is done by `pipeline.drop_overlapping` (section 3).
+
+`jobs.result` is the JSON summary of an import job (#22) and NULL for other kinds. On startup
+`migrate()` adds it (`ALTER TABLE jobs ADD COLUMN result TEXT`) if missing. SQLite cannot change a
+CHECK, so if the `jobs` table's CHECK does not allow `'import'`, `migrate()` rebuilds the table
+(create `jobs_new` with the schema above, copy every row, drop `jobs`, rename, inside one
+transaction with foreign keys off), keeping all ids.
 
 Image review status (`images.review_status`):
 
@@ -188,6 +203,7 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 19 | DELETE | `/annotations/{aid}` | hard-delete one box |
 | 20 | PATCH | `/images/{iid}` | set image review status |
 | 21 | POST | `/projects/{pid}/roboflow/push` | start Roboflow push job |
+| 22 | POST | `/projects/{pid}/import` | start bulk import job (zip or many image files) |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -266,11 +282,17 @@ Request:
 ```json
 {"id": 5, "project_id": 1, "kind": "detect", "status": "queued", "progress": 0.0,
  "done": 0, "total": 47, "error": null, "config": {"model": "pipeline", "image_ids": null, "options": {}},
- "created_at": "2026-10-30T14:02:00Z", "started_at": null, "finished_at": null}
+ "result": null, "created_at": "2026-10-30T14:02:00Z", "started_at": null, "finished_at": null}
 ```
+On images that already have boxes, the overlap rule from section 1 applies: a model box is dropped
+when an existing non-rejected box of the same class overlaps it at IoU >= 0.5. The worker first
+deletes the earlier model boxes (section 1), then passes the image's remaining non-rejected boxes to
+`pipeline.drop_overlapping` and stores what it returns.
 
 ### 10. GET /jobs/{jid}
 Response is a Job. The UI polls it every 1–2 s until `status` is `done` or `failed`.
+Every Job has `result`: `null` for `detect` and `roboflow_push`, the import summary for `import`
+(#22).
 
 ### 11. GET /images/{iid}/annotations?status=
 Response `{"image": Image, "annotations": [Annotation, ...]}`. **Annotation**:
@@ -426,6 +448,100 @@ job's `statuses` (#14's default approved statuses when the body gave none; never
 `boxes = []` for an `empty` image. `push_image` does no filtering and never touches the database.
 If `settings` is a dict, values under a key whose name contains "key" are scrubbed from job errors.
 
+### 22. POST /projects/{pid}/import
+Start a job that adds many images (and their existing labels) to a project.
+The request is `multipart/form-data` with one or more `files` fields, either:
+
+| Upload | Meaning |
+|---|---|
+| exactly one `.zip` part, nothing else | zip import; the format is detected inside the zip (below) |
+| one or more non-zip parts (folder upload) | images only; the part file name may carry the folder path (e.g. `site_a/f_001.jpg`) |
+
+Response 202 is a Job with `kind: "import"`, polled with #10. Its `config` is
+`{"upload": "zip", "file_name": "crane_yolo.zip"}` or `{"upload": "files", "count": 312}`;
+`total` = number of image files (`.jpg`/`.jpeg`/`.png` names) in the zip or in the parts.
+
+Formats inside a zip (detected in this order, first match wins):
+
+| Format | Detected when | Boxes come from |
+|---|---|---|
+| `coco` | a `.json` file with `images`, `annotations` and `categories` keys | `annotations[].bbox` (already `[x, y, w, h]` px). If there are several such files (Roboflow COCO exports have one per split folder), each applies to the images in its own folder and below. Images are matched by base name of `images[].file_name`. |
+| `yolo` | a `labels/` folder with `.txt` files next to an `images/` folder, plus a `data.yaml` (`names`: list or `{index: name}`) or a `classes.txt` (one name per line); the top-most one is used. Roboflow YOLO exports (`train/`, `valid/`, `test/` each with `images/` + `labels/`, `data.yaml` at the root) match. | `labels/<stem>.txt` for `images/<stem>.<ext>` in the same folder; each line `class cx cy w h`, normalized 0..1, converted to `[x, y, w, h]` px with the image size |
+| `images` | anything else | none |
+
+Rules:
+
+| Rule | Value |
+|---|---|
+| Duplicates | same rule as #4, image by image in zip order: same sha256 as an image in the project or earlier in this job -> not added, listed in `duplicates`, and its boxes are **not** imported; same name + new bytes -> `stem_2.ext`, listed in `renamed`. `file_name` = the base name (folders are dropped). |
+| Imported boxes | status `needs_review`, source `import`, `score` NULL (a COCO `score` is ignored), `mask` NULL (COCO segmentation is ignored), `job_id` = the import job, `reviewer` NULL. Boxes are clipped to the image; a box with no area left is skipped. |
+| Imported images | `review_status` `todo` |
+| Classes | matched to the project's classes by **exact name** (case-sensitive). Names with at least one box in the upload that the project lacks are added at the **end** of the class list (so existing YOLO export indexes do not move), in file order (COCO `categories` order, YOLO `names` order), with `description` = the name and `min_score` / `accept_score` NULL. Categories with no boxes are not created (e.g. Roboflow's COCO super-category). |
+| Bad or unknown files | never fail the job: skipped and listed in `skipped` with a reason. Non-image files are skipped (`"not an image"`), except the label files used by the detected format. A bad label line, an unknown class index / `category_id`, a label file or COCO image with no matching image, or a file that will not open as an image are skipped too. An image with no label file is imported with no boxes. |
+| Safety (checked by the route, before the job exists) | a zip entry or part file name with `..` as a path part, or an absolute path (`/x`, `\x`, `C:\x`) -> 400 `bad_request`. Total unpacked size (sum of the zip's uncompressed sizes, or of the parts) above the cap -> 400 `bad_request`. Cap: `AUTOLABEL_IMPORT_MAX_GB` env var, default **5** (GB = 10^9 bytes). While unpacking, a file that grows past its declared size or past the cap is stopped and skipped (`"too large"`). |
+| Upload storage | the upload is saved under `data/imports/<job_id>/` and that folder is deleted when the job ends (`done` or `failed`). |
+| `failed` | only for an unexpected error; images and boxes already added stay. `result` may then be `null`. |
+
+`result` of a `done` import job:
+```json
+{"format": "yolo",
+ "images_added": 118,
+ "duplicates": ["valid/images/f_0007.jpg"],
+ "renamed": [{"from": "f_0001.jpg", "to": "f_0001_2.jpg"}],
+ "boxes_by_class": {"person": 240, "biax": 31},
+ "classes_created": ["biax"],
+ "skipped": [{"file_name": "README.roboflow.txt", "reason": "not an image"},
+             {"file_name": "train/labels/f_0042.txt", "reason": "line 3: unknown class index 7"}]}
+```
+`format` is `coco`, `yolo` or `images` (always `images` for a folder upload). `duplicates`, `renamed`,
+`classes_created` and `skipped` are lists (empty when nothing applies); `boxes_by_class` counts only
+boxes actually stored (by class name; `{}` when none). Paths in `duplicates` / `skipped` are relative
+to the zip root or the folder.
+
+Errors (checked in this order): unknown pid -> 404 `not_found`; no `files` part, a `.zip` sent
+together with other parts, more than one `.zip`, a zip that will not open, an unsafe path or an
+upload above the cap -> 400 `bad_request`.
+
+Who builds what (#22 and the #9 change):
+
+| Role | Builds |
+|---|---|
+| export | `autolabel/importers/` (pure functions, no database): the interface below + `tests/test_importers_*.py` (small zips/folders built in `tmp_path`). |
+| backend | Route #22 in `app/api/` (checks via `check_zip` / `check_names`, saves the upload, `create_job(..., kind="import")`); the worker runs `import` jobs (extract, `plan_import`, #4 duplicate rule shared with #4, add classes, insert images + boxes, `done`/`progress` per image, `result`, delete the temp folder); `jobs.result` + the `jobs` table rebuild in `migrate()`; `result` in every Job JSON; the #9 worker change (delete old model boxes, then `drop_overlapping`). Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`. |
+| models | `drop_overlapping` in `autolabel/pipeline.py` (section 3) + `tests/test_pipeline_*.py`. |
+| ui | A drop zone for one `.zip`, plus a folder picker (`<input webkitdirectory>`, part file name = `webkitRelativePath`) that sends the folder's files to #22; polls #10; shows `result` as a summary (images added, duplicates, renamed, boxes per class, classes created, skipped files with reason). |
+
+Import interface (owner: export; `from autolabel.importers import ...`):
+```python
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+
+class ImportRejected(ValueError): ...   # message is safe to show in a 400
+
+def check_names(names: list[str]) -> None: ...
+    # raises ImportRejected if any name has '..' as a path part or is absolute
+def check_zip(zip_path: Path, max_bytes: int) -> int: ...
+    # raises ImportRejected: not a zip, unsafe entry name (check_names), sum of uncompressed
+    # sizes > max_bytes. Returns the number of image entries (the job's total).
+def extract_zip(zip_path: Path, dest: Path, max_bytes: int) -> list[dict]: ...
+    # unpacks under dest only; returns skipped [{"file_name", "reason"}] (e.g. "too large")
+
+@dataclass(frozen=True)
+class ImportItem:
+    rel_path: str            # path under the root, '/' separators
+    boxes: list[dict]        # [{"class_name": "biax", "bbox": [x, y, w, h]}], px, clipped
+
+@dataclass
+class ImportPlan:
+    format: str              # "coco" | "yolo" | "images"
+    items: list[ImportItem]  # one per image file, in path order
+    class_names: list[str]   # names with >= 1 box, in file order
+    skipped: list[dict]      # [{"file_name", "reason"}]
+
+def plan_import(root: Path, images_only: bool = False) -> ImportPlan: ...
+    # reads an unpacked zip (or saved folder upload with images_only=True); opens images
+    # only to read their size. Never touches the database.
+```
+
 ---
 
 ## 3. Detector interface (Python)
@@ -469,6 +585,13 @@ def run(images: Iterable[tuple[str, str]],            # (image_id, path on disk)
         options: dict | None = None,
         on_progress: Callable[[int, int], None] | None = None,   # (done, total)
         ) -> Iterator[tuple[str, list[Prediction]]]: ...          # yields one image at a time
+
+def drop_overlapping(predictions: list[Prediction],
+                     existing: list[Box],              # the image's non-rejected boxes, category = class name
+                     iou_threshold: float = 0.5,
+                     ) -> list[Prediction]: ...
+    # drops a prediction when an existing box with the same category has
+    # evaluate.iou(pred.bbox, box.bbox) >= iou_threshold; keeps the order of the rest
 ```
 
 Rules:
@@ -492,7 +615,7 @@ Rules:
 | backend | `app/api/` (except `export.py`), `app/db/`, `app/worker/`, `app/main.py` | `tests/test_api_*.py`, `tests/test_db_*.py`, `tests/test_worker_*.py` |
 | models | `autolabel/models/`, `autolabel/pipeline.py` | `tests/test_models_*.py`, `tests/test_pipeline_*.py` |
 | ui | `app/static/` | (manual check against fixtures) |
-| export | `autolabel/export/`, `app/api/export.py` | `tests/test_export_*.py` |
+| export | `autolabel/export/`, `autolabel/importers/`, `app/api/export.py` | `tests/test_export_*.py`, `tests/test_importers_*.py` |
 | integrator | `CLAUDE.md`, `requirements.txt`, `pyproject.toml`, `README.md`, `docs/CONTRACT.md`, `docs/fixtures/` | merges, runs full `pytest` |
 
 Rules:
@@ -516,6 +639,8 @@ Rules:
 - `get_detector` caches one instance per **name**. With real models, two jobs with different
   `options` (e.g. another checkpoint) would share the first instance. Key the cache on
   `(name, options)` instead? (models session; no change yet)
+- #22 folder upload is images only (as requested). Run the zip format detection on folder uploads
+  too, so a dropped YOLO / COCO folder keeps its labels? (`plan_import(images_only=False)`; user to decide)
 
 ---
 

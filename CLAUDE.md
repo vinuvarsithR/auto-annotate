@@ -22,7 +22,7 @@ setup and layout. This file holds the working rules, current state and next step
    | backend | app/api/, app/db/, app/worker/, app/main.py + their tests |
    | ui | app/static/ |
    | models | autolabel/models/, autolabel/pipeline.py |
-   | export | autolabel/export/, app/api/export.py + their tests |
+   | export | autolabel/export/, autolabel/importers/, app/api/export.py + their tests |
 3. **Scope:** build only what docs/CONTRACT.md says. No extra features: propose them and wait for OK.
 4. **Tests:** evaluation, backend and export code need tests. Run them with
    `D:\autoannotate\auto-annotate\.venv\Scripts\python.exe -m pytest` (worktrees have no .venv).
@@ -74,6 +74,11 @@ Next (contract 2026-11-01): export session builds #14 (export zip) and #21 (Robo
 `push_image`); backend builds B1-B3 for #21 (roboflow_image_id column, worker runs push jobs, create_job helper).
 #15 is removed. Contract 2026-11-01 (branch contract-dedupe until backend builds it): #4 dedupes
 by content (images.sha256, backfilled in migrate()), same name + new bytes -> stem_2.ext, `renamed` list. Export worktree: D:\autoannotate\aa-export (branch export).
+Contract 2026-11-03 (branch contract-import, NOT on main): #22 bulk import (zip: images / COCO / YOLO,
+or folder of images) as an `import` job with `jobs.result` (new `result` key on every Job; the
+fixture-keys test fails on that branch until backend builds it, then backend merges contract-import
+and both land on main together); #9 drops model boxes overlapping a non-rejected same-class box at
+IoU >= 0.5 (`pipeline.drop_overlapping`, models). Export also owns autolabel/importers/.
 
 ## Phase 1 state
 

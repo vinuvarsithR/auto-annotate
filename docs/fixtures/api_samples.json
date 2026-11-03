@@ -287,6 +287,7 @@
    "image_ids": null,
    "options": {}
   },
+  "result": null,
   "created_at": "2026-10-30T14:02:00Z",
   "started_at": null,
   "finished_at": null
@@ -305,6 +306,7 @@
    "image_ids": null,
    "options": {}
   },
+  "result": null,
   "created_at": "2026-10-30T14:02:00Z",
   "started_at": "2026-10-30T14:02:00Z",
   "finished_at": null
@@ -323,6 +325,7 @@
    "image_ids": null,
    "options": {}
   },
+  "result": null,
   "created_at": "2026-10-30T14:02:00Z",
   "started_at": "2026-10-30T14:02:00Z",
   "finished_at": "2026-10-30T14:03:00Z"
@@ -341,6 +344,7 @@
    "image_ids": null,
    "options": {}
   },
+  "result": null,
   "created_at": "2026-10-30T14:02:00Z",
   "started_at": "2026-10-30T14:04:00Z",
   "finished_at": "2026-10-30T14:04:00Z"
@@ -650,6 +654,7 @@
     "edited"
    ]
   },
+  "result": null,
   "created_at": "2026-10-30T14:07:00Z",
   "started_at": null,
   "finished_at": null
@@ -775,6 +780,77 @@
   "error": {
    "code": "conflict",
    "message": "missing in .env: ROBOFLOW_WORKSPACE, ROBOFLOW_PROJECT"
+  }
+ },
+ "POST /api/projects/1/import": {
+  "id": 8,
+  "project_id": 1,
+  "kind": "import",
+  "status": "queued",
+  "progress": 0.0,
+  "done": 0,
+  "total": 120,
+  "error": null,
+  "config": {
+   "upload": "zip",
+   "file_name": "crane_yolo.zip"
+  },
+  "result": null,
+  "created_at": "2026-10-30T14:10:00Z",
+  "started_at": null,
+  "finished_at": null
+ },
+ "GET /api/jobs/8 (import done)": {
+  "id": 8,
+  "project_id": 1,
+  "kind": "import",
+  "status": "done",
+  "progress": 1.0,
+  "done": 120,
+  "total": 120,
+  "error": null,
+  "config": {
+   "upload": "zip",
+   "file_name": "crane_yolo.zip"
+  },
+  "result": {
+   "format": "yolo",
+   "images_added": 118,
+   "duplicates": [
+    "valid/images/f_0007.jpg"
+   ],
+   "renamed": [
+    {
+     "from": "f_0001.jpg",
+     "to": "f_0001_2.jpg"
+    }
+   ],
+   "boxes_by_class": {
+    "person": 240,
+    "biax": 31
+   },
+   "classes_created": [
+    "biax"
+   ],
+   "skipped": [
+    {
+     "file_name": "README.roboflow.txt",
+     "reason": "not an image"
+    },
+    {
+     "file_name": "train/labels/f_0042.txt",
+     "reason": "line 3: unknown class index 7"
+    }
+   ]
+  },
+  "created_at": "2026-10-30T14:10:00Z",
+  "started_at": "2026-10-30T14:10:00Z",
+  "finished_at": "2026-10-30T14:11:00Z"
+ },
+ "error example (400 bad_request, #22 unsafe zip path)": {
+  "error": {
+   "code": "bad_request",
+   "message": "unsafe path in zip: ../etc/passwd"
   }
  },
  "all_annotations": [
