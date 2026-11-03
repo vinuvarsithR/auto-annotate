@@ -6,7 +6,8 @@ get_detector(name) -> the detector object. Each one is built once and reused,
 so real models (added later) load their weights only the first time.
 
 "fake" is always available. Real detectors are opt-in through the environment
-variable AUTOLABEL_DETECTORS (comma-separated), e.g. AUTOLABEL_DETECTORS=owlv2.
+variable AUTOLABEL_DETECTORS (comma-separated), e.g. AUTOLABEL_DETECTORS=owlv2,yolo
+("yolo" also needs AUTOLABEL_YOLO_WEIGHTS=path/to/best.pt).
 Unset -> only "fake", so tests stay fast. Real detectors import torch inside
 their own constructors, never at module level, so importing this package
 stays cheap and works without a GPU.
@@ -30,10 +31,16 @@ def _make_owlv2(**options) -> Detector:
     return Owlv2TextDetector(**options)
 
 
+def _make_yolo(**options) -> Detector:
+    from autolabel.models.yolo import YoloDetector
+    return YoloDetector(**options)
+
+
 # name -> factory. Factories import their module lazily.
 _FACTORIES: dict[str, Callable[..., Detector]] = {
     "fake": _make_fake,
     "owlv2": _make_owlv2,
+    "yolo": _make_yolo,
 }
 ALWAYS_ON = ("fake",)
 ENV_VAR = "AUTOLABEL_DETECTORS"
