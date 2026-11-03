@@ -8,6 +8,9 @@ Plain-English summary
 * pipeline.run yields one image at a time. For each image, in ONE transaction:
     1. delete that image's earlier MODEL boxes that are still auto_accepted / needs_review
        (human-reviewed rows are never touched),
+    1b. drop new boxes that overlap a remaining non-rejected box of the same class at
+       IoU >= 0.5 (#9, pipeline.drop_overlapping), so imported / human / reviewed boxes
+       are not duplicated,
     2. store the new boxes: score >= class accept_score -> auto_accepted, else needs_review
        (boxes below the class min_score are dropped, as a safety net),
     3. update done / total / progress.
@@ -213,12 +216,17 @@ class Worker:
         specs = [ClassSpec(name=r["name"], description=r["description"], min_score=r["min_score"])
                  for r in class_rows]
 
+        from autolabel.evaluate import Box  # pure functions, no torch
+        from autolabel.pipeline import drop_overlapping
+
         expected = {img_id for img_id, _ in images}
         done = 0
         for image_id, preds in run(images, specs, detector=model, options=options):
             if image_id not in expected:
                 raise ValueError(f"detector returned unknown image_id '{image_id}'")
-            rows_to_add = [self._row(p, by_name, image_id) for p in preds]
+            preds = list(preds)
+            for p in preds:  # unknown class -> job fails, even if the box would be dropped
+                self._row(p, by_name, image_id)
             done += 1
             t = db.now()
             with conn:
@@ -226,6 +234,14 @@ class Worker:
                     "DELETE FROM annotations WHERE image_id=? "
                     "AND source NOT IN ('human', 'import') "
                     "AND status IN (?, ?)", (int(image_id), *db.MODEL_PENDING))
+                # #9: drop new boxes that overlap a remaining non-rejected box of the same class
+                existing = [
+                    Box(image_id, r["class_name"],
+                        (float(r["x"]), float(r["y"]), float(r["w"]), float(r["h"])))
+                    for r in conn.execute(db.ANNOTATION_SELECT + " WHERE a.image_id=? "
+                                          "AND a.status != 'rejected'", (int(image_id),))]
+                kept = drop_overlapping(preds, existing) if existing else preds
+                rows_to_add = [self._row(p, by_name, image_id) for p in kept]
                 for r in rows_to_add:
                     if r is None:
                         continue
