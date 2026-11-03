@@ -70,7 +70,8 @@ def test_rerun_replaces_only_unreviewed_model_boxes(tmp_path):
         assert person["id"] in ids and human["id"] in ids  # reviewed + human kept
         assert rb["id"] not in ids                          # old needs_review replaced
         statuses = sorted(a["status"] for a in after)
-        assert statuses == ["accepted", "accepted", "auto_accepted", "needs_review"]
+        # the new person box sits on the accepted one (IoU 1.0), so #9 drops it
+        assert statuses == ["accepted", "accepted", "needs_review"]
 
 
 def test_failed_job_leaves_unreached_images_alone(tmp_path):
