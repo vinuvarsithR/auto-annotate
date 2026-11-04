@@ -1,0 +1,258 @@
+{
+ "_note": "What plan_import must return for each folder (CONTRACT #22). Compare numbers with a 1e-6 tolerance.",
+ "yolo_mixed": {
+  "format": "yolo",
+  "class_names": [
+   "person",
+   "rb"
+  ],
+  "items": [
+   {
+    "rel_path": "images/a.png",
+    "boxes": [
+     {
+      "class_name": "person",
+      "bbox": [
+       40,
+       15,
+       20,
+       20
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "rb",
+      "bbox": [
+       10,
+       10,
+       20,
+       20
+      ],
+      "polygon": [
+       [
+        0.1,
+        0.2
+       ],
+       [
+        0.3,
+        0.2
+       ],
+       [
+        0.2,
+        0.6
+       ]
+      ]
+     },
+     {
+      "class_name": "person",
+      "bbox": [
+       40,
+       5,
+       40,
+       20
+      ],
+      "polygon": [
+       [
+        0.5,
+        0.1
+       ],
+       [
+        0.7,
+        0.1
+       ],
+       [
+        0.8,
+        0.3
+       ],
+       [
+        0.6,
+        0.5
+       ],
+       [
+        0.4,
+        0.3
+       ]
+      ]
+     },
+     {
+      "class_name": "rb",
+      "bbox": [
+       0,
+       25,
+       100,
+       25
+      ],
+      "polygon": [
+       [
+        0.0,
+        0.5
+       ],
+       [
+        0.5,
+        0.5
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ]
+     }
+    ]
+   }
+  ],
+  "skipped": [
+   {
+    "file_name": "labels/a.txt",
+    "reason": "line 4: expected 5 values or an odd count >= 7, got 6"
+   },
+   {
+    "file_name": "labels/a.txt",
+    "reason": "line 5: expected 5 values or an odd count >= 7, got 3"
+   },
+   {
+    "file_name": "labels/a.txt",
+    "reason": "line 6: not a number"
+   },
+   {
+    "file_name": "labels/a.txt",
+    "reason": "line 8: polygon has no area"
+   }
+  ]
+ },
+ "coco_segmentation": {
+  "format": "coco",
+  "class_names": [
+   "person",
+   "rb"
+  ],
+  "items": [
+   {
+    "rel_path": "a.png",
+    "boxes": [
+     {
+      "class_name": "person",
+      "bbox": [
+       10,
+       10,
+       20,
+       20
+      ],
+      "polygon": [
+       [
+        0.1,
+        0.2
+       ],
+       [
+        0.3,
+        0.2
+       ],
+       [
+        0.2,
+        0.6
+       ]
+      ]
+     },
+     {
+      "class_name": "rb",
+      "bbox": [
+       40,
+       5,
+       20,
+       10
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "rb",
+      "bbox": [
+       60,
+       20,
+       20,
+       10
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "person",
+      "bbox": [
+       5,
+       30,
+       10,
+       10
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "rb",
+      "bbox": [
+       50,
+       30,
+       30,
+       15
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "person",
+      "bbox": [
+       70,
+       5,
+       20,
+       1
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "person",
+      "bbox": [
+       10,
+       35,
+       20,
+       10
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "rb",
+      "bbox": [
+       30,
+       40,
+       5,
+       5
+      ],
+      "polygon": null
+     },
+     {
+      "class_name": "person",
+      "bbox": [
+       90,
+       10,
+       10,
+       30
+      ],
+      "polygon": [
+       [
+        0.9,
+        0.2
+       ],
+       [
+        1.0,
+        0.2
+       ],
+       [
+        1.0,
+        0.8
+       ]
+      ]
+     }
+    ]
+   }
+  ],
+  "skipped": [
+   {
+    "file_name": "annotations.json",
+    "reason": "5 segmentations imported as box only (RLE, multi-part or unusable polygon)"
+   }
+  ]
+ }
+}

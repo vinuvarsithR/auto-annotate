@@ -130,6 +130,32 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   Real backend (uvicorn :8011, this worktree's data/app.db): review page loads, boxes drawn, no errors.
   pytest 180 passed. Multi-select is not built (copy works on the one selected box).
 
+## Polygon spec (from the integrator, user decisions 2026-11-04)
+
+Build against docs/CONTRACT.md #11-#14. Polygons are normalized 0..1; the server computes the bbox.
+Not started. Do this after backend and export have merged their polygon work.
+
+| Area | Behaviour |
+|---|---|
+| Show | An annotation with `polygon` draws its outline in the class colour on the canvas, in every tool. Plain boxes look the same as today. A selected polygon also shows its vertices. |
+| Draw | New tool, key `G`, next to Drag (`D`) and Box (`B`). Each click adds a point. Enter, or a click on the first point, closes the shape (at least 3 points). Backspace removes the last point. Esc cancels. Closing opens the class choice the same way as a new box, then sends #12 with `polygon` and no `bbox`. |
+| Move a vertex | Drag it. Points stay inside the image. On release send #13 with the whole `polygon`. |
+| Add a vertex | Click on an edge of the selected polygon. A new point appears there and can be dragged straight away. |
+| Delete a vertex | Click a vertex to select it, then Delete or Backspace. With no vertex selected, those keys delete the box as today. A polygon cannot go below 3 points: show a banner and keep it. |
+| Move / resize | The existing box drag and handles still work on a polygon. Send #13 with `bbox` only, then use the `polygon` and `bbox` the server returns. |
+| Copy / paste | The clipboard keeps `polygon`. Paste sends #12 with `polygon` and no `bbox`, unchanged on any image size because it is normalized. The existing `MIN_SIZE` check uses the scaled bbox. |
+| Repeat previous (`P`) | Keeps the polygon, same as paste: each copied box sends #12 with `polygon` and no `bbox`. The existing `MIN_SIZE` and overlap checks use the scaled bbox. |
+| Undo | One user action = one undo step, as today. `snapOf` and `sameSnap` include `polygon`. Undo of a polygon or box change sends the old `polygon` and the old `status` in one #13 call, so scaling cannot leave a rounding error. `recreate()` sends `polygon`, so undo of a delete keeps it. |
+| Export | Add `YOLO-seg` (`format: "yolo-seg"`) to the format choice in the export menu. |
+| Mock (`?mock=1`) | `all_annotations` has one polygon (id 106). `api.js` follows the #12 and #13 polygon rules: bbox from polygon, scaling on a bbox-only PATCH, 400 for a bad polygon. |
+| Help | Add the `G` tool and the vertex actions to the `?` help screen. |
+
+Not in this spec: turning an existing box into a polygon from the UI, multi-part polygons, holes, and
+SAM or any assisted drawing.
+
+Done when: node --check passes, the mock layer is tested in Node, and each row above is VERIFIED in
+Chrome with no console errors.
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 None (plain JS, no libraries).

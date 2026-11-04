@@ -12,6 +12,7 @@ Conventions used everywhere:
 | Times | ISO-8601 UTC text, e.g. `"2026-10-30T14:05:00Z"` |
 | Boxes | `[x, y, w, h]` in pixels, top-left origin (COCO style, same as `autolabel/evaluate.Box`) |
 | Masks | COCO RLE `{"size": [h, w], "counts": "<compressed string>"}` or `null` |
+| Polygons | `[[x, y], ...]` normalized 0..1, top-left origin, at least 3 points, one outer ring, or `null` |
 | Classes in Python | by **name** (string), as in `Box.category` |
 | Classes in API/DB | by `class_id`, and every annotation response also includes `class_name` |
 | Secrets | `ROBOFLOW_API_KEY` is read from `.env` on the server only. Never in a request, response, log or DB row. |
@@ -76,6 +77,7 @@ CREATE TABLE annotations (
   class_id    INTEGER NOT NULL REFERENCES classes(id),
   x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
   mask        TEXT,                       -- COCO RLE JSON or NULL
+  polygon     TEXT,                       -- JSON [[x, y], ...] normalized 0..1, or NULL (plain box)
   score       REAL,                       -- NULL for human-drawn boxes
   source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human' | 'import'
   status      TEXT NOT NULL CHECK (status IN
@@ -99,11 +101,11 @@ Status rules (the backend enforces them):
 | Box imported by #22 | `needs_review` (source `import`, `score` NULL, `job_id` = the import job) |
 | Reviewer approves | `accepted` |
 | Reviewer deletes | `rejected` (the row is kept so we can measure precision later) |
-| Reviewer changes box, mask or class | `edited` |
+| Reviewer changes box, mask, polygon or class | `edited` |
 | Reviewer undoes a change | the status sent in the request |
 
 An explicit `status` in a PATCH (#13) always wins. Only when `status` is absent does a
-bbox / mask / class change make the box `edited`.
+bbox / mask / polygon / class change make the box `edited`.
 
 A new `detect` job on an image deletes that image's earlier **model** boxes that are
 still `auto_accepted` or `needs_review`. It never touches human-reviewed rows.
@@ -120,6 +122,14 @@ human or already reviewed boxes. The check is done by `pipeline.drop_overlapping
 CHECK, so if the `jobs` table's CHECK does not allow `'import'`, `migrate()` rebuilds the table
 (create `jobs_new` with the schema above, copy every row, drop `jobs`, rename, inside one
 transaction with foreign keys off), keeping all ids.
+
+`annotations.polygon` is optional. x, y, w, h stay NOT NULL on every row. Rule: when `polygon` is
+set, the bbox is **always** the polygon's bounding box, computed by the server (min/max of the
+points times the image width/height). `migrate()` adds the column on startup
+(`ALTER TABLE annotations ADD COLUMN polygon TEXT`) if missing; old rows stay NULL (plain boxes), no
+rebuild is needed. Detect jobs (#9), `drop_overlapping` and all detectors are unchanged: they use the
+bbox only and model boxes have `polygon` NULL. `polygon` and `mask` are independent; #14 and #21 use
+`polygon` first (see #14).
 
 Image review status (`images.review_status`):
 
@@ -298,13 +308,21 @@ Every Job has `result`: `null` for `detect` and `roboflow_push`, the import summ
 Response `{"image": Image, "annotations": [Annotation, ...]}`. **Annotation**:
 ```json
 {"id": 101, "image_id": 10, "class_id": 3, "class_name": "biax",
- "bbox": [812.0, 300.5, 240.0, 66.0], "mask": null, "score": 0.42,
+ "bbox": [812.0, 300.5, 240.0, 66.0], "mask": null, "polygon": null, "score": 0.42,
  "source": "owlv2_image", "status": "needs_review", "job_id": 5, "reviewer": null,
  "created_at": "2026-10-30T14:03:00Z", "updated_at": "2026-10-30T14:03:00Z"}
 ```
+`polygon` is always present: `null` for a box, else the point list (section conventions).
 
 ### 12. POST /images/{iid}/annotations
 Request `{"class_id": 1, "bbox": [100, 200, 40, 50], "mask": null, "reviewer": "dhyan"}`.
+Optional `polygon`: with it, `bbox` may be left out; if both are sent, `bbox` is ignored and
+computed from the polygon. Without `polygon`, `bbox` is required, as before.
+```json
+{"class_id": 1, "polygon": [[0.1, 0.2], [0.3, 0.2], [0.2, 0.4]], "reviewer": "dhyan"}
+```
+A bad `polygon` (fewer than 3 points, a point that is not 2 finite numbers in 0..1, or zero area)
+-> 400 `bad_request`. The server never clips an API polygon; only #22 does.
 Response 201 is an Annotation with `source: "human"`, `score: null` and `status: "accepted"`.
 If the image's `review_status` is `empty` -> 409 `conflict` (set it back to `todo` with #20 first).
 
@@ -318,9 +336,18 @@ statuses; an unknown one is 400 `bad_request`.
 {"status": "needs_review", "reviewer": "dhyan"}
 {"status": "auto_accepted", "bbox": [810, 298, 250, 70], "class_id": 4, "reviewer": "dhyan"}
 ```
+`polygon` follows the same validation as #12:
+
+| Body | Effect |
+|---|---|
+| `polygon: [[x, y], ...]` | replaces the polygon, or turns a box into a polygon; bbox recomputed. A `bbox` in the same body is ignored. |
+| `polygon: null` | removes the polygon; a `bbox` in the same body is applied, otherwise the bbox stays as it is |
+| `bbox` only, on a row with a polygon | the polygon is scaled and moved to fill the new bbox, so box-only clients keep working and the bbox rule still holds. Points are clamped to 0..1, then the bbox is recomputed. |
+| `polygon` absent | polygon untouched |
+
 The response is the updated Annotation. The third example comes back with `status: "edited"`.
 Rule: an explicit `status` in the body wins; only when `status` is absent does a bbox / mask /
-class change make the box `edited`. So the last example comes back `auto_accepted`. Undo uses
+polygon / class change make the box `edited`. So the last example comes back `auto_accepted`. Undo uses
 this to put a box back exactly as it was (undo "accept" -> `needs_review`; undo "move" -> the old
 bbox and the old status in one call).
 
@@ -331,13 +358,21 @@ Request (every field optional):
 ```
 | Field | Default | Rule |
 |---|---|---|
-| `format` | `"coco"` | `yolo` or `coco`; anything else -> 400 `bad_request` |
+| `format` | `"coco"` | `yolo`, `yolo-seg` or `coco`; anything else -> 400 `bad_request` |
 | `statuses` | approved statuses (section 1) | never `rejected`; `rejected`, unknown or empty list -> 400 `bad_request` |
 | `include_images` | `false` | `true` puts the image files in the zip too |
 
 Only images with `review_status` `done` or `empty` are exported (section 1, export / push rules);
 an `empty` image is exported with no labels. Only boxes whose status is in `statuses` are written.
 The response is an `application/zip` download named `<project>_<format>.zip`.
+
+| Format | Row with polygon | Row without polygon |
+|---|---|---|
+| `yolo` | `class cx cy w h` of its bbox | `class cx cy w h` |
+| `yolo-seg` | `class x1 y1 x2 y2 ...`, normalized | same line shape with the 4 corners of the bbox, clipped to the image; no area left -> left out |
+| `coco` | `bbox` + `segmentation: [[x1, y1, x2, y2, ...]]` in **pixels**; `area` = polygon area | `bbox`; `segmentation` = `mask` if set, else `[]`; `area` = w * h |
+
+`yolo-seg` has the same zip layout as `yolo` (`data.yaml`, `classes.txt`, `labels/`, `images/`).
 Errors: unknown pid -> 404 `not_found`; `include_images: true` and an exported image's file is
 missing on disk -> 404 `not_found` (no zip is sent); bad `format` / `statuses` / body -> 400
 `bad_request`; no `done` or `empty` image in the project -> 409 `conflict`.
@@ -395,7 +430,8 @@ Image. Any value may be set at any time, except `empty` while the image has a bo
 unknown iid -> 404 `not_found`. Setting the current value again is a no-op 200.
 
 ### 21. POST /projects/{pid}/roboflow/push
-Start a job that uploads images and their boxes to Roboflow. Request body is optional:
+Start a job that uploads images and their boxes to Roboflow. Polygons are sent when present (see
+the push interface). Request body is optional:
 ```json
 {"statuses": ["auto_accepted", "accepted", "edited"]}
 ```
@@ -439,13 +475,30 @@ def push_image(settings, image: dict, boxes: list[dict], class_names: list[str],
                batch_name: str) -> str: ...
     # one SDK upload; returns the Roboflow image id
     # image       = {"id", "file_name", "path", "width", "height"}
-    # boxes       = [{"class_name": "biax", "bbox": [x, y, w, h]}, ...]   (pixels, section conventions)
+    # boxes       = [{"class_name": "biax", "bbox": [x, y, w, h], "polygon": [[x, y], ...] | None}, ...]
+    #               bbox in pixels, polygon normalized (section conventions); polygon may be absent
     # class_names = project class order (#7)
 ```
 The **worker** (backend) owns image selection (`done`/`empty`, `roboflow_image_id` NULL), skipping,
 saving the returned id, progress and errors. It passes `push_image` only boxes whose status is in the
 job's `statuses` (#14's default approved statuses when the body gave none; never `rejected`), and
 `boxes = []` for an `empty` image. `push_image` does no filtering and never touches the database.
+The upload format stays one-image COCO through `project.single_upload`. `coco_for_image` writes
+`segmentation` and `area` as in #14 for rows with a polygon; rows without one keep `segmentation: []`.
+
+Push changes by role:
+
+| Code | Owner | Change |
+|---|---|---|
+| `coco_for_image` in `autolabel/export/roboflow_push.py` | export | `segmentation` + `area` for rows with a polygon; the 4-corner fallback below if it is needed |
+| box list in `app/worker/worker.py:286` | backend | add `"polygon"` to each box passed to `push` |
+
+Polygon test upload (approved 2026-11-04, **export phase only**): with the roboflow Python SDK and the
+key from `.env`, upload to project `test-g9qbh` and no other project (`ROBOFLOW_PROJECT` is not used
+for this test). Upload a mixed image (one polygon row, one box row with `segmentation: []`) and read
+back what Roboflow stored. If the box row was dropped, `coco_for_image` sends rows without a polygon
+as 4-corner polygons (the bbox corners, clipped to the image, as in `yolo-seg`) on every image. Export
+records the result in `docs/agents/export.md`, with the Roboflow project type it saw.
 If `settings` is a dict, values under a key whose name contains "key" are scrubbed from job errors.
 
 ### 22. POST /projects/{pid}/import
@@ -466,16 +519,38 @@ Formats inside a zip or a folder upload (below, "the upload"; detected in this o
 
 | Format | Detected when | Boxes come from |
 |---|---|---|
-| `coco` | a `.json` file with `images`, `annotations` and `categories` keys | `annotations[].bbox` (already `[x, y, w, h]` px). If there are several such files (Roboflow COCO exports have one per split folder), each applies to the images in its own folder and below. Images are matched by base name of `images[].file_name`. |
-| `yolo` | a `labels/` folder with `.txt` files next to an `images/` folder, plus a `data.yaml` (`names`: list or `{index: name}`) or a `classes.txt` (one name per line); the top-most one is used. Roboflow YOLO exports (`train/`, `valid/`, `test/` each with `images/` + `labels/`, `data.yaml` at the root) match. | `labels/<stem>.txt` for `images/<stem>.<ext>` in the same folder; each line `class cx cy w h`, normalized 0..1, converted to `[x, y, w, h]` px with the image size |
+| `coco` | a `.json` file with `images`, `annotations` and `categories` keys | `annotations[].bbox` (already `[x, y, w, h]` px) and `annotations[].segmentation` (table below). If there are several such files (Roboflow COCO exports have one per split folder), each applies to the images in its own folder and below. Images are matched by base name of `images[].file_name`. |
+| `yolo` | a `labels/` folder with `.txt` files next to an `images/` folder, plus a `data.yaml` (`names`: list or `{index: name}`) or a `classes.txt` (one name per line); the top-most one is used. Roboflow YOLO exports (`train/`, `valid/`, `test/` each with `images/` + `labels/`, `data.yaml` at the root) match. | `labels/<stem>.txt` for `images/<stem>.<ext>` in the same folder; each line is one row by value count (table below), normalized 0..1 |
 | `images` | anything else | none |
+
+YOLO rows (per row; mixed rows in one file are allowed):
+
+| Values on the line | Result |
+|---|---|
+| 5 | box `class cx cy w h`, converted to `[x, y, w, h]` px with the image size |
+| odd, >= 7 | polygon `class x1 y1 x2 y2 ...` (at least 3 points); bbox computed |
+| anything else | line skipped: `"line 3: expected 5 values or an odd count >= 7, got 6"` |
+
+COCO `segmentation`, per annotation:
+
+| Value | Result |
+|---|---|
+| missing or `[]` | box |
+| list with one polygon part (flat `[x1, y1, x2, y2, ...]` px, >= 3 points) | polygon (divided by image width/height); bbox computed |
+| list with more than one part | box from `bbox`, `polygon` NULL, counted in the note below |
+| RLE (a dict) | box from `bbox`, `polygon` NULL, counted in the note below. RLE is not decoded. |
+| anything else, or a polygon with zero area | box from `bbox`, `polygon` NULL, counted in the note below |
+
+Note: one `skipped` entry per COCO file, not one per annotation, e.g.
+`{"file_name": "train/_annotations.coco.json", "reason": "12 segmentations imported as box only (RLE, multi-part or unusable polygon)"}`.
+The box is stored, so these rows still count in `boxes_by_class`.
 
 Rules:
 
 | Rule | Value |
 |---|---|
 | Duplicates | same rule as #4, image by image in path order: same sha256 as an image in the project or earlier in this job -> not added, listed in `duplicates`, and its boxes are **not** imported; same name + new bytes -> `stem_2.ext`, listed in `renamed`. `file_name` = the base name (folders are dropped). |
-| Imported boxes | status `needs_review`, source `import`, `score` NULL (a COCO `score` is ignored), `mask` NULL (COCO segmentation is ignored), `job_id` = the import job, `reviewer` NULL. Boxes are clipped to the image; a box with no area left is skipped. |
+| Imported boxes | status `needs_review`, source `import`, `score` NULL (a COCO `score` is ignored), `mask` NULL, `job_id` = the import job, `reviewer` NULL. Boxes are clipped to the image; a box with no area left is skipped. Polygon points are clamped to 0..1; a YOLO polygon with no area left is skipped like a bad line. |
 | Imported images | `review_status` `todo` |
 | Classes | matched to the project's classes by **exact name** (case-sensitive). Names with at least one box in the upload that the project lacks are added at the **end** of the class list (so existing YOLO export indexes do not move), in file order (COCO `categories` order, YOLO `names` order), with `description` = the name and `min_score` / `accept_score` NULL. Categories with no boxes are not created (e.g. Roboflow's COCO super-category). |
 | Bad or unknown files | never fail the job: skipped and listed in `skipped` with a reason. Non-image files are skipped (`"not an image"`), except the label files used by the detected format. A bad label line, an unknown class index / `category_id`, a label file or COCO image with no matching image, or a file that will not open as an image are skipped too. An image with no label file is imported with no boxes. |
@@ -534,7 +609,8 @@ def extract_zip(zip_path: Path, dest: Path, max_bytes: int) -> list[dict]: ...
 @dataclass(frozen=True)
 class ImportItem:
     rel_path: str            # path under the root, '/' separators
-    boxes: list[dict]        # [{"class_name": "biax", "bbox": [x, y, w, h]}], px, clipped
+    boxes: list[dict]        # [{"class_name": "biax", "bbox": [x, y, w, h], "polygon": [[x, y], ...] | None}]
+                             # bbox px, clipped; polygon normalized, clamped; bbox = polygon's bbox when set
 
 @dataclass
 class ImportPlan:
@@ -549,6 +625,15 @@ def plan_import(root: Path) -> ImportPlan: ...
 ```
 
 ---
+
+### Polygons: who builds what
+
+| Role | Builds |
+|---|---|
+| backend | `annotations.polygon` in `schema.sql` + `migrate()`; `polygon` in `annotation_dict`; #12 and #13 rules (validation, bbox from polygon, scaling on bbox-only PATCH); worker: store `box["polygon"]` in import jobs, pass `polygon` to `push` (`app/worker/worker.py:286`). Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`; extend `tests/test_api_fixture_keys.py` to the polygon samples. |
+| export | `yolo-seg` in `autolabel/export/formats.py`; `segmentation` + polygon `area` in `to_coco` and `coco_for_image`; polygon rows in `autolabel/importers/yolo.py` and `coco.py`; the per-file COCO note; the #21 test upload to `test-g9qbh`. Tests from `docs/fixtures/polygons/`. |
+| ui | Spec in `docs/agents/ui.md`: show polygon outlines, draw new polygons, move / add / delete vertices, copy/paste and Repeat previous keep the polygon, undo keeps the polygon, `yolo-seg` in the export format choice, polygon rules in the `?mock=1` layer. |
+| models | nothing |
 
 ## 3. Detector interface (Python)
 
@@ -652,7 +737,9 @@ Rules:
 `docs/fixtures/api_samples.json` holds one example response per endpoint, keyed by `"METHOD path"`.
 A value of `null` means 204 with an empty body (#18, #19).
 It uses project 1 `eot_crane` with the 4 crane classes, 3 images, and annotations in all 5 statuses
-(including one human box and one with a mask).
+(including one human box, one with a mask and one with a polygon).
+`docs/fixtures/polygons/` holds small import fixtures: `yolo_mixed/`, `coco_segmentation/` and
+`expected.json` (what `plan_import` must return for each; compare numbers with a 1e-6 tolerance).
 - **ui:** add a `?mock=1` switch that reads this file instead of calling `/api`. For images, use any
   local gold-set image; the image sizes in the fixtures are 1280x720 (the real crane size).
 - **export:** load `images`, `classes` and `annotations` from the fixtures and feed them to `to_coco` and `to_yolo`.
