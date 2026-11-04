@@ -500,7 +500,8 @@ boxes actually stored (by class name; `{}` when none). Paths in `duplicates` / `
 to the zip root or the folder.
 
 Errors (checked in this order): unknown pid -> 404 `not_found`; no `files` part, a single `.zip`
-that will not open, an unsafe or repeated path, or an upload above the cap -> 400 `bad_request`.
+that will not open, an unsafe path, a repeated path (for a zip, only entries with the same path but
+different size or CRC), or an upload above the cap -> 400 `bad_request`.
 
 Who builds what (#22 and the #9 change):
 
@@ -519,12 +520,16 @@ class ImportRejected(ValueError): ...   # message is safe to show in a 400
 
 def check_names(names: list[str]) -> None: ...
     # raises ImportRejected if any name has '..' as a path part, is absolute, or appears twice
-    # (used for zip entry names and for folder-upload part names)
+    # (used for folder-upload and loose-file names only)
 def check_zip(zip_path: Path, max_bytes: int) -> int: ...
-    # raises ImportRejected: not a zip, unsafe entry name (check_names), sum of uncompressed
-    # sizes > max_bytes. Returns the number of image entries (the job's total).
+    # raises ImportRejected: not a zip, unsafe entry name ('..' path part or absolute), sum of
+    # uncompressed sizes > max_bytes. Returns the number of image entries (the job's total).
 def extract_zip(zip_path: Path, dest: Path, max_bytes: int) -> list[dict]: ...
     # unpacks under dest only; returns skipped [{"file_name", "reason"}] (e.g. "too large")
+    # check_zip and extract_zip: entries with the same path, size and CRC count as one: the first
+    # is kept, the rest are ignored and do not count toward the size cap. Same path with a
+    # different size or CRC raises ImportRejected 'path appears twice: NAME'. Compared from
+    # ZipInfo only.
 
 @dataclass(frozen=True)
 class ImportItem:
