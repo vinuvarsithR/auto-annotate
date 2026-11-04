@@ -6,6 +6,7 @@ pairs) must give the same plan.
 
 import io
 import json
+import warnings
 import zipfile
 
 import pytest
@@ -336,3 +337,31 @@ def test_zip_and_folder_upload_give_same_plan(tmp_path, files):
 
     assert from_zip == from_parts
     assert len(from_zip.items) == n_images
+
+
+# ---------- repeated zip entries ----------
+
+def test_zip_with_identical_data_yaml_repeats_plans_normally(tmp_path):
+    data_yaml = "names: ['person', 'biax']\n"
+    z = tmp_path / "u.zip"
+    with zipfile.ZipFile(z, "w") as zf, warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile warns about the repeats
+        zf.writestr("data.yaml", data_yaml)
+        zf.writestr("train/images/a.png", img(100, 50))
+        zf.writestr("data.yaml", data_yaml)
+        zf.writestr("train/images/b.png", img(100, 50))
+        zf.writestr("train/labels/a.txt", "0 0.5 0.5 0.2 0.2\n")
+        zf.writestr("train/labels/b.txt", "1 0.25 0.5 0.5 1.0\n")
+        zf.writestr("data.yaml", data_yaml)
+
+    assert check_zip(z, 10**9) == 2
+    assert extract_zip(z, tmp_path / "out", 10**9) == []
+    plan = plan_import(tmp_path / "out")
+
+    assert plan.format == "yolo"
+    assert items(plan) == {
+        "train/images/a.png": [{"class_name": "person", "bbox": pytest.approx([40.0, 20.0, 20.0, 10.0])}],
+        "train/images/b.png": [{"class_name": "biax", "bbox": pytest.approx([0.0, 0.0, 50.0, 50.0])}],
+    }
+    assert plan.class_names == ["person", "biax"]
+    assert plan.skipped == []

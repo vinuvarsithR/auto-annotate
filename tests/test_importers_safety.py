@@ -1,6 +1,7 @@
 """check_names / check_zip / extract_zip (CONTRACT #22)."""
 
 import io
+import warnings
 import zipfile
 
 import pytest
@@ -133,3 +134,39 @@ def test_extract_zip_corrupt_entry_is_skipped(tmp_path):
     skipped = extract_zip(z, tmp_path / "out", 10**9)
     assert skipped == [{"file_name": "a.jpg", "reason": "cannot unpack"}]
     assert (tmp_path / "out/b.jpg").read_bytes() == b"b" * 50
+
+
+# ---------- repeated zip entries ----------
+
+def make_zip_with_repeats(path, entries):
+    """entries: (name, data) pairs; zipfile warns about a repeated name but writes it."""
+    with zipfile.ZipFile(path, "w") as zf, warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        for name, data in entries:
+            zf.writestr(name, data)
+    return path
+
+
+@pytest.mark.parametrize("second", [
+    b"names: [a, b]",   # different size
+    b"names: [b]",      # same size, different CRC
+])
+def test_zip_repeated_entry_with_different_content_is_rejected(tmp_path, second):
+    z = make_zip_with_repeats(tmp_path / "u.zip", [
+        ("data.yaml", b"names: [a]"), ("a.png", png_bytes()), ("data.yaml", second)])
+    with pytest.raises(ImportRejected) as check_err:
+        check_zip(z, 10**9)
+    assert str(check_err.value) == "path appears twice: data.yaml"
+    with pytest.raises(ImportRejected) as extract_err:
+        extract_zip(z, tmp_path / "out", 10**9)
+    assert str(extract_err.value) == "path appears twice: data.yaml"
+
+
+def test_zip_identical_repeats_count_once_toward_size_cap(tmp_path):
+    z = make_zip_with_repeats(tmp_path / "u.zip", [("a.jpg", b"x" * 600)] * 3)
+    assert check_zip(z, 600) == 1
+    with pytest.raises(ImportRejected, match="too large"):
+        check_zip(z, 599)
+    dest = tmp_path / "out"
+    assert extract_zip(z, dest, 600) == []
+    assert (dest / "a.jpg").read_bytes() == b"x" * 600

@@ -18,17 +18,23 @@ def normalize_name(name: str) -> str:
     return name.replace("\\", "/")
 
 
+def _safe_name(raw: str) -> str:
+    """The normalized name; raises ImportRejected if it is empty, absolute or has '..' as a part."""
+    name = normalize_name(raw)
+    if not name.strip("/"):
+        raise ImportRejected("empty file name in upload")
+    if name.startswith("/") or _DRIVE.match(name):
+        raise ImportRejected(f"absolute path not allowed: {raw}")
+    if ".." in name.split("/"):
+        raise ImportRejected(f"'..' not allowed in path: {raw}")
+    return name
+
+
 def check_names(names: list[str]) -> None:
-    """Raise ImportRejected if a name is empty, absolute, has '..' as a path part, or repeats."""
+    """For folder-upload and loose-file names: raise ImportRejected if a name is unsafe or repeats."""
     seen: set[str] = set()
     for raw in names:
-        name = normalize_name(raw)
-        if not name.strip("/"):
-            raise ImportRejected("empty file name in upload")
-        if name.startswith("/") or _DRIVE.match(name):
-            raise ImportRejected(f"absolute path not allowed: {raw}")
-        if ".." in name.split("/"):
-            raise ImportRejected(f"'..' not allowed in path: {raw}")
+        name = _safe_name(raw)
         if name in seen:
             raise ImportRejected(f"path appears twice: {raw}")
         seen.add(name)
@@ -41,11 +47,21 @@ def _open_zip(zip_path: Path) -> zipfile.ZipFile:
         raise ImportRejected("not a valid zip file") from None
 
 
+def _kept_entries(infos: list[zipfile.ZipInfo]) -> list[zipfile.ZipInfo]:
+    """Zip entries with unsafe names rejected and repeats removed. Same path, size and CRC count
+    as one (first kept); same path with a different size or CRC raises ImportRejected."""
+    kept: dict[str, zipfile.ZipInfo] = {}
+    for info in infos:
+        first = kept.setdefault(_safe_name(info.filename), info)
+        if (first.file_size, first.CRC) != (info.file_size, info.CRC):
+            raise ImportRejected(f"path appears twice: {info.filename}")
+    return list(kept.values())
+
+
 def check_zip(zip_path: Path, max_bytes: int) -> int:
     """Check a zip before the job exists. Returns the number of image entries (the job's total)."""
     with _open_zip(zip_path) as zf:
-        infos = zf.infolist()
-    check_names([i.filename for i in infos])
+        infos = _kept_entries(zf.infolist())
     total = sum(i.file_size for i in infos)
     if total > max_bytes:
         raise ImportRejected(f"upload too large: {total} bytes unpacked, limit {max_bytes}")
@@ -61,8 +77,7 @@ def extract_zip(zip_path: Path, dest: Path, max_bytes: int) -> list[dict]:
     skipped: list[dict] = []
     written = 0
     with _open_zip(zip_path) as zf:
-        infos = zf.infolist()
-        check_names([i.filename for i in infos])
+        infos = _kept_entries(zf.infolist())
         for info in infos:
             name = normalize_name(info.filename)
             if info.is_dir() or name.endswith("/"):
