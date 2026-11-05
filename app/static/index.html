@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-05.1";
+  window.ASSET_VERSION = "2026-11-05.4";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -179,7 +179,7 @@
 
       <!-- box editor popup: follows the selected box -->
       <div id="boxPop" class="boxpop" role="dialog" aria-label="Edit box" hidden>
-        <div class="bp-head"><span id="bpStatus" class="status-line"></span><span id="bpMeta" class="muted num-tab"></span></div>
+        <div id="bpHead" class="bp-head" title="Drag to move this popup"><span id="bpStatus" class="status-line"></span><span id="bpMeta" class="muted num-tab"></span></div>
         <label class="visually-hidden" for="bpClass">Class</label>
         <input id="bpClass" type="text" autocomplete="off" spellcheck="false" placeholder="Type to filter classes"
                role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="bpList">
@@ -295,8 +295,8 @@
     <div><dt><kbd>Enter</kbd> or click the first point</dt><dd>Polygon tool: close the shape (at least 3 points)</dd></div>
     <div><dt><kbd>Backspace</kbd></dt><dd>Polygon tool: remove the last point</dd></div>
     <div><dt>Drag a polygon point</dt><dd>Move that point (polygon selected)</dd></div>
+    <div><dt>Click a polygon point</dt><dd>Delete that point (a polygon keeps at least 3; polygon selected)</dd></div>
     <div><dt>Click a polygon edge</dt><dd>Add a point there; keep the button down to drag it (polygon selected)</dd></div>
-    <div><dt>Click a polygon point, then <kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete that point (a polygon keeps at least 3)</dd></div>
     <div><dt><kbd>P</kbd></dt><dd>Repeat previous: copy the kept boxes of the image you had open before</dd></div>
     <div><dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo (this image)</dd></div>
     <div><dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Redo</dd></div>
@@ -308,6 +308,7 @@
     <div><dt><kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete selected box (model boxes are rejected, so they still count for precision)</dd></div>
     <div><dt><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Select next / previous box</dd></div>
     <div><dt><kbd>Enter</kbd></dt><dd>Box popup: save</dd></div>
+    <div><dt>Drag the popup's top bar</dt><dd>Move the box popup; it stays there until the page reloads</dd></div>
     <div><dt><kbd>Esc</kbd></dt><dd>Cancel the polygon being drawn; box popup: cancel (a new, unsaved box is removed); else leave the box or polygon tool / deselect</dd></div>
     <div><dt><kbd>&uarr;</kbd> / <kbd>&darr;</kbd></dt><dd>Box popup: previous / next class</dd></div>
     <div><dt><kbd>&larr;</kbd> / <kbd>&rarr;</kbd></dt><dd>Previous / next image</dd></div>

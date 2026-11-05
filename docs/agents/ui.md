@@ -130,6 +130,17 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   Real backend (uvicorn :8011, this worktree's data/app.db): review page loads, boxes drawn, no errors.
   pytest 180 passed. Multi-select is not built (copy works on the one selected box).
 
+- 2026-11-05 Editor feedback (branch `ui`): square vertices; click a vertex to delete it; box popup
+  drags by its header (position kept until reload, clamped to the canvas); wheel zoom follows the
+  delta (a mouse notch glides, pinch applies each small delta at once), anchored at the cursor, same
+  min / max; a zoomed image may keep the empty margin it has at fit, so the anchor holds; no
+  `min-width` on body, side panels shrink first. Also: a click with under 4 px of travel is never a
+  move or resize (a shaky click used to mark a box edited), the popup shows the real source,
+  `loadImages` ignores late lists (a slow "Needs review" list could overwrite "All images").
+  VERIFIED in Chrome on uvicorn :8011 with no console errors. Real Ctrl+wheel and real pinch are still
+  a GUESS: the test tool drops Ctrl on scroll, so those used dispatched wheel events. Width checks
+  used iframes of exact widths, not real Chrome zoom.
+
 ## Polygon spec (from the integrator, user decisions 2026-11-04)
 
 Build against docs/CONTRACT.md #11-#14. Polygons are normalized 0..1; the server computes the bbox.
@@ -137,11 +148,11 @@ Not started. Do this after backend and export have merged their polygon work.
 
 | Area | Behaviour |
 |---|---|
-| Show | An annotation with `polygon` draws its outline in the class colour on the canvas, in every tool. Plain boxes look the same as today. A selected polygon also shows its vertices. |
+| Show | An annotation with `polygon` draws its outline in the class colour on the canvas, in every tool. Plain boxes look the same as today. A selected polygon also shows its vertices as squares in the class colour (same size as before). |
 | Draw | New tool, key `G`, next to Drag (`D`) and Box (`B`). Each click adds a point. Enter, or a click on the first point, closes the shape (at least 3 points). Backspace removes the last point. Esc cancels. Closing opens the class choice the same way as a new box, then sends #12 with `polygon` and no `bbox`. |
-| Move a vertex | Drag it. Points stay inside the image. On release send #13 with the whole `polygon`. |
+| Move a vertex | Drag it (4 px of mouse travel or more). Points stay inside the image. On release send #13 with the whole `polygon`. |
 | Add a vertex | Click on an edge of the selected polygon. A new point appears there and can be dragged straight away. |
-| Delete a vertex | Click a vertex to select it, then Delete or Backspace. With no vertex selected, those keys delete the box as today. A polygon cannot go below 3 points: show a banner and keep it. |
+| Delete a vertex | Click it: mouse down + up with less than 4 px of travel sends #13 with the polygon, and undo restores the point. Delete / Backspace always act on the box as today (there is no selected vertex). A polygon cannot go below 3 points: show a banner and keep it. |
 | Move / resize | The existing box drag and handles still work on a polygon. Send #13 with `bbox` only, then use the `polygon` and `bbox` the server returns. |
 | Copy / paste | The clipboard keeps `polygon`. Paste sends #12 with `polygon` and no `bbox`, unchanged on any image size because it is normalized. The existing `MIN_SIZE` check uses the scaled bbox. |
 | Repeat previous (`P`) | Keeps the polygon, same as paste: each copied box sends #12 with `polygon` and no `bbox`. The existing `MIN_SIZE` and overlap checks use the scaled bbox. |

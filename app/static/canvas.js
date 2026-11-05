@@ -8,9 +8,11 @@ const CLASS_COLORS = { person: "#7FC8D6", rb: "#E3C9A0", sb: "#E6D27A", biax: "#
 const FALLBACK_COLORS = ["#A3C99A", "#D9A38F", "#9FB4E0", "#D9A5C0", "#B9C97F", "#8FD1C0", "#E0B98A", "#B3A8E0"];
 const HANDLE = 6;      // handle half-size in screen px
 const MIN_SIZE = 4;    // smallest box in image px
-const VERTEX_R = 4;    // polygon point radius in screen px
+const VERTEX_R = 4;    // half the side of a polygon point's square, in screen px
 const EDGE_HIT = 5;    // how close to a polygon edge a click counts, in screen px
+const CLICK_SLOP = 4;  // less mouse travel than this (screen px) is a click, not a drag
 const ZOOM_MAX = 8;    // 800% of "fit"
+const ZOOM_GLIDE_MS = 60; // time constant of the wheel zoom glide
 const CANVAS_COLORS = { base: "#1A2026", panel: "#222A31", line: "#2E3840", text: "#DCE3E8", muted: "#8996A0",
             accept: "143,184,168" };
 const LABEL_FONT = '500 12px "IBM Plex Sans", system-ui, sans-serif';
@@ -35,7 +37,8 @@ class BoxCanvas {
     this.cv = canvas;
     this.ctx = canvas.getContext("2d");
     // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox), onView(zoom, scale), onRender(),
-    // onPolygonStart() -> may start?, onPolygonDrawn(polygon) -> accepted?, onPolygonChanged(ann, polygon, label)
+    // onPolygonStart() -> may start?, onPolygonDrawn(polygon) -> accepted?, onPolygonChanged(ann, polygon, label),
+    // onVertexClicked(ann, index)
     this.cb = callbacks;
     this.img = null;          // HTMLImageElement or null (placeholder)
     this.imgW = 1280;
@@ -46,7 +49,6 @@ class BoxCanvas {
     this.tempDraw = false;    // draw while Ctrl is held
     this.polyMode = false;    // Polygon tool (G): every click adds a point
     this.polyDraft = null;    // polygon being drawn: {pts: [[x, y], ...] in image px, cursor: [x, y]}
-    this.vertex = null;       // selected polygon point: {id, i}; see selVertex()
     this.drawColor = "#fff";
     this.showRejected = true;
     this.hideAll = false;     // H held: no boxes at all
@@ -57,6 +59,8 @@ class BoxCanvas {
     this.zoom = 1; this.panX = 0; this.panY = 0;
     this.fit = 1; this.vw = 1; this.vh = 1;
     this.scale = 1; this.ox = 0; this.oy = 0;
+    this.zoomGoal = null;     // wheel zoom glide: where it is heading (null = not gliding)
+    this.zoomAnchor = null; this.zoomRaf = 0; this.zoomTime = 0;
     this.fx = [];             // running effects: {kind, start, dur, delay?, ...}
     this.prevImg = null;      // what is faded out during a crossfade: {img | w,h, view}
     this.shown = false;       // has anything been drawn yet (no crossfade from an empty canvas)
@@ -76,7 +80,7 @@ class BoxCanvas {
   setImage(url, width, height) {
     this.drag = null;
     this.polyDraft = null;
-    this.vertex = null;
+    this.stopZoomAnim();
     const show = (im) => {
       let old = null;
       if (this.shown) {
@@ -108,7 +112,6 @@ class BoxCanvas {
   // glide: the selection frame slides from the old box to the new one.
   setSelected(id, glide = false) {
     const from = this.selected();
-    if (id !== this.selectedId) this.vertex = null;
     this.selectedId = id;
     const to = this.selected();
     this.fx = this.fx.filter((f) => f.kind !== "glide");
@@ -190,12 +193,6 @@ class BoxCanvas {
     if (this.cb.onPolygonDrawn(pts)) this.polyDraft = null;
     this.render();
   }
-  // Index of the selected polygon point, or null. A stale one (other box, point gone) counts as none.
-  selVertex() {
-    const v = this.vertex, a = this.selected();
-    return v && a && v.id === a.id && a.polygon && a.status !== "rejected" && v.i < a.polygon.length ? v.i : null;
-  }
-  clearVertex() { if (this.vertex) { this.vertex = null; this.render(); } }
   setHideAll(on) { if (this.hideAll !== on) { this.hideAll = on; this.render(); } }
   setClassHidden(classId, hidden) {
     if (hidden) this.hiddenClasses.add(classId); else this.hiddenClasses.delete(classId);
@@ -212,8 +209,10 @@ class BoxCanvas {
     const box = this.cv.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(1, Math.floor(box.width)), h = Math.max(1, Math.floor(box.height));
-    if (this.cv.width !== w * dpr || this.cv.height !== h * dpr) {
-      this.cv.width = w * dpr; this.cv.height = h * dpr;
+    // Rounded: at Chrome zoom 125% / 150% w * dpr can be fractional, and a canvas size never is.
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (this.cv.width !== bw || this.cv.height !== bh) {
+      this.cv.width = bw; this.cv.height = bh;
       this.cv.style.width = w + "px"; this.cv.style.height = h + "px";
       // Resizing clears the canvas; outside render() (e.g. notifyView, zoomAt) draw it again.
       if (!this.inRender && !this.raf) this.raf = requestAnimationFrame(() => this.tick());
@@ -222,11 +221,17 @@ class BoxCanvas {
     this.vw = w; this.vh = h;
     this.fit = Math.min(w / this.imgW, h / this.imgH);
     this.scale = this.fit * this.zoom;
-    // Smaller than the view: centred. Larger: the image edge never comes inside the view.
+    // At "fit": centred. Zoomed: it may shift so the point under the cursor stays put, but an edge
+    // comes no further into the view than the empty margin that side has at "fit".
     const iw = this.imgW * this.scale, ih = this.imgH * this.scale;
     const cx = (w - iw) / 2, cy = (h - ih) / 2;
-    this.ox = iw <= w ? cx : clamp(cx + this.panX, w - iw, 0);
-    this.oy = ih <= h ? cy : clamp(cy + this.panY, h - ih, 0);
+    const place = (c, pan, view, size, fitSize) => {
+      if (this.zoom <= 1) return c;
+      const margin = Math.max(0, (view - fitSize) / 2);
+      return clamp(c + pan, view - size - margin, margin);
+    };
+    this.ox = place(cx, this.panX, w, iw, this.imgW * this.fit);
+    this.oy = place(cy, this.panY, h, ih, this.imgH * this.fit);
     this.panX = this.ox - cx; this.panY = this.oy - cy;
     return { w, h };
   }
@@ -241,6 +246,41 @@ class BoxCanvas {
   // Smallest zoom: "fit", or 100% (1 image px = 1 screen px) when the image is smaller than the view.
   minZoom() { return Math.min(1, 1 / this.fit); }
   zoomAt(factor, clientX = null, clientY = null) {
+    this.stopZoomAnim();
+    this.zoomBy(factor, clientX, clientY);
+  }
+  // Mouse wheel: glide to the new zoom over a few frames, so a notch is not one jump. More wheel
+  // while it glides moves the goal; the anchor follows the cursor.
+  wheelZoom(factor, clientX, clientY) {
+    if (reducedMotion.matches) { this.zoomAt(factor, clientX, clientY); return; }
+    this.layout();
+    const hi = Math.max(ZOOM_MAX, 1 / this.fit);
+    this.zoomGoal = clamp((this.zoomGoal == null ? this.zoom : this.zoomGoal) * factor, this.minZoom(), hi);
+    this.zoomAnchor = [clientX, clientY];
+    if (!this.zoomRaf) {
+      this.zoomTime = fxNow();
+      this.zoomRaf = requestAnimationFrame(() => this.zoomStep());
+    }
+  }
+  zoomStep() {
+    this.zoomRaf = 0;
+    if (this.zoomGoal == null) return;
+    const t = fxNow();
+    const k = 1 - Math.exp(-(t - this.zoomTime) / ZOOM_GLIDE_MS);
+    this.zoomTime = t;
+    let z = Math.exp(lerp(Math.log(this.zoom), Math.log(this.zoomGoal), k));
+    const arrived = Math.abs(this.zoomGoal / z - 1) < 0.002;
+    if (arrived) z = this.zoomGoal;
+    this.zoomBy(z / this.zoom, this.zoomAnchor[0], this.zoomAnchor[1]);
+    if (arrived) this.zoomGoal = null;
+    else this.zoomRaf = requestAnimationFrame(() => this.zoomStep());
+  }
+  stopZoomAnim() {
+    this.zoomGoal = null;
+    if (this.zoomRaf) cancelAnimationFrame(this.zoomRaf);
+    this.zoomRaf = 0;
+  }
+  zoomBy(factor, clientX, clientY) {
     this.layout();
     const z = clamp(this.zoom * factor, this.minZoom(), Math.max(ZOOM_MAX, 1 / this.fit));
     if (Math.abs(z - this.zoom) < 1e-6) return;
@@ -259,6 +299,7 @@ class BoxCanvas {
   zoomToActual() { this.layout(); this.zoomAt(1 / this.fit / this.zoom); }
   panBy(dx, dy) { if (this.zoom > 1) { this.panX += dx; this.panY += dy; this.render(); } }
   resetView() {
+    this.stopZoomAnim();
     if (this.zoom === 1 && !this.panX && !this.panY) return;
     this.zoom = 1; this.panX = 0; this.panY = 0;
     this.render();
@@ -362,7 +403,6 @@ class BoxCanvas {
     if (e.button === 1) { e.preventDefault(); this.startPan(e); return; } // middle button pans
     if (e.button !== 0) return;
     const [px, py] = this.toImage(e);
-    this.vertex = null;
     if (this.polyMode) { // no default: a close opens the popup, and the click must not take its focus
       e.preventDefault();
       this.draftClick(px, py);
@@ -403,9 +443,9 @@ class BoxCanvas {
   startEdit(ann, kind, handle, px, py) {
     this.drag = { kind, handle, ann, sx: px, sy: py, orig: ann.bbox.slice(), box: ann.bbox.slice(), moved: false };
   }
-  // A point is being dragged: poly is the working copy; added = it was made by this click.
+  // Mouse down on a point: poly is the working copy; added = this click made the point.
+  // On release a drag saves it; a click deletes an old point and keeps a new one.
   startVertex(ann, poly, index, added, px, py) {
-    this.vertex = { id: ann.id, i: index };
     this.drag = { kind: "vertex", ann, poly, index, added, moved: false, sx: px, sy: py,
                   box: polygonBbox(poly, this.imgW, this.imgH) };
     this.render();
@@ -448,11 +488,14 @@ class BoxCanvas {
     }
     const [px, py] = this.toImage(e);
     const dx = px - d.sx, dy = py - d.sy;
+    // A shaky click on a box, handle or point must not count as an edit (it would mark the box edited).
+    if (d.kind !== "draw" && !d.moved) {
+      if (Math.hypot(dx, dy) * this.scale < CLICK_SLOP) return;
+      d.moved = true;
+    }
     if (d.kind === "draw") {
       d.box = this.clampBox([d.sx, d.sy, dx, dy]);
     } else if (d.kind === "vertex") {
-      if (!d.moved && Math.hypot(dx, dy) * this.scale <= 2) return; // a click, not a drag
-      d.moved = true;
       d.poly[d.index] = [roundNorm(px / this.imgW), roundNorm(py / this.imgH)];
       d.box = polygonBbox(d.poly, this.imgW, this.imgH);
     } else if (d.kind === "move") {
@@ -460,7 +503,6 @@ class BoxCanvas {
       x = Math.max(0, Math.min(x + dx, this.imgW - w));
       y = Math.max(0, Math.min(y + dy, this.imgH - h));
       d.box = this.clampBox([x, y, w, h]);
-      if (Math.abs(dx) * this.scale > 2 || Math.abs(dy) * this.scale > 2) d.moved = true;
     } else {
       let [x0, y0, w, h] = d.orig;
       let x1 = x0 + w, y1 = y0 + h;
@@ -469,7 +511,6 @@ class BoxCanvas {
       if (d.handle.includes("n")) y0 += dy;
       if (d.handle.includes("s")) y1 += dy;
       d.box = this.clampBox([x0, y0, x1 - x0, y1 - y0]);
-      d.moved = true;
     }
     this.render();
   }
@@ -486,6 +527,7 @@ class BoxCanvas {
     }
     if (d.kind === "vertex") {
       if (d.moved || d.added) this.cb.onPolygonChanged(d.ann, d.poly, d.added ? "add point to" : "move point of");
+      else this.cb.onVertexClicked(d.ann, d.index);
       this.render();
       return;
     }
@@ -599,15 +641,20 @@ class BoxCanvas {
     if (pts.length > 1) ctx.lineTo(pts[0][0], pts[0][1]);
     ctx.stroke();
     ctx.setLineDash([]);
-    pts.forEach(([x, y], i) => {
-      ctx.fillStyle = i ? CANVAS_COLORS.text : this.drawColor; // the first point is where a click closes
-      ctx.strokeStyle = CANVAS_COLORS.base;
-      ctx.beginPath();
-      ctx.arc(x, y, i ? VERTEX_R : VERTEX_R + 1, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+    pts.forEach(([x, y], i) => { // the first point, where a click closes, is a little larger
+      this.drawVertex(x, y, i ? VERTEX_R : VERTEX_R + 1, this.drawColor);
     });
     ctx.restore();
+  }
+
+  // A polygon point: a square in the class colour with a dark edge, so it shows on any image.
+  drawVertex(x, y, r, color) {
+    const ctx = this.ctx;
+    ctx.fillStyle = color;
+    ctx.strokeStyle = CANVAS_COLORS.base;
+    ctx.lineWidth = 1;
+    ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+    ctx.strokeRect(x - r, y - r, 2 * r, 2 * r);
   }
 
   // The polygon of box a as drawn now (follows a drag), or null for a plain box.
@@ -720,15 +767,8 @@ class BoxCanvas {
         ctx.strokeRect(cx - HANDLE / 2 - 1, cy - HANDLE / 2 - 1, HANDLE + 2, HANDLE + 2);
       }
       if (screenPts) {
-        const dragged = this.drag && this.drag.kind === "vertex" ? this.drag.index : null;
-        const chosen = dragged != null ? dragged : this.selVertex();
-        screenPts.forEach(([px, py], i) => {
-          ctx.fillStyle = i === chosen ? color : CANVAS_COLORS.text;
-          ctx.beginPath();
-          ctx.arc(px, py, i === chosen ? VERTEX_R + 2 : VERTEX_R, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        });
+        const held = this.drag && this.drag.kind === "vertex" ? this.drag.index : null;
+        screenPts.forEach(([px, py], i) => this.drawVertex(px, py, i === held ? VERTEX_R + 2 : VERTEX_R, color));
       }
     }
     ctx.restore();

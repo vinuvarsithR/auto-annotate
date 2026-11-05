@@ -24,6 +24,7 @@ const state = {
   lastClassId: null,  // class a new box starts with (the last one saved)
   clipboard: null,    // Ctrl+C: {width, height, boxes: [{class_id, bbox}]}
   loadToken: 0,       // ignore late responses from an older image
+  listToken: 0,       // ignore late image lists from an older filter or page
   prevImageId: null,  // image open before this one (source for "repeat previous")
   busy: false,        // undo / redo / repeat / paste request in flight
   screen: "projects",
@@ -34,7 +35,8 @@ const state = {
 const undoLog = { imageId: null, undo: [], redo: [] };
 
 // Box popup: which box it was opened for, the filter text and the highlighted class (index in the filtered list).
-const pop = { forId: null, filter: "", hl: 0 };
+// pos: where the user dragged it, in canvas px (null = beside the box); kept until the page reloads.
+const pop = { forId: null, filter: "", hl: 0, pos: null };
 
 const canvas = new BoxCanvas($("canvas"), {
   onSelect: (ann) => {
@@ -54,6 +56,7 @@ const canvas = new BoxCanvas($("canvas"), {
   onPolygonStart: () => startPolygon(),
   onPolygonDrawn: (polygon) => finishPolygon(polygon),
   onPolygonChanged: (ann, polygon, label) => changePolygon(ann, polygon, label),
+  onVertexClicked: (ann, index) => deleteVertex(ann, index),
   onView: (zoom, scale) => renderZoom(zoom, scale),
   onRender: () => positionPopup(),
 });
@@ -282,8 +285,9 @@ function setLabelsOpen(on) {
 // ------------------------------------------------------------ image strip
 async function loadImages(offset, selectIndex = 0) {
   const status = $("statusFilter").value || null;
+  const token = ++state.listToken;
   const data = await guard(() => api.listImages(state.projectId, { status, offset, limit: PAGE }));
-  if (!data) return;
+  if (!data || token !== state.listToken) return;
   state.images = data.images;
   state.total = data.total;
   state.offset = data.offset;
@@ -626,18 +630,15 @@ function setPendingPolygon(polygon) {
 // A point was moved, added or deleted: #13 with the whole polygon (one undo step).
 async function changePolygon(ann, polygon, label) {
   const problem = polygonProblem(polygon);
-  if (problem) { canvas.clearVertex(); showBanner(problem, "info"); return; }
+  if (problem) { showBanner(problem, "info"); return; }
   if (ann.id === PENDING) { setPendingPolygon(polygon); return; }
-  const updated = await editBox(ann, { polygon }, label);
-  if (!updated) canvas.clearVertex();
+  await editBox(ann, { polygon }, label);
 }
 
-async function deleteVertex() {
-  const a = selectedAnn();
-  const i = canvas.selVertex();
-  if (a.polygon.length <= 3) { showBanner("A polygon needs at least 3 points, so this one stays.", "info"); return; }
-  canvas.clearVertex();
-  await changePolygon(a, a.polygon.filter((_, k) => k !== i), "delete point of");
+// A click on a point of the selected polygon.
+async function deleteVertex(ann, index) {
+  if (ann.polygon.length <= 3) { showBanner("A polygon needs at least 3 points, so this one stays.", "info"); return; }
+  await changePolygon(ann, ann.polygon.filter((_, k) => k !== index), "delete point of");
 }
 
 // Body of a #12 POST: a polygon goes without a bbox (the server computes it).
@@ -716,7 +717,8 @@ function renderPopup() {
   } else {
     $("bpStatus").className = `status-line st-${a.status}`;
     $("bpStatus").textContent = STATUS_LABEL[a.status] || a.status;
-    $("bpMeta").textContent = `#${a.id}` + (a.score != null ? ` · ${a.score.toFixed(2)}` : " · drawn");
+    const source = a.source === "human" ? "drawn" : a.source;
+    $("bpMeta").textContent = `#${a.id} · ${source}` + (a.score != null ? ` · ${a.score.toFixed(2)}` : "");
     $("bpMeta").title = `source: ${a.source}${a.reviewer ? ", reviewer: " + a.reviewer : ""}`;
   }
   $("bpDelete").title = a.id === PENDING ? "Drop this new box"
@@ -772,6 +774,7 @@ function movePopHighlight(delta) {
 }
 
 // Place the popup beside the selected box (right, else left, else below / above), inside the view.
+// Once the user has dragged it, it stays where they put it (still inside the view).
 function positionPopup() {
   const el = $("boxPop");
   if (pop.forId == null) return;
@@ -780,6 +783,11 @@ function positionPopup() {
   el.style.visibility = "";
   const W = canvas.vw, H = canvas.vh, pw = el.offsetWidth, ph = el.offsetHeight, gap = 10, m = 8;
   const clampv = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+  if (pop.pos) {
+    el.style.left = clampv(pop.pos.x, 0, Math.max(0, W - pw)) + "px";
+    el.style.top = clampv(pop.pos.y, 0, Math.max(0, H - ph)) + "px";
+    return;
+  }
   let x, y;
   if (r.x + r.w + gap + pw <= W - m) { x = r.x + r.w + gap; y = r.y; }
   else if (r.x - gap - pw >= m) { x = r.x - gap - pw; y = r.y; }
@@ -814,6 +822,23 @@ function cancelPopup() {
 }
 
 function popupOpen() { return !$("boxPop").hidden && pop.forId != null; }
+
+// Drag the popup by its header. No default on mouse down: the class field keeps its focus.
+function startPopupDrag(e) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const el = $("boxPop");
+  const dx = e.clientX - el.offsetLeft, dy = e.clientY - el.offsetTop;
+  const move = (m) => { pop.pos = { x: m.clientX - dx, y: m.clientY - dy }; positionPopup(); };
+  const up = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+    // Keep what the view allowed, so a drag past the edge does not leave a stored position outside it.
+    pop.pos = { x: el.offsetLeft, y: el.offsetTop };
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+}
 
 // ------------------------------------------------------------ copy / paste, repeat previous
 // POST boxes ({class_id, bbox, polygon}) onto image img as human boxes, one by one; one undo step.
@@ -1000,7 +1025,6 @@ async function applyOp(op, dir) {
 async function runHistory(dir) {
   if (state.busy || !state.image) return;
   dropPending();
-  canvas.clearVertex(); // the points may change; an index would point at the wrong one
   const from = dir === "undo" ? undoLog.undo : undoLog.redo;
   const to = dir === "undo" ? undoLog.redo : undoLog.undo;
   const op = from.pop();
@@ -1086,6 +1110,11 @@ function inCanvas(e) {
 
 // Ctrl+wheel (mouse) and pinch (touchpad; Chrome sends it as a wheel event with ctrlKey) zoom
 // the image anywhere on the review screen and never the page. Plain wheel pans when zoomed.
+// The zoom follows the wheel delta. Pinch sends many small deltas, so it applies each one at once,
+// with a stronger rate; a mouse notch is one big delta, so it glides there over a few frames.
+const NOTCH_DELTA = 40;       // a smaller delta (px) is a touchpad, not a mouse notch
+const WHEEL_RATE = 0.002;     // 100 px of wheel = zoom x 1.22
+const PINCH_RATE = 0.01;
 window.addEventListener("wheel", (e) => {
   if (state.screen !== "review" || $("helpDialog").open) return;
   if (e.target.closest && e.target.closest(".bp-list, #imageList, #labelsPanel")) {
@@ -1094,9 +1123,11 @@ window.addEventListener("wheel", (e) => {
   const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
   if (e.ctrlKey) {
     e.preventDefault();
-    const dy = Math.max(-120, Math.min(120, e.deltaY * unit));
+    const dy = e.deltaY * unit;
     const over = inCanvas(e);
-    canvas.zoomAt(Math.exp(-dy * 0.0025), over ? e.clientX : null, over ? e.clientY : null);
+    const x = over ? e.clientX : null, y = over ? e.clientY : null;
+    if (Math.abs(dy) < NOTCH_DELTA) canvas.zoomAt(Math.exp(-dy * PINCH_RATE), x, y);
+    else canvas.wheelZoom(Math.exp(-dy * WHEEL_RATE), x, y);
   } else if (inCanvas(e) && canvas.zoom > 1) {
     e.preventDefault();
     let dx = e.deltaX * unit, dy = e.deltaY * unit;
@@ -1172,6 +1203,7 @@ document.addEventListener("mousedown", (e) => {
   if (!$("adjustPop").hidden && !e.target.closest(".pop-wrap")) closeAdjust();
 });
 $("bpSave").addEventListener("click", savePopup);
+$("bpHead").addEventListener("mousedown", startPopupDrag);
 $("bpDelete").addEventListener("click", deleteBox);
 // Same as the A / R keys (and undone with U).
 $("approveBtn").addEventListener("click", () => setStatus("accepted"));
@@ -1226,7 +1258,7 @@ document.addEventListener("keydown", (e) => {
   if (k === "a" || k === "A") setStatus("accepted");
   else if (k === "r" || k === "R") setStatus("rejected");
   else if (k === "u" || k === "U") unreview();
-  else if (k === "Delete" || k === "Backspace") { if (canvas.selVertex() != null) deleteVertex(); else deleteBox(); }
+  else if (k === "Delete" || k === "Backspace") deleteBox();
   else if (k === "Tab") cycleBox(e.shiftKey ? -1 : 1);
   else if (k === "ArrowRight") stepImage(1);
   else if (k === "ArrowLeft") stepImage(-1);
@@ -1244,7 +1276,6 @@ document.addEventListener("keydown", (e) => {
   else if (k === "Escape") {
     if (!$("adjustPop").hidden) closeAdjust();
     else if (canvas.cancelDraw()) { /* dropped the box being dragged out */ }
-    else if (canvas.selVertex() != null) canvas.clearVertex();
     else if (popupOpen()) cancelPopup();
     else if (state.tool !== "drag") setTool("drag");
     else select(null);
