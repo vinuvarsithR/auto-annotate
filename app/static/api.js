@@ -23,6 +23,45 @@ function countStatuses(anns) {
   return c;
 }
 
+// ---- polygons: [[x, y], ...] normalized 0..1 (contract conventions). Used by the canvas, the
+// review page and the mock layer. Only the server's bbox is stored; these keep the browser in step.
+const roundNorm = (v) => Math.round(Math.min(1, Math.max(0, v)) * 1e6) / 1e6;
+const roundPx = (v) => Math.round(v * 100) / 100;
+
+// Area in normalized units (shoelace formula).
+function polygonArea(poly) {
+  let sum = 0;
+  poly.forEach(([x, y], i) => {
+    const [nx, ny] = poly[(i + 1) % poly.length];
+    sum += x * ny - nx * y;
+  });
+  return Math.abs(sum) / 2;
+}
+
+// The #12 / #13 rule. Returns what is wrong with a polygon, or null if it is fine.
+function polygonError(poly) {
+  if (!Array.isArray(poly) || poly.length < 3) return "a polygon needs at least 3 points";
+  const ok = (p) => Array.isArray(p) && p.length === 2 &&
+    p.every((v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1);
+  if (!poly.every(ok)) return "every polygon point must be 2 numbers in 0..1";
+  if (polygonArea(poly) < 1e-12) return "the polygon has zero area";
+  return null;
+}
+
+// Bounding box in pixels of a polygon on an image of size w x h.
+function polygonBbox(poly, w, h) {
+  const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+  const x0 = Math.min(...xs) * w, y0 = Math.min(...ys) * h;
+  return [roundPx(x0), roundPx(y0), roundPx(Math.max(...xs) * w - x0), roundPx(Math.max(...ys) * h - y0)];
+}
+
+// Scale and move a polygon so that its old bbox `from` fills `to` (both px); points stay in 0..1.
+function scalePolygon(poly, from, to, w, h) {
+  const kx = from[2] ? to[2] / from[2] : 1, ky = from[3] ? to[3] / from[3] : 1;
+  return poly.map(([x, y]) => [roundNorm((to[0] + (x * w - from[0]) * kx) / w),
+                               roundNorm((to[1] + (y * h - from[1]) * ky) / h)]);
+}
+
 // ---------------------------------------------------------------- real mode
 async function http(method, path, body) {
   const opts = { method, headers: {} };
@@ -206,7 +245,7 @@ function mockDetectOne(db, job, imageId) {
       id: db.nextId++, image_id: imageId, class_id: c.id, class_name: c.name,
       bbox: [Math.round(img.width * (0.15 + 0.4 * k)), Math.round(img.height * 0.3),
              Math.round(img.width * 0.2), Math.round(img.height * 0.15)],
-      mask: null, score, source: job.config.model,
+      mask: null, polygon: null, score, source: job.config.model,
       status: c.accept_score != null && score >= c.accept_score ? "auto_accepted" : "needs_review",
       job_id: job.id, reviewer: null, created_at: t, updated_at: t,
     });
@@ -220,6 +259,11 @@ function stripJob(job) {
 
 function mockNotFound(what, id) {
   throw new ApiError("not_found", `${what} ${id} not found`, 404);
+}
+
+function mockCheckPolygon(poly) {
+  const err = polygonError(poly);
+  if (err) throw new ApiError("bad_request", err, 400);
 }
 
 function mockImageWithCounts(db, img) {
@@ -282,9 +326,14 @@ const mockApi = {
     }
     const cls = db.classes.find((c) => c.id === body.class_id);
     if (!cls) throw new ApiError("bad_request", `class ${body.class_id} not found`, 400);
+    // #12: with a polygon the server computes the bbox (a sent bbox is ignored).
+    const polygon = body.polygon != null ? body.polygon : null;
+    if (polygon) mockCheckPolygon(polygon);
+    else if (!Array.isArray(body.bbox)) throw new ApiError("bad_request", "bbox is required", 400);
     const t = now();
     const a = { id: db.nextId++, image_id: img.id, class_id: cls.id, class_name: cls.name,
-                bbox: body.bbox.map(Number), mask: body.mask || null, score: null,
+                bbox: polygon ? polygonBbox(polygon, img.width, img.height) : body.bbox.map(Number),
+                mask: body.mask || null, polygon: polygon ? clone(polygon) : null, score: null,
                 source: "human", status: "accepted", job_id: null,
                 reviewer: body.reviewer || null, created_at: t, updated_at: t };
     db.annotations.push(a);
@@ -295,7 +344,21 @@ const mockApi = {
     const a = db.annotations.find((x) => x.id === Number(aid));
     if (!a) mockNotFound("annotation", aid);
     let edited = false;
-    if (body.bbox) { a.bbox = body.bbox.map(Number); edited = true; }
+    if (body.polygon != null) mockCheckPolygon(body.polygon); // before anything changes
+    const img = db.images.find((i) => i.id === a.image_id);
+    if ("polygon" in body) { // #13 table: a new polygon wins over a bbox; null keeps a sent bbox
+      a.polygon = body.polygon != null ? clone(body.polygon) : null;
+      if (a.polygon) a.bbox = polygonBbox(a.polygon, img.width, img.height);
+      else if (body.bbox) a.bbox = body.bbox.map(Number);
+      edited = true;
+    } else if (body.bbox) {
+      const to = body.bbox.map(Number);
+      if (a.polygon) { // bbox only on a polygon row: the polygon fills the new bbox
+        a.polygon = scalePolygon(a.polygon, a.bbox, to, img.width, img.height);
+        a.bbox = polygonBbox(a.polygon, img.width, img.height);
+      } else a.bbox = to;
+      edited = true;
+    }
     if ("mask" in body) { a.mask = body.mask; edited = true; }
     if (body.class_id !== undefined && body.class_id !== a.class_id) {
       const cls = db.classes.find((c) => c.id === body.class_id);
@@ -510,3 +573,7 @@ window.api = MOCK ? mockApi : realApi;
 window.ApiError = ApiError;
 window.STATUSES = STATUSES;
 window.countStatuses = countStatuses;
+window.roundNorm = roundNorm;
+window.polygonError = polygonError;
+window.polygonBbox = polygonBbox;
+window.scalePolygon = scalePolygon;

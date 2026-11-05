@@ -133,6 +133,7 @@ function exportPanel(p) {
     <div class="row">
       <span class="seg" role="radiogroup" aria-label="Format">
         <label><input type="radio" name="fmt" value="yolo"> YOLO</label>
+        <label><input type="radio" name="fmt" value="yolo-seg"> YOLO-seg</label>
         <label><input type="radio" name="fmt" value="coco"> COCO</label>
       </span>
       <label class="check"><input type="checkbox" class="p-incl"> Include images</label>

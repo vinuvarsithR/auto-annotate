@@ -1,6 +1,6 @@
 // canvas.js - draws one image plus its boxes and handles mouse editing, zoom and pan.
-// All box coordinates stay in IMAGE pixels ([x, y, w, h], COCO style);
-// only drawing and mouse events convert to screen pixels.
+// All box coordinates stay in IMAGE pixels ([x, y, w, h], COCO style); polygons are normalized
+// 0..1 (contract); only drawing and mouse events convert to screen pixels.
 "use strict";
 
 const CLASS_COLORS = { person: "#7FC8D6", rb: "#E3C9A0", sb: "#E6D27A", biax: "#C9A2D9" };
@@ -8,6 +8,8 @@ const CLASS_COLORS = { person: "#7FC8D6", rb: "#E3C9A0", sb: "#E6D27A", biax: "#
 const FALLBACK_COLORS = ["#A3C99A", "#D9A38F", "#9FB4E0", "#D9A5C0", "#B9C97F", "#8FD1C0", "#E0B98A", "#B3A8E0"];
 const HANDLE = 6;      // handle half-size in screen px
 const MIN_SIZE = 4;    // smallest box in image px
+const VERTEX_R = 4;    // polygon point radius in screen px
+const EDGE_HIT = 5;    // how close to a polygon edge a click counts, in screen px
 const ZOOM_MAX = 8;    // 800% of "fit"
 const CANVAS_COLORS = { base: "#1A2026", panel: "#222A31", line: "#2E3840", text: "#DCE3E8", muted: "#8996A0",
             accept: "143,184,168" };
@@ -32,7 +34,9 @@ class BoxCanvas {
   constructor(canvas, callbacks) {
     this.cv = canvas;
     this.ctx = canvas.getContext("2d");
-    this.cb = callbacks; // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox), onView(zoom, scale), onRender()
+    // onSelect(ann|null), onBoxChanged(ann, bbox), onBoxDrawn(bbox), onView(zoom, scale), onRender(),
+    // onPolygonStart() -> may start?, onPolygonDrawn(polygon) -> accepted?, onPolygonChanged(ann, polygon, label)
+    this.cb = callbacks;
     this.img = null;          // HTMLImageElement or null (placeholder)
     this.imgW = 1280;
     this.imgH = 720;
@@ -40,6 +44,9 @@ class BoxCanvas {
     this.selectedId = null;
     this.drawMode = false;    // Box tool (B): every drag draws a box until the tool changes
     this.tempDraw = false;    // draw while Ctrl is held
+    this.polyMode = false;    // Polygon tool (G): every click adds a point
+    this.polyDraft = null;    // polygon being drawn: {pts: [[x, y], ...] in image px, cursor: [x, y]}
+    this.vertex = null;       // selected polygon point: {id, i}; see selVertex()
     this.drawColor = "#fff";
     this.showRejected = true;
     this.hideAll = false;     // H held: no boxes at all
@@ -68,6 +75,8 @@ class BoxCanvas {
   // crossfade over 200ms, so there is no grey flash between frames. Every new image starts at "fit".
   setImage(url, width, height) {
     this.drag = null;
+    this.polyDraft = null;
+    this.vertex = null;
     const show = (im) => {
       let old = null;
       if (this.shown) {
@@ -99,6 +108,7 @@ class BoxCanvas {
   // glide: the selection frame slides from the old box to the new one.
   setSelected(id, glide = false) {
     const from = this.selected();
+    if (id !== this.selectedId) this.vertex = null;
     this.selectedId = id;
     const to = this.selected();
     this.fx = this.fx.filter((f) => f.kind !== "glide");
@@ -135,10 +145,16 @@ class BoxCanvas {
   }
 
   // ------------------------------------------------------------ modes
-  drawing() { return this.drawMode || this.tempDraw; }
+  drawing() { return this.drawMode || this.tempDraw || this.polyMode; }
   setDrawMode(on, color) {
     this.drawMode = on;
     if (color) this.drawColor = color;
+    if (!this.drag) this.cv.style.cursor = this.drawing() ? "crosshair" : "default";
+    this.render();
+  }
+  setPolyMode(on) {
+    this.polyMode = on;
+    if (!on) this.polyDraft = null;
     if (!this.drag) this.cv.style.cursor = this.drawing() ? "crosshair" : "default";
     this.render();
   }
@@ -156,6 +172,30 @@ class BoxCanvas {
     this.render();
     return true;
   }
+  // Esc: drop the polygon being drawn. Returns true if there was one.
+  cancelPolygon() {
+    if (!this.polyDraft) return false;
+    this.polyDraft = null;
+    this.render();
+    return true;
+  }
+  removeDraftPoint() {
+    this.polyDraft.pts.pop();
+    if (!this.polyDraft.pts.length) this.polyDraft = null;
+    this.render();
+  }
+  // Enter or a click on the first point. The drawing stays open if the page refuses the shape.
+  closeDraft() {
+    const pts = this.polyDraft.pts.map(([x, y]) => [roundNorm(x / this.imgW), roundNorm(y / this.imgH)]);
+    if (this.cb.onPolygonDrawn(pts)) this.polyDraft = null;
+    this.render();
+  }
+  // Index of the selected polygon point, or null. A stale one (other box, point gone) counts as none.
+  selVertex() {
+    const v = this.vertex, a = this.selected();
+    return v && a && v.id === a.id && a.polygon && a.status !== "rejected" && v.i < a.polygon.length ? v.i : null;
+  }
+  clearVertex() { if (this.vertex) { this.vertex = null; this.render(); } }
   setHideAll(on) { if (this.hideAll !== on) { this.hideAll = on; this.render(); } }
   setClassHidden(classId, hidden) {
     if (hidden) this.hiddenClasses.add(classId); else this.hiddenClasses.delete(classId);
@@ -277,11 +317,57 @@ class BoxCanvas {
   isSmall(w, h) { return Math.min(w, h) * this.scale < 4 * HANDLE; }
   inside(b, px, py) { return px >= b[0] && px <= b[0] + b[2] && py >= b[1] && py <= b[1] + b[3]; }
 
+  polygonPx(poly) { return poly.map(([x, y]) => [x * this.imgW, y * this.imgH]); }
+  // Index of the point of a's polygon under (px, py), or null.
+  vertexAt(a, px, py) {
+    let best = null, bestD = (VERTEX_R + 3) / this.scale;
+    this.polygonPx(a.polygon).forEach(([x, y], i) => {
+      const d = Math.hypot(px - x, py - y);
+      if (d <= bestD) { best = i; bestD = d; }
+    });
+    return best;
+  }
+  // The edge of a's polygon under (px, py): {index where a new point goes, point (normalized)}, or null.
+  edgeAt(a, px, py) {
+    const pts = this.polygonPx(a.polygon);
+    let best = null, bestD = EDGE_HIT / this.scale;
+    pts.forEach(([x0, y0], i) => {
+      const [x1, y1] = pts[(i + 1) % pts.length];
+      const dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
+      const t = len2 ? clamp(((px - x0) * dx + (py - y0) * dy) / len2, 0, 1) : 0;
+      const qx = x0 + t * dx, qy = y0 + t * dy, d = Math.hypot(px - qx, py - qy);
+      if (d <= bestD) {
+        bestD = d;
+        best = { index: i + 1, point: [roundNorm(qx / this.imgW), roundNorm(qy / this.imgH)] };
+      }
+    });
+    return best;
+  }
+  insidePolygon(a, px, py) {
+    const pts = this.polygonPx(a.polygon);
+    let hit = false;
+    pts.forEach(([x0, y0], i) => {
+      const [x1, y1] = pts[(i + 1) % pts.length];
+      if ((y0 > py) !== (y1 > py) && px < x0 + ((py - y0) / (y1 - y0)) * (x1 - x0)) hit = !hit;
+    });
+    return hit;
+  }
+  // Clicks select a polygon on its shape, not on the empty corners of its bbox.
+  hits(a, px, py) {
+    return a.polygon ? this.insidePolygon(a, px, py) || !!this.edgeAt(a, px, py) : this.inside(a.bbox, px, py);
+  }
+
   // ------------------------------------------------------------ mouse
   onDown(e) {
     if (e.button === 1) { e.preventDefault(); this.startPan(e); return; } // middle button pans
     if (e.button !== 0) return;
     const [px, py] = this.toImage(e);
+    this.vertex = null;
+    if (this.polyMode) { // no default: a close opens the popup, and the click must not take its focus
+      e.preventDefault();
+      this.draftClick(px, py);
+      return;
+    }
     if (this.drawing() || e.ctrlKey) {
       this.drag = { kind: "draw", sx: px, sy: py, box: [px, py, 0, 0] };
       return;
@@ -290,12 +376,21 @@ class BoxCanvas {
     const visibleSel = sel && this.visible().includes(sel);
     // Rejected boxes can be selected (to accept them again) but not moved or resized.
     if (visibleSel && sel.status !== "rejected") {
+      const v = sel.polygon ? this.vertexAt(sel, px, py) : null;
+      if (v != null) { this.startVertex(sel, sel.polygon.map((p) => p.slice()), v, false, px, py); return; }
       const h = this.handleAt(sel.bbox, px, py);
       if (h) { this.startEdit(sel, "resize", h, px, py); return; }
+      const edge = sel.polygon ? this.edgeAt(sel, px, py) : null;
+      if (edge) {
+        const poly = sel.polygon.map((p) => p.slice());
+        poly.splice(edge.index, 0, edge.point);
+        this.startVertex(sel, poly, edge.index, true, px, py);
+        return;
+      }
       if (this.inside(sel.bbox, px, py)) { this.startEdit(sel, "move", null, px, py); return; }
     }
     // Smallest box under the cursor wins, so small boxes inside big ones stay clickable.
-    const hits = this.visible().filter((a) => this.inside(a.bbox, px, py))
+    const hits = this.visible().filter((a) => this.hits(a, px, py))
                                .sort((a, b) => a.bbox[2] * a.bbox[3] - b.bbox[2] * b.bbox[3]);
     const hit = hits[0] || null;
     this.selectedId = hit ? hit.id : null;
@@ -308,12 +403,41 @@ class BoxCanvas {
   startEdit(ann, kind, handle, px, py) {
     this.drag = { kind, handle, ann, sx: px, sy: py, orig: ann.bbox.slice(), box: ann.bbox.slice(), moved: false };
   }
+  // A point is being dragged: poly is the working copy; added = it was made by this click.
+  startVertex(ann, poly, index, added, px, py) {
+    this.vertex = { id: ann.id, i: index };
+    this.drag = { kind: "vertex", ann, poly, index, added, moved: false, sx: px, sy: py,
+                  box: polygonBbox(poly, this.imgW, this.imgH) };
+    this.render();
+  }
+  // Polygon tool: first click starts, a click on the first point closes, others add a point.
+  draftClick(px, py) {
+    const x = clamp(px, 0, this.imgW), y = clamp(py, 0, this.imgH);
+    const d = this.polyDraft;
+    if (!d) {
+      if (this.cb.onPolygonStart()) { this.polyDraft = { pts: [[x, y]], cursor: [x, y] }; this.render(); }
+      return;
+    }
+    if (this.nearDraftStart(x, y)) { if (d.pts.length > 1) this.closeDraft(); return; }
+    const [lx, ly] = d.pts[d.pts.length - 1];
+    if (Math.hypot(x - lx, y - ly) * this.scale >= 2) d.pts.push([x, y]); // not a double click
+    this.render();
+  }
+  nearDraftStart(x, y) {
+    const [fx, fy] = this.polyDraft.pts[0];
+    return Math.hypot(x - fx, y - fy) * this.scale <= VERTEX_R + 3;
+  }
   startPan(e) {
     this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, px: this.panX, py: this.panY };
     this.cv.style.cursor = "grabbing";
   }
 
   onMove(e) {
+    if (this.polyDraft && !this.drag) {
+      const [px, py] = this.toImage(e);
+      this.polyDraft.cursor = [clamp(px, 0, this.imgW), clamp(py, 0, this.imgH)];
+      this.render();
+    }
     if (!this.drag) { this.hoverCursor(e); return; }
     const d = this.drag;
     if (d.kind === "pan") {
@@ -326,6 +450,11 @@ class BoxCanvas {
     const dx = px - d.sx, dy = py - d.sy;
     if (d.kind === "draw") {
       d.box = this.clampBox([d.sx, d.sy, dx, dy]);
+    } else if (d.kind === "vertex") {
+      if (!d.moved && Math.hypot(dx, dy) * this.scale <= 2) return; // a click, not a drag
+      d.moved = true;
+      d.poly[d.index] = [roundNorm(px / this.imgW), roundNorm(py / this.imgH)];
+      d.box = polygonBbox(d.poly, this.imgW, this.imgH);
     } else if (d.kind === "move") {
       let [x, y, w, h] = d.orig;
       x = Math.max(0, Math.min(x + dx, this.imgW - w));
@@ -355,22 +484,33 @@ class BoxCanvas {
       this.render();
       return;
     }
+    if (d.kind === "vertex") {
+      if (d.moved || d.added) this.cb.onPolygonChanged(d.ann, d.poly, d.added ? "add point to" : "move point of");
+      this.render();
+      return;
+    }
     const changed = d.moved && d.box.some((v, i) => Math.abs(v - d.orig[i]) > 0.05);
     if (changed && d.box[2] >= MIN_SIZE && d.box[3] >= MIN_SIZE) this.cb.onBoxChanged(d.ann, d.box);
     this.render();
   }
 
   hoverCursor(e) {
+    const [px, py] = this.toImage(e);
+    if (this.polyDraft && this.polyDraft.pts.length > 2 && this.nearDraftStart(px, py)) {
+      this.cv.style.cursor = "pointer"; // a click closes the shape
+      return;
+    }
     if (this.drawing()) { this.cv.style.cursor = "crosshair"; return; }
     const sel = this.selected();
-    const [px, py] = this.toImage(e);
     let cur = "default";
     if (sel && sel.status !== "rejected" && this.visible().includes(sel)) {
       const h = this.handleAt(sel.bbox, px, py);
-      if (h) cur = { n: "ns", s: "ns", e: "ew", w: "ew", nw: "nwse", se: "nwse", ne: "nesw", sw: "nesw" }[h] + "-resize";
+      if (sel.polygon && this.vertexAt(sel, px, py) != null) cur = "grab";
+      else if (h) cur = { n: "ns", s: "ns", e: "ew", w: "ew", nw: "nwse", se: "nwse", ne: "nesw", sw: "nesw" }[h] + "-resize";
+      else if (sel.polygon && this.edgeAt(sel, px, py)) cur = "copy";
       else if (this.inside(sel.bbox, px, py)) cur = "move";
     }
-    if (cur === "default" && this.zoom > 1 && !this.visible().some((a) => this.inside(a.bbox, px, py))) cur = "grab";
+    if (cur === "default" && this.zoom > 1 && !this.visible().some((a) => this.hits(a, px, py))) cur = "grab";
     this.cv.style.cursor = cur;
   }
 
@@ -437,6 +577,45 @@ class BoxCanvas {
       ctx.strokeRect(x, y, this.drag.box[2] * this.scale, this.drag.box[3] * this.scale);
       ctx.setLineDash([]);
     }
+    if (this.polyDraft) this.drawDraft();
+  }
+
+  // The polygon being drawn: its points, plus a dashed line to the cursor and back to the start.
+  drawDraft() {
+    const ctx = this.ctx, d = this.polyDraft;
+    const pts = d.pts.map(([x, y]) => this.toScreen(x, y));
+    const cur = this.toScreen(d.cursor[0], d.cursor[1]);
+    ctx.save();
+    ctx.strokeStyle = this.drawColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.stroke();
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    ctx.lineTo(cur[0], cur[1]);
+    if (pts.length > 1) ctx.lineTo(pts[0][0], pts[0][1]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    pts.forEach(([x, y], i) => {
+      ctx.fillStyle = i ? CANVAS_COLORS.text : this.drawColor; // the first point is where a click closes
+      ctx.strokeStyle = CANVAS_COLORS.base;
+      ctx.beginPath();
+      ctx.arc(x, y, i ? VERTEX_R : VERTEX_R + 1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  // The polygon of box a as drawn now (follows a drag), or null for a plain box.
+  shownPolygon(a) {
+    if (!a.polygon) return null;
+    const d = this.drag;
+    if (!d || !d.ann || d.ann.id !== a.id) return a.polygon;
+    return d.kind === "vertex" ? d.poly : scalePolygon(a.polygon, a.bbox, d.box, this.imgW, this.imgH);
   }
 
   // Image (or placeholder) of size iw x ih, drawn at scale s with its top-left at (x, y).
@@ -477,24 +656,37 @@ class BoxCanvas {
     const color = classColor(a.class_name);
     const [x, y] = this.toScreen(bbox[0], bbox[1]);
     const w = bbox[2] * this.scale, h = bbox[3] * this.scale;
+    const poly = this.shownPolygon(a);
+    const screenPts = poly ? poly.map(([px, py]) => this.toScreen(px * this.imgW, py * this.imgH)) : null;
+    // The shape: the polygon's outline when it has one, else the box.
+    const outline = () => {
+      ctx.beginPath();
+      if (screenPts) {
+        screenPts.forEach(([px, py], i) => (i ? ctx.lineTo(px, py) : ctx.moveTo(px, py)));
+        ctx.closePath();
+      } else ctx.rect(x, y, w, h);
+    };
     ctx.save();
     ctx.globalAlpha = alpha * (a.status === "rejected" ? 0.35 : 1);
     if (accept) { // sage fill: quick rise, then settles back to the plain outline
       const p = Math.min(1, (t - accept.start) / accept.dur);
       const k = p < 0.25 ? p / 0.25 : 1 - easeOut((p - 0.25) / 0.75);
       ctx.fillStyle = `rgba(${CANVAS_COLORS.accept},${0.42 * Math.max(0, Math.min(1, k))})`;
-      ctx.fillRect(x, y, w, h);
+      outline();
+      ctx.fill();
     }
     ctx.setLineDash(a.status === "needs_review" ? [6, 4] : []);
     ctx.lineWidth = isSel ? 3 : 2;
     if (isSel) { // dark outline so the selected box stands out on any background
       ctx.strokeStyle = "rgba(14,18,22,0.75)";
       ctx.lineWidth = 5;
-      ctx.strokeRect(x, y, w, h);
+      outline();
+      ctx.stroke();
       ctx.lineWidth = 3;
     }
     ctx.strokeStyle = color;
-    ctx.strokeRect(x, y, w, h);
+    outline();
+    ctx.stroke();
     ctx.setLineDash([]);
 
     const label = a.class_name + (a.score != null ? " " + a.score.toFixed(2) : "") +
@@ -508,6 +700,13 @@ class BoxCanvas {
     ctx.fillText(label, x + 5, ly + 13);
 
     if (isSel && a.status !== "rejected") {
+      if (screenPts) { // a thin frame, so the resize handles below have something to belong to
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(x, y, w, h);
+        ctx.setLineDash([]);
+      }
       ctx.fillStyle = CANVAS_COLORS.text;
       ctx.strokeStyle = CANVAS_COLORS.base;
       ctx.lineWidth = 1;
@@ -519,6 +718,17 @@ class BoxCanvas {
         const cx = x + w * hx, cy = y + h * hy;
         ctx.fillRect(cx - HANDLE / 2 - 1, cy - HANDLE / 2 - 1, HANDLE + 2, HANDLE + 2);
         ctx.strokeRect(cx - HANDLE / 2 - 1, cy - HANDLE / 2 - 1, HANDLE + 2, HANDLE + 2);
+      }
+      if (screenPts) {
+        const dragged = this.drag && this.drag.kind === "vertex" ? this.drag.index : null;
+        const chosen = dragged != null ? dragged : this.selVertex();
+        screenPts.forEach(([px, py], i) => {
+          ctx.fillStyle = i === chosen ? color : CANVAS_COLORS.text;
+          ctx.beginPath();
+          ctx.arc(px, py, i === chosen ? VERTEX_R + 2 : VERTEX_R, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        });
       }
     }
     ctx.restore();
