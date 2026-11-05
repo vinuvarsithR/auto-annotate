@@ -35,7 +35,9 @@ def coco(images, annotations, categories):
 
 
 def items(plan):
-    return {it.rel_path: it.boxes for it in plan.items}
+    """Boxes without the polygon key; polygons are tested in test_importers_polygons.py."""
+    return {it.rel_path: [{k: v for k, v in b.items() if k != "polygon"} for b in it.boxes]
+            for it in plan.items}
 
 
 def reasons(plan):
@@ -96,7 +98,8 @@ def test_coco_single_file(tmp_path):
     }
     # file order (categories order), only names with a box; super-category and rb not created
     assert plan.class_names == ["person", "biax"]
-    assert plan.skipped == []
+    assert plan.skipped == [{"file_name": "annotations.json", "reason": (
+        "1 segmentations imported as box only (RLE, multi-part or unusable polygon)")}]
 
 
 def test_coco_one_json_per_roboflow_split(tmp_path):
@@ -275,11 +278,11 @@ def test_yolo_bad_lines_and_orphan_labels(tmp_path):
         ("labels/notes.md", "not an image"),
         ("labels/orphan.txt", "no matching image"),
         ("labels/x.txt", "line 2: unknown class index 7"),
-        ("labels/x.txt", "line 3: expected 5 values, got 3"),
+        ("labels/x.txt", "line 3: expected 5 values or an odd count >= 7, got 3"),
         ("labels/x.txt", "line 4: not a number"),
         ("labels/x.txt", "line 5: not a number"),
         ("labels/x.txt", "line 6: not a number"),
-        ("labels/x.txt", "line 8: expected 5 values, got 6"),
+        ("labels/x.txt", "line 8: expected 5 values or an odd count >= 7, got 6"),
     ]
 
 

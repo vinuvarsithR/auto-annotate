@@ -4,6 +4,9 @@ A COCO file is any .json with `images`, `annotations` and `categories` keys. Eac
 to the images in its own folder and below; images are matched by the base name of
 `images[].file_name`. When several files cover an image (nested folders), the deepest file that
 lists the image's base name wins.
+
+`segmentation` with one usable polygon part gives a polygon row. Anything else that is not missing
+or `[]` (RLE, several parts, unusable) gives a box row, counted in one note per COCO file.
 """
 
 from __future__ import annotations
@@ -12,9 +15,10 @@ import json
 import math
 from pathlib import Path, PurePosixPath
 
-from autolabel.importers.base import clip_box, skip
+from autolabel.importers.base import clamp_polygon, clip_box, polygon_bbox, skip
 
 COCO_KEYS = ("images", "annotations", "categories")
+BOX_ONLY_NOTE = "{} segmentations imported as box only (RLE, multi-part or unusable polygon)"
 
 
 def _folder(rel: str) -> str:
@@ -45,12 +49,26 @@ def _is_id(v) -> bool:
     return isinstance(v, (int, str)) and not isinstance(v, bool)
 
 
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _bbox(v) -> list[float] | None:
     if not isinstance(v, (list, tuple)) or len(v) != 4:
         return None
-    if not all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) for n in v):
+    if not all(_is_number(n) for n in v):
         return None
     return [float(n) for n in v]
+
+
+def _polygon(seg, width: int, height: int) -> list[list[float]] | None:
+    """One flat px part -> clamped normalized points; None when it is not a usable polygon."""
+    if not isinstance(seg, list) or len(seg) != 1 or not isinstance(seg[0], list):
+        return None
+    flat = seg[0]
+    if len(flat) < 6 or len(flat) % 2 or not all(_is_number(v) for v in flat):
+        return None
+    return clamp_polygon([[flat[i] / width, flat[i + 1] / height] for i in range(0, len(flat), 2)])
 
 
 def coco_boxes(coco_files: list[tuple[str, dict]], image_files: list[str],
@@ -96,6 +114,7 @@ def coco_boxes(coco_files: list[tuple[str, dict]], image_files: list[str],
                 cats.setdefault(c["id"], c["name"])
                 cat_order.append(c["name"])
         listed = set(by_name[i].values())
+        box_only = 0
         for n, ann in enumerate(data["annotations"]):
             if not isinstance(ann, dict):
                 skipped.append(skip(json_rel, f"annotation #{n}: not an object"))
@@ -116,15 +135,25 @@ def coco_boxes(coco_files: list[tuple[str, dict]], image_files: list[str],
             if not _is_id(cid) or cid not in cats:
                 skipped.append(skip(json_rel, f"{label}: unknown category_id {cid}"))
                 continue
-            bbox = _bbox(ann.get("bbox"))
-            if bbox is None:
-                skipped.append(skip(json_rel, f"{label}: bad bbox"))
-                continue
-            clipped = clip_box(*bbox, *sizes[rel])
-            if clipped is None:
-                continue
-            boxes.setdefault(rel, []).append({"class_name": cats[cid], "bbox": clipped})
+            seg = ann.get("segmentation", [])
+            polygon = _polygon(seg, *sizes[rel])
+            if polygon is not None:
+                clipped = polygon_bbox(polygon, *sizes[rel])
+            else:
+                bbox = _bbox(ann.get("bbox"))
+                if bbox is None:
+                    skipped.append(skip(json_rel, f"{label}: bad bbox"))
+                    continue
+                clipped = clip_box(*bbox, *sizes[rel])
+                if clipped is None:
+                    continue
+                if seg != []:
+                    box_only += 1
+            boxes.setdefault(rel, []).append(
+                {"class_name": cats[cid], "bbox": clipped, "polygon": polygon})
             used.add(cats[cid])
+        if box_only:
+            skipped.append(skip(json_rel, BOX_ONLY_NOTE.format(box_only)))
 
     class_names = list(dict.fromkeys(n for n in cat_order if n in used))
     return boxes, class_names, skipped

@@ -94,6 +94,17 @@ def test_export_yolo_with_images_and_statuses(tmp_path):
         assert files["images/img_0.jpg"] == stored.read_bytes()
 
 
+def test_export_yolo_seg_zip(tmp_path):
+    with make_client(tmp_path)[0] as c:
+        s = _project_with_reviews(c)
+        r = c.post(f"/api/projects/{s['pid']}/export", json={"format": "yolo-seg"})
+        assert r.status_code == 200
+        assert '_yolo-seg.zip"' in r.headers["content-disposition"]
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            lines = zf.read("labels/img_0.txt").decode().splitlines()
+        assert lines and all(len(ln.split()) == 9 for ln in lines)   # class + 4 corners
+
+
 @pytest.mark.parametrize("body", [
     {"format": "voc"},
     {"statuses": ["rejected"]},
