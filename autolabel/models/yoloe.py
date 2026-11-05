@@ -91,11 +91,24 @@ def usable(bbox: tuple, image_size: tuple[int, int]) -> bool:
     return min(bbox[2], bbox[3]) * scale >= MIN_EXAMPLE_SIDE
 
 
+def disable_autoinstall() -> None:
+    """Never pip-install during a job.
+
+    ultralytics patches PIL.Image.open: after that, any file Pillow cannot identify runs
+    `pip install pi-heif` in the live environment (VERIFIED 2026-11-05, 8.4.199). The env variable
+    is read once at import, so also set the flag, in case ultralytics was imported earlier.
+    """
+    os.environ["YOLO_AUTOINSTALL"] = "false"
+    from ultralytics.utils import checks
+
+    checks.AUTOINSTALL = False
+
+
 class UltralyticsYoloe:
     """The few YOLOE calls we use, in one place, so tests can swap the model for a fake."""
 
     def __init__(self, weights: str, device: str) -> None:
-        os.environ.setdefault("YOLO_AUTOINSTALL", "false")  # never pip-install during a job
+        disable_autoinstall()
         from ultralytics import YOLOE
 
         self.model = YOLOE(weights)

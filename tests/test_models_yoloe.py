@@ -6,6 +6,8 @@ models/yoloe-26s-seg.pt) and runs on CPU on ultralytics' bundled bus.jpg. No dow
 
 import os
 
+os.environ["YOLO_AUTOINSTALL"] = "false"   # set at collection: a slow test imports ultralytics, then
+                                           # any unreadable-image test would pip-install pi-heif
 import numpy as np
 import pytest
 import torch
@@ -347,13 +349,14 @@ def test_yoloe_modes():
 
 @pytest.mark.skipif(os.environ.get("AUTOLABEL_SLOW") != "1", reason="set AUTOLABEL_SLOW=1")
 def test_classes_in_one_pass_match_separate_passes():
-    from ultralytics.utils import ASSETS
+    from ultralytics.utils import ASSETS, checks
     from autolabel.models.yoloe import UltralyticsYoloe
 
     with Image.open(ASSETS / "bus.jpg") as im:
         rgb = im.convert("RGB")
     boxes = np.array([[17, 230, 803, 740], [48, 398, 245, 902], [221, 405, 345, 860]], dtype=np.float32)
     model = UltralyticsYoloe(resolve_weights(), "cpu")
+    assert checks.AUTOINSTALL is False
     together = model.embed(rgb, boxes, np.array([0, 1, 1]))
     bus = model.embed(rgb, boxes[:1], np.array([0]))
     people = model.embed(rgb, boxes[1:], np.array([0, 0]))
