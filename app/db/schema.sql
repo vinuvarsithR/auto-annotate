@@ -41,7 +41,7 @@ CREATE TABLE jobs (
   total        INTEGER NOT NULL DEFAULT 0,
   error        TEXT,                      -- one-line message when status = failed
   config       TEXT NOT NULL,             -- JSON: the request body of POST .../jobs
-  result       TEXT,                      -- JSON summary; set by import jobs (#22), NULL otherwise
+  result       TEXT,                      -- JSON summary; set by import jobs (#22) and examples-mode detect jobs, NULL otherwise
   created_at   TEXT NOT NULL,
   started_at   TEXT,
   finished_at  TEXT

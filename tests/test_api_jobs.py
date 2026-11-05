@@ -12,7 +12,8 @@ def test_create_job_queued(tmp_path):
         job = r.json()
         assert job["kind"] == "detect" and job["status"] == "queued"
         assert (job["done"], job["total"], job["progress"]) == (0, 3, 0.0)
-        assert job["config"] == {"model": "pipeline", "image_ids": None, "options": {}}
+        assert job["config"] == {"model": "pipeline", "mode": None, "image_ids": None,
+                                 "options": {}}
         assert job["started_at"] is None and job["finished_at"] is None
         assert c.get(f"/api/jobs/{job['id']}").json() == job
 

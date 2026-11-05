@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -22,8 +23,20 @@ router = APIRouter()
 
 class JobIn(BaseModel):
     model: str = "pipeline"
+    mode: Any = None  # not str: a number or list must be unknown_mode, not a generic 400
     image_ids: list[int] | None = None
     options: dict = Field(default_factory=dict)
+
+
+def _resolve_mode(request: Request, model: str, mode: Any) -> str | None:
+    """#9: no mode -> the detector's first #16 mode (or None); else it must be in the list."""
+    modes = list(request.app.state.detector_modes(model))
+    if mode is None:
+        return modes[0] if modes else None
+    if mode not in modes:
+        raise ApiError(400, "unknown_mode",
+                       f"unknown mode {mode!r} for '{model}', available: {', '.join(modes)}")
+    return mode
 
 
 @router.post("/projects/{pid}/jobs", status_code=202)
@@ -39,6 +52,7 @@ def create_job(pid: int, body: JobIn, request: Request,
         msg = (f"unknown model '{body.model}', available: {', '.join(available)}" if available
                else f"model '{body.model}' is not available (autolabel.models is not installed)")
         raise ApiError(400, "unknown_model", msg)
+    mode = _resolve_mode(request, body.model, body.mode)
 
     if not conn.execute("SELECT 1 FROM classes WHERE project_id=?", (pid,)).fetchone():
         raise ApiError(400, "no_classes", f"project {pid} has no classes; PUT the classes first")
@@ -60,7 +74,7 @@ def create_job(pid: int, body: JobIn, request: Request,
                            f"images not in project {pid}: {missing[:20]}")
         total = len(ids)
 
-    config = body.model_dump()
+    config = {**body.model_dump(), "mode": mode}
     with conn:
         cur = conn.execute(
             "INSERT INTO jobs (project_id, kind, status, progress, done, total, config, created_at) "

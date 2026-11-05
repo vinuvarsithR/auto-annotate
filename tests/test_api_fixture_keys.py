@@ -87,7 +87,6 @@ def test_all_endpoints_match_fixture_keys(tmp_path):
                           json={"status": "needs_review", "reviewer": "dhyan"}).json(),
                   FIXTURES["PATCH /api/annotations/102 (undo)"])
 
-        same_keys(c.get("/api/models").json(), FIXTURES["GET /api/models"])
 
         # #20 and the review_status filter / errors
         bad = c.patch(f"/api/images/{iid}", json={"review_status": "finished"}).json()
@@ -123,6 +122,11 @@ def test_all_endpoints_match_fixture_keys(tmp_path):
         assert FIXTURES["DELETE /api/projects/1"] is None
         r = c.delete(f"/api/projects/{pid}")
         assert (r.status_code, r.content) == (204, b"")
+
+
+def test_models_matches_fixture_keys(tmp_path):
+    with make_client(tmp_path, detectors=("fake",))[0] as c:  # the fixture lists fake only
+        same_keys(c.get("/api/models").json(), FIXTURES["GET /api/models"])
 
 
 def test_failed_job_matches_fixture_keys(tmp_path):

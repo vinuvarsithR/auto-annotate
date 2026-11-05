@@ -15,6 +15,10 @@ Plain-English summary
        (boxes below the class min_score are dropped, as a safety net),
     3. update done / total / progress.
   So if the job fails halfway, images that weren't reached keep their old boxes.
+* Examples mode (#9, config.mode 'examples'): first the project's reviewed boxes are read,
+  cleaned and capped (read_examples) and pipeline.prepare_examples embeds them, then `result`
+  is written, then the images run as above with only the classes that have usable examples.
+  Earlier model boxes of the other classes are kept. No class left -> done, nothing run.
 * Any exception -> job 'failed' with a one-line error message.
 * roboflow_push jobs (#21): the images with review_status done/empty and no
   roboflow_image_id yet, one at a time: push(image, boxes, class_names, batch_name),
@@ -59,6 +63,8 @@ PusherLoader = Callable[[], tuple[Callable[..., str], list[str]]]
 # load_importers() -> the autolabel.importers module (or a stub with the same names)
 ImporterLoader = Callable[[], object]
 
+EXAMPLE_STATUSES = ("accepted", "edited")  # reviewed boxes teach the next examples-mode run
+EXAMPLE_CAP = 30  # per class; fixed by the contract, not an option
 PUSH_REVIEW_STATUSES = ("done", "empty")
 DEFAULT_PUSH_STATUSES = ("auto_accepted", "accepted", "edited")
 
@@ -101,6 +107,47 @@ def one_line(exc: BaseException, limit: int = 300, secrets=()) -> str:
             text = text.replace(secret, "***")
     text = _KEY_PARAM.sub(r"\1***", text)
     return text[:limit]
+
+
+def clip_box(x: float, y: float, w: float, h: float, width: int, height: int) -> tuple | None:
+    """(x, y, w, h) clipped to the image, or None if no area is left."""
+    x1, y1 = max(x, 0.0), max(y, 0.0)
+    x2, y2 = min(x + w, float(width)), min(y + h, float(height))
+    if x2 > x1 and y2 > y1:
+        return x1, y1, x2 - x1, y2 - y1
+    return None
+
+
+def evenly_spaced(rows: list, cap: int) -> list:
+    """At most `cap` items, picked at even steps through `rows`, order kept."""
+    n = len(rows)
+    return rows if n <= cap else [rows[i * n // cap] for i in range(cap)]
+
+
+def read_examples(conn: sqlite3.Connection, pid: int, example_type: type) -> dict[str, list]:
+    """Class name -> its examples, from all the project's images (#9, examples mode).
+
+    Only the bbox of a row is used. A box with no area left after clipping, or whose image
+    file is missing, is not an example. The cap comes last, so those do not use up places.
+    """
+    rows = conn.execute(
+        "SELECT a.x, a.y, a.w, a.h, c.name AS class_name, i.id AS image_id, i.path, i.width, "
+        "i.height FROM annotations a JOIN classes c ON c.id = a.class_id "
+        "JOIN images i ON i.id = a.image_id WHERE i.project_id=? AND a.status IN (?, ?) "
+        "ORDER BY a.id", (pid, *EXAMPLE_STATUSES))
+    has_file: dict[int, bool] = {}
+    by_class: dict[str, list] = {}
+    for r in rows:
+        box = clip_box(r["x"], r["y"], r["w"], r["h"], r["width"], r["height"])
+        if box is None:
+            continue
+        if r["image_id"] not in has_file:
+            has_file[r["image_id"]] = Path(r["path"]).is_file()
+        if has_file[r["image_id"]]:
+            by_class.setdefault(r["class_name"], []).append(
+                example_type(image_id=str(r["image_id"]), path=r["path"],
+                             category=r["class_name"], bbox=box))
+    return {name: evenly_spaced(found, EXAMPLE_CAP) for name, found in by_class.items()}
 
 
 class Worker:
@@ -216,12 +263,28 @@ class Worker:
         specs = [ClassSpec(name=r["name"], description=r["description"], min_score=r["min_score"])
                  for r in class_rows]
 
+        # Text jobs and old jobs (no config.mode) call run with exactly these arguments.
+        run_args = {"detector": model, "options": options}
+        delete_filter, delete_args = "", []
+        if config.get("mode") == "examples":
+            example_run = self._prepare_examples(conn, jid, pid, model, options, specs)
+            if example_run is None:  # no class left: nothing is run or deleted
+                with conn:
+                    conn.execute("UPDATE jobs SET status='done', progress=1.0, done=?, "
+                                 "finished_at=? WHERE id=?", (total, db.now(), jid))
+                return
+            run_args["example_run"] = example_run
+            specs = list(example_run.classes)
+            by_name = {s.name: by_name[s.name] for s in specs}  # a skipped class must not come back
+            delete_args = [r["id"] for r in by_name.values()]
+            delete_filter = f" AND class_id IN ({','.join('?' * len(delete_args))})"
+
         from autolabel.evaluate import Box  # pure functions, no torch
         from autolabel.pipeline import drop_overlapping
 
         expected = {img_id for img_id, _ in images}
         done = 0
-        for image_id, preds in run(images, specs, detector=model, options=options):
+        for image_id, preds in run(images, specs, **run_args):
             if image_id not in expected:
                 raise ValueError(f"detector returned unknown image_id '{image_id}'")
             preds = list(preds)
@@ -233,7 +296,8 @@ class Worker:
                 conn.execute(
                     "DELETE FROM annotations WHERE image_id=? "
                     "AND source NOT IN ('human', 'import') "
-                    "AND status IN (?, ?)", (int(image_id), *db.MODEL_PENDING))
+                    "AND status IN (?, ?)" + delete_filter,
+                    (int(image_id), *db.MODEL_PENDING, *delete_args))
                 # #9: drop new boxes that overlap a remaining non-rejected box of the same class
                 existing = [
                     Box(image_id, r["class_name"],
@@ -246,17 +310,39 @@ class Worker:
                     if r is None:
                         continue
                     conn.execute(
-                        "INSERT INTO annotations (image_id, class_id, x, y, w, h, mask, score, "
-                        "source, status, job_id, reviewer, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                        (int(image_id), r["class_id"], *r["bbox"], r["mask"], r["score"],
-                         r["source"] or model, r["status"], jid, t, t))
+                        "INSERT INTO annotations (image_id, class_id, x, y, w, h, mask, polygon, "
+                        "score, source, status, job_id, reviewer, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                        (int(image_id), r["class_id"], *r["bbox"], r["mask"], r["polygon"],
+                         r["score"], r["source"] or model, r["status"], jid, t, t))
                 conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
                              (done, done / total if total else 1.0, jid))
 
         with conn:
             conn.execute("UPDATE jobs SET status='done', progress=1.0, finished_at=? WHERE id=?",
                          (db.now(), jid))
+
+    def _prepare_examples(self, conn: sqlite3.Connection, jid: int, pid: int, model: str,
+                          options: dict, specs: list):
+        """Steps 1-3 of #9 examples mode. Returns the ExampleRun, or None if no class is left."""
+        from autolabel import pipeline
+        from autolabel.models.base import Example
+
+        examples = read_examples(conn, pid, Example)
+        ready = [s for s in specs if s.name in examples]
+        skipped = [{"class_name": s.name, "reason": "no examples"}
+                   for s in specs if s.name not in examples]
+        example_run, used = None, {}
+        if ready:  # slow: the job stays 'running' at progress 0 while it embeds
+            example_run = pipeline.prepare_examples(
+                model, ready, {s.name: examples[s.name] for s in ready}, options)
+            used = dict(example_run.used)
+            skipped += [{"class_name": name, "reason": "no usable examples"}
+                        for name in example_run.unusable]
+        result = {"mode": "examples", "examples_by_class": used, "skipped_classes": skipped}
+        with conn:
+            conn.execute("UPDATE jobs SET result=? WHERE id=?", (json.dumps(result), jid))
+        return example_run if example_run is not None and example_run.classes else None
 
     def _process_push(self, conn: sqlite3.Connection, job: sqlite3.Row) -> None:
         """#21: upload done/empty images not pushed yet, one at a time."""
@@ -425,10 +511,12 @@ class Worker:
         accept = cls["accept_score"]
         status = "auto_accepted" if accept is not None and score >= accept else "needs_review"
         mask = getattr(pred, "mask", None)
+        polygon = getattr(pred, "polygon", None)
         return {
             "class_id": cls["id"],
             "bbox": tuple(float(v) for v in pred.bbox),
             "mask": json.dumps(mask) if mask is not None else None,
+            "polygon": json.dumps(polygon) if polygon is not None else None,
             "score": score,
             "source": getattr(pred, "source", "") or "",
             "status": status,
