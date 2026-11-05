@@ -19,7 +19,7 @@ OLD_SCHEMA = (NEW_SCHEMA
               .replace("CHECK (kind IN ('detect', 'roboflow_push', 'import'))",
                        "CHECK (kind IN ('detect', 'roboflow_push'))")
               .replace("  result       TEXT,                      "
-                       "-- JSON summary; set by import jobs (#22), NULL otherwise\n", ""))
+                       "-- JSON summary; set by import jobs (#22) and examples-mode detect jobs, NULL otherwise\n", ""))
 assert OLD_SCHEMA != NEW_SCHEMA and "'import'" not in OLD_SCHEMA.split("CREATE TABLE annotations")[0]
 
 JOB_IDS = (3, 7, 12)  # gaps on purpose: ids must be kept
@@ -168,7 +168,7 @@ def test_check_allows_import_but_no_result_column_uses_alter(tmp_path):
     conn = sqlite3.connect(path)
     conn.executescript(NEW_SCHEMA.replace(
         "  result       TEXT,                      "
-        "-- JSON summary; set by import jobs (#22), NULL otherwise\n", ""))
+        "-- JSON summary; set by import jobs (#22) and examples-mode detect jobs, NULL otherwise\n", ""))
     conn.execute("INSERT INTO projects VALUES (1, 'p', 't')")
     conn.execute("INSERT INTO jobs (id, project_id, kind, status, config, created_at) "
                  "VALUES (4, 1, 'detect', 'done', '{}', 't')")

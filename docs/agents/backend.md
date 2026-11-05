@@ -112,3 +112,13 @@ An import job with 0 images is still queued (not stored `done` at once) so it wr
    and then copied here. The untracked copies there (`app/api/`, `app/db/`, `app/worker/`,
    `app/main.py`, `tests/test_api_*.py`, `tests/test_db_schema.py`, `tests/test_worker_status.py`)
    and a smoke-test `data/` folder (project "smoke_test", 1 image) can be deleted by the user.
+
+## Examples mode (#9, #16)
+
+Decisions the contract leaves open, tell me if any is wrong:
+1. The cap of 30 is applied after clean-up, so dropped boxes do not use up places.
+2. When the detector rejects every class, the job counts as "no class left": done, nothing run or deleted.
+3. A box returned for a class that did not run fails the job, like any unknown class.
+4. The worker imports `pipeline.prepare_examples` and `Example` only when an examples job runs, and
+   without `detector_modes` in autolabel.models every detector has no modes. So merge models with or
+   before backend: until then `mode: "examples"` is 400 `unknown_mode` and #16 shows `[]`.

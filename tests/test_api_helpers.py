@@ -17,6 +17,8 @@ from PIL import Image, PngImagePlugin
 
 from app.main import create_app
 
+FAKE_MODES = {"fake": ["text", "examples"]}
+
 CRANE_CLASSES = [
     {"name": "person", "description": "a worker wearing a hard hat, seen from above",
      "min_score": 0.05, "accept_score": 0.5},
@@ -43,6 +45,7 @@ class FakePrediction:
     score: float = 1.0
     source: str = ""
     mask: dict | None = None
+    polygon: list | None = None
 
 
 class FakePipeline:
@@ -71,10 +74,13 @@ class FakePipeline:
 
 
 def make_client(tmp_path, pipeline: FakePipeline | None = None,
-                detectors=("pipeline", "fake")) -> tuple[TestClient, FakePipeline]:
+                detectors=("pipeline", "fake"),
+                modes: dict | None = None) -> tuple[TestClient, FakePipeline]:
     pipeline = pipeline or FakePipeline()
     app = create_app(tmp_path / "data", start_worker=False, load_pipeline=pipeline.loader,
-                     list_detectors=lambda: list(detectors), static_dir=None)
+                     list_detectors=lambda: list(detectors),
+                     detector_modes=lambda name: (modes or FAKE_MODES).get(name, []),
+                     static_dir=None)
     return TestClient(app), pipeline
 
 
