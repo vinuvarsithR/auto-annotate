@@ -165,14 +165,14 @@ const realApi = {
   },
   // #21: no body = the default approved statuses. Response 202 is a Job, polled with getJob.
   startPush: (pid) => http("POST", `/projects/${pid}/roboflow/push`),
-  // Endpoint 16 (contract on main): GET /api/models -> {"models": [...]} = list_detectors().
+  // Endpoint 16: GET /api/models -> {"models": [...], "modes": {name: [...]}}, default mode first.
   // If an older backend answers 404, fall back to the one detector that always exists.
   async listModels() {
     try {
       const d = await http("GET", "/models");
-      return { models: d.models, fallback: false };
+      return { models: d.models, modes: d.modes || {}, fallback: false };
     } catch (e) {
-      if (e.httpStatus === 404) return { models: FALLBACK_MODELS.slice(), fallback: true };
+      if (e.httpStatus === 404) return { models: FALLBACK_MODELS.slice(), modes: {}, fallback: true };
       throw e;
     }
   },
@@ -180,6 +180,9 @@ const realApi = {
 
 const FALLBACK_MODELS = ["fake"];
 const MOCK_MODELS = ["fake"]; // same as the backend today (contract #16)
+const MOCK_MODES = { fake: ["text", "examples"] };
+const MOCK_PREP_POLLS = 2;    // polls an examples job stays running at 0 while it "embeds"
+const EXAMPLE_CAP = 30;       // contract #9: at most 30 examples per class
 
 // ---------------------------------------------------------------- mock mode
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -228,14 +231,53 @@ async function imageSize(file) {
   }
 }
 
+// Contract #9: which boxes teach. Hand-drawn unless rejected, or any reviewed box.
+function mockIsExample(a) {
+  return (a.source === "human" && a.status !== "rejected") || a.status === "accepted" || a.status === "edited";
+}
+
+// The bbox clipped to the image has some area left. The image must be known (mock "file missing").
+function mockUsableBox(a, img) {
+  if (!img) return false;
+  const [x, y, w, h] = a.bbox;
+  return Math.min(x + w, img.width) > Math.max(x, 0) && Math.min(y + h, img.height) > Math.max(y, 0);
+}
+
+// Steps 1 and 3 of #9: count the examples of each class, write result, remember the classes that run.
+// The fake detector rejects nothing, so the mock never gives "no usable examples".
+function mockPrepareExamples(db, job) {
+  const examples_by_class = {}, skipped_classes = [];
+  job._ran = [];
+  for (const c of db.classes.filter((k) => k.project_id === job.project_id)) {
+    const n = db.annotations.filter((a) => a.class_id === c.id && mockIsExample(a) &&
+      mockUsableBox(a, db.images.find((i) => i.id === a.image_id))).length;
+    if (n) {
+      examples_by_class[c.name] = Math.min(n, EXAMPLE_CAP);
+      job._ran.push(c.id);
+    } else {
+      skipped_classes.push({ class_name: c.name, reason: "no examples" });
+    }
+  }
+  job.result = { mode: "examples", examples_by_class, skipped_classes };
+}
+
+function mockFinishJob(job) {
+  job.status = "done";
+  job.progress = 1;
+  job.finished_at = now();
+}
+
 // One step of a mock detect job. Acts like the contract's "fake" detector: 2 boxes per image
 // (first two classes, scores 0.9 and 0.3). Earlier unreviewed model boxes are replaced.
+// An examples job only touches the classes that ran.
 function mockDetectOne(db, job, imageId) {
   const img = db.images.find((i) => i.id === imageId);
   if (!img) return;
+  const runs = (classId) => !job._ran || job._ran.includes(classId);
   db.annotations = db.annotations.filter((a) => !(a.image_id === imageId && a.source !== "human" &&
+    a.source !== "import" && runs(a.class_id) &&
     (a.status === "auto_accepted" || a.status === "needs_review")));
-  const classes = db.classes.filter((c) => c.project_id === job.project_id).slice(0, 2);
+  const classes = db.classes.filter((c) => c.project_id === job.project_id && runs(c.id)).slice(0, 2);
   const scores = [0.9, 0.3];
   const t = now();
   classes.forEach((c, k) => {
@@ -253,7 +295,7 @@ function mockDetectOne(db, job, imageId) {
 }
 
 function stripJob(job) {
-  const { _ids, ...out } = job;
+  const { _ids, _ran, _prep, ...out } = job;
   return clone(out);
 }
 
@@ -507,14 +549,20 @@ const mockApi = {
     if (!MOCK_MODELS.includes(body.model)) {
       throw new ApiError("unknown_model", `unknown model "${body.model}"`, 400);
     }
+    const modes = MOCK_MODES[body.model] || [];
+    if (body.mode != null && !modes.includes(body.mode)) {
+      throw new ApiError("unknown_mode", `unknown mode "${body.mode}" for model "${body.model}"`, 400);
+    }
+    const mode = body.mode ?? modes[0] ?? null;
     if (!db.classes.some((c) => c.project_id === pid)) {
       throw new ApiError("no_classes", "project has no classes", 400);
     }
     const ids = body.image_ids || db.images.filter((i) => i.project_id === pid).map((i) => i.id);
     const job = { id: db.nextJobId++, project_id: pid, kind: "detect", status: "queued", progress: 0,
                   done: 0, total: ids.length, error: null,
-                  config: { model: body.model, image_ids: body.image_ids ?? null, options: body.options || {} },
-                  created_at: now(), started_at: null, finished_at: null, _ids: ids };
+                  config: { model: body.model, mode, image_ids: body.image_ids ?? null, options: body.options || {} },
+                  result: null, created_at: now(), started_at: null, finished_at: null, _ids: ids,
+                  _prep: mode === "examples" ? MOCK_PREP_POLLS : 0 };
     db.jobs.push(job);
     return stripJob(job);
   },
@@ -553,20 +601,25 @@ The real server sends a zip here.
     if (job.status === "queued") {
       job.status = "running";
       job.started_at = now();
+    } else if (job.status === "running" && job._prep > 0) {
+      job._prep -= 1;
+      if (job._prep > 0) return stripJob(job);
+      mockPrepareExamples(db, job);
+      if (!job._ran.length) { // no class left: done at once, no image run, nothing deleted
+        job.done = job.total;
+        mockFinishJob(job);
+      }
+      return stripJob(job);
     } else if (job.status === "running" && job.done < job.total) {
       if (job.kind === "roboflow_push") db.pushed.add(job._ids[job.done]);
       else mockDetectOne(db, job, job._ids[job.done]);
       job.done += 1;
       job.progress = Math.round((job.done / job.total) * 10000) / 10000;
     }
-    if (job.status === "running" && job.done >= job.total) {
-      job.status = "done";
-      job.progress = 1;
-      job.finished_at = now();
-    }
+    if (job.status === "running" && !job._prep && job.done >= job.total) mockFinishJob(job);
     return stripJob(job);
   },
-  async listModels() { return { models: MOCK_MODELS.slice(), fallback: false }; },
+  async listModels() { return { models: MOCK_MODELS.slice(), modes: clone(MOCK_MODES), fallback: false }; },
 };
 
 window.api = MOCK ? mockApi : realApi;
