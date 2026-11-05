@@ -67,6 +67,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     | #21   | images.roboflow_image_id | NULL         |
     | #4    | images.sha256            | hash of the file at `path` (NULL if the file is missing) |
     | #22   | jobs.result              | NULL (and the kind CHECK gains 'import': table rebuilt) |
+    | polygons | annotations.polygon     | NULL (plain box) |
     """
     migrate_jobs(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
@@ -78,6 +79,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if "sha256" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN sha256 TEXT")
     backfill_sha256(conn)
+    ann_cols = {r["name"] for r in conn.execute("PRAGMA table_info(annotations)")}
+    if "polygon" not in ann_cols:
+        conn.execute("ALTER TABLE annotations ADD COLUMN polygon TEXT")
 
 
 def _jobs_schema_sql(table: str) -> str:
@@ -338,6 +342,7 @@ def annotation_dict(row: sqlite3.Row) -> dict:
         "class_name": row["class_name"],
         "bbox": [float(row["x"]), float(row["y"]), float(row["w"]), float(row["h"])],
         "mask": json.loads(row["mask"]) if row["mask"] else None,
+        "polygon": json.loads(row["polygon"]) if row["polygon"] else None,
         "score": row["score"], "source": row["source"], "status": row["status"],
         "job_id": row["job_id"], "reviewer": row["reviewer"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],

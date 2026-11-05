@@ -53,6 +53,7 @@ CREATE TABLE annotations (
   class_id    INTEGER NOT NULL REFERENCES classes(id),
   x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
   mask        TEXT,                       -- COCO RLE JSON or NULL
+  polygon     TEXT,                       -- JSON [[x, y], ...] normalized 0..1, or NULL (plain box)
   score       REAL,                       -- NULL for human-drawn boxes
   source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human' | 'import'
   status      TEXT NOT NULL CHECK (status IN

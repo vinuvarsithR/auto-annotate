@@ -105,6 +105,27 @@ def test_zip_import_adds_images_boxes_and_classes(tmp_path):
         assert c.get(f"/api/images/{imgs[1]['id']}/file").status_code == 200
 
 
+def test_import_job_stores_box_polygon(tmp_path):
+    triangle = [[0.5, 0.25], [0.75, 0.25], [0.625, 0.5]]
+    with _client(tmp_path) as c:
+        s = _crane_project(c)
+        entries = {
+            "images/a.jpg": image_bytes(),
+            "labels.json": _labels({"images/a.jpg": [
+                {"class_name": "rb", "bbox": [640, 180, 320, 180], "polygon": triangle},
+                {"class_name": "rb", "bbox": [1, 2, 3, 4], "polygon": None},
+                {"class_name": "rb", "bbox": [5, 6, 7, 8]}]}),
+        }
+        job = _run(c, _post_zip(c, s["pid"], entries).json())
+        assert job["status"] == "done" and job["result"]["boxes_by_class"] == {"rb": 3}
+        iid = c.get(f"/api/projects/{s['pid']}/images").json()["images"][0]["id"]
+        rows = c.get(f"/api/images/{iid}/annotations").json()["annotations"]
+        assert [a["polygon"] for a in rows] == [triangle, None, None]
+        assert rows[0]["bbox"] == [640.0, 180.0, 320.0, 180.0]
+        assert (rows[0]["source"], rows[0]["status"], rows[0]["score"], rows[0]["mask"],
+                rows[0]["job_id"]) == ("import", "needs_review", None, None, job["id"])
+
+
 def test_duplicates_and_renames_follow_rule_4(tmp_path):
     with _client(tmp_path) as c:
         pid = _project(c)

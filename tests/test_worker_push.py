@@ -83,12 +83,34 @@ def test_push_only_done_and_empty_images_with_right_boxes(tmp_path):
         assert [x["image"]["id"] for x in pusher.calls] == [i0, i1]
         # default statuses: auto_accepted yes, needs_review no
         assert pusher.calls[0]["boxes"] == [{"class_name": "person",
-                                             "bbox": [10.0, 20.0, 30.0, 40.0]}]
+                                             "bbox": [10.0, 20.0, 30.0, 40.0],
+                                             "polygon": None}]
         assert pusher.calls[1]["boxes"] == []  # empty image -> no labels
         assert pusher.calls[0]["class_names"] == ["person", "rb", "sb", "biax"]
         assert pusher.calls[0]["batch_name"] == f"autolabel_{job['started_at'][:10]}"
         assert pusher.calls[0]["image"]["width"] == 1280
         assert _rf_ids(c, s["pid"]) == [f"rf{i0}", f"rf{i1}", None]
+
+
+def test_push_passes_polygon_with_each_box(tmp_path):
+    pusher = FakePusher()
+    with _client(tmp_path, pusher) as c:
+        s = setup_project(c, n_images=1)
+        iid = s["image_ids"][0]
+        triangle = [[0.5, 0.25], [0.75, 0.25], [0.625, 0.5]]
+        cid = s["class_ids"]["biax"]
+        assert c.post(f"/api/images/{iid}/annotations",
+                      json={"class_id": cid, "polygon": triangle}).status_code == 201
+        assert c.post(f"/api/images/{iid}/annotations",
+                      json={"class_id": cid, "bbox": [1, 2, 3, 4]}).status_code == 201
+        _mark(c, iid, "done")
+        assert c.app.state.worker.run_once() is False  # nothing queued yet
+        _push_job(c, s["pid"])
+        assert c.app.state.worker.run_once()
+        polygon_box, plain_box = pusher.calls[0]["boxes"]
+        assert polygon_box["polygon"] == triangle
+        assert polygon_box["bbox"] == pytest.approx([640.0, 180.0, 320.0, 180.0])
+        assert plain_box == {"class_name": "biax", "bbox": [1.0, 2.0, 3.0, 4.0], "polygon": None}
 
 
 def test_statuses_from_config_are_used(tmp_path):

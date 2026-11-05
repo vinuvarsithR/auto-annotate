@@ -98,6 +98,12 @@ An import job with 0 images is still queued (not stored `done` at once) so it wr
    * If `settings` is a dict, values whose key name contains "key" (and env `ROBOFLOW_API_KEY`) are
      scrubbed from job errors; `api_key=...` in URLs is scrubbed too.
 
+4. **Polygons, bbox-only PATCH that leaves no area (for the integrator, #13).** The contract says
+   points are clamped to 0..1, then the bbox is recomputed, but not what happens when nothing is left,
+   e.g. `bbox` fully outside the image clamps every point onto one edge. That would store w or h = 0
+   and a zero-area polygon, which every other rule forbids, so the backend answers 400 `bad_request`
+   and changes nothing. Please add this to the #13 table, or tell me another rule.
+
 ## Open questions
 
 1. Should `GET /projects/{pid}/images` reject `limit` > 1000? (currently 400 above 1000.)

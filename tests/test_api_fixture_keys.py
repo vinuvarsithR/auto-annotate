@@ -132,3 +132,22 @@ def test_failed_job_matches_fixture_keys(tmp_path):
         job = run_job(c, s["pid"])
         same_keys(job, FIXTURES["GET /api/jobs/6"])
         assert job["status"] == "failed" and job["error"]
+
+
+def test_polygon_samples_match_fixture_keys(tmp_path):
+    triangle = [[0.5, 0.25], [0.75, 0.25], [0.625, 0.5]]
+    with make_client(tmp_path)[0] as c:
+        s = setup_project(c, n_images=1)
+        iid = s["image_ids"][0]
+        made = c.post(f"/api/images/{iid}/annotations",
+                      json={"class_id": s["class_ids"]["rb"], "polygon": triangle}).json()
+        same_keys(made, FIXTURES["POST /api/images/11/annotations (polygon)"])
+        url = f"/api/annotations/{made['id']}"
+        same_keys(c.patch(url, json={"bbox": [200, 210, 80, 50]}).json(),
+                  FIXTURES["PATCH /api/annotations/106 (bbox only, polygon scaled)"])
+        same_keys(c.patch(url, json={"polygon": triangle}).json(),
+                  FIXTURES["PATCH /api/annotations/106 (polygon replaced)"])
+        same_keys(c.get(f"/api/images/{iid}/annotations").json(),
+                  FIXTURES["GET /api/images/11/annotations"])
+        same_keys(c.patch(url, json={"polygon": None}).json(),
+                  FIXTURES["PATCH /api/annotations/106 (polygon removed)"])

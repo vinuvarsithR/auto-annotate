@@ -17,14 +17,14 @@ Plain-English summary
   So if the job fails halfway, images that weren't reached keep their old boxes.
 * Any exception -> job 'failed' with a one-line error message.
 * roboflow_push jobs (#21): the images with review_status done/empty and no
-  roboflow_image_id yet, one at a time: push(image, boxes, class_names, batch_name)
-  returns the Roboflow id, which is saved at once (so a failed job can just be
+  roboflow_image_id yet, one at a time: push(image, boxes, class_names, batch_name),
+  where each box has class_name, bbox and polygon, returns the Roboflow id, which is saved at once (so a failed job can just be
   started again). Errors become a one-line message with the API key removed.
 * import jobs (#22): the upload in data/imports/<job_id>/ (a zip is extracted first) is
   read by autolabel.importers.plan_import (export's code). Missing classes are added
   at the end of the class list, then image by image, in ONE transaction each: the #4
-  duplicate rule (db.insert_image), the image's boxes as needs_review / source 'import',
-  done / progress. At the end `result` is stored and the folder is deleted (also when
+  duplicate rule (db.insert_image), the image's boxes (with their polygons) as
+  needs_review / source 'import', done / progress. At the end `result` is stored and the folder is deleted (also when
   the job fails).
 * run_once() processes a single job without a thread (used by tests).
 * The model code is loaded lazily through load_pipeline(), and the Roboflow
@@ -283,11 +283,10 @@ class Worker:
             marks = ",".join("?" * len(statuses))
             for done, img in enumerate(rows, start=1):
                 boxes = [] if img["review_status"] == "empty" else [
-                    {"class_name": b["class_name"],
-                     "bbox": [float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"])]}
-                    for b in conn.execute(
+                    {k: a[k] for k in ("class_name", "bbox", "polygon")}
+                    for a in map(db.annotation_dict, conn.execute(
                         db.ANNOTATION_SELECT + f" WHERE a.image_id=? AND a.status IN ({marks}) "
-                        "ORDER BY a.id", (img["id"], *statuses))]
+                        "ORDER BY a.id", (img["id"], *statuses)))]
                 image = {"id": img["id"], "file_name": img["file_name"], "path": img["path"],
                          "width": img["width"], "height": img["height"]}
                 rf_id = push(image, boxes, class_names, batch_name)
@@ -385,12 +384,14 @@ class Worker:
                         x, y, w, h = (float(v) for v in box["bbox"])
                         if w <= 0 or h <= 0:
                             continue
+                        polygon = box.get("polygon")  # plan_import already set bbox from it
                         conn.execute(
                             "INSERT INTO annotations (image_id, class_id, x, y, w, h, mask, "
-                            "score, source, status, job_id, reviewer, created_at, updated_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'import', 'needs_review', ?, "
-                            "NULL, ?, ?)",
-                            (iid, class_ids[box["class_name"]], x, y, w, h, jid, t, t))
+                            "polygon, score, source, status, job_id, reviewer, created_at, "
+                            "updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, 'import', "
+                            "'needs_review', ?, NULL, ?, ?)",
+                            (iid, class_ids[box["class_name"]], x, y, w, h,
+                             json.dumps(polygon) if polygon is not None else None, jid, t, t))
                         stored.append(box["class_name"])
                 conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
                              (done, progress, jid))
