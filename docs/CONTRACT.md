@@ -65,7 +65,7 @@ CREATE TABLE jobs (
   total        INTEGER NOT NULL DEFAULT 0,
   error        TEXT,                      -- one-line message when status = failed
   config       TEXT NOT NULL,             -- JSON: the request body of POST .../jobs
-  result       TEXT,                      -- JSON summary; set by import jobs (#22), NULL otherwise
+  result       TEXT,                      -- JSON summary; set by import jobs (#22) and examples-mode detect jobs, NULL otherwise
   created_at   TEXT NOT NULL,
   started_at   TEXT,
   finished_at  TEXT
@@ -79,7 +79,7 @@ CREATE TABLE annotations (
   mask        TEXT,                       -- COCO RLE JSON or NULL
   polygon     TEXT,                       -- JSON [[x, y], ...] normalized 0..1, or NULL (plain box)
   score       REAL,                       -- NULL for human-drawn boxes
-  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'gdino' | 'pipeline' | 'human' | 'import'
+  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'yoloe_examples' | 'gdino' | 'pipeline' | 'human' | 'import'
   status      TEXT NOT NULL CHECK (status IN
                 ('auto_accepted', 'needs_review', 'accepted', 'rejected', 'edited')),
   job_id      INTEGER REFERENCES jobs(id),  -- NULL for human-drawn boxes
@@ -111,13 +111,15 @@ A new `detect` job on an image deletes that image's earlier **model** boxes that
 still `auto_accepted` or `needs_review`. It never touches human-reviewed rows.
 A **model** box is one whose `source` is not `human` and not `import`, so imported boxes are
 never deleted by a detect job, even while `needs_review`.
+A class skipped by an examples-mode job (#9) did not run, so its earlier model boxes are kept.
 
 Overlap rule (#9): after that delete, a new model box is dropped (not stored) when the image
 still has a box of the **same class** whose status is not `rejected` and whose IoU with the new
 box is **>= 0.5** (`autolabel.evaluate.iou`). This keeps a detect job from duplicating imported,
 human or already reviewed boxes. The check is done by `pipeline.drop_overlapping` (section 3).
 
-`jobs.result` is the JSON summary of an import job (#22) and NULL for other kinds. On startup
+`jobs.result` is the JSON summary of an import job (#22) or an examples-mode detect job (#9), and
+NULL for other jobs. On startup
 `migrate()` adds it (`ALTER TABLE jobs ADD COLUMN result TEXT`) if missing. SQLite cannot change a
 CHECK, so if the `jobs` table's CHECK does not allow `'import'`, `migrate()` rebuilds the table
 (create `jobs_new` with the schema above, copy every row, drop `jobs`, rename, inside one
@@ -127,9 +129,9 @@ transaction with foreign keys off), keeping all ids.
 set, the bbox is **always** the polygon's bounding box, computed by the server (min/max of the
 points times the image width/height). `migrate()` adds the column on startup
 (`ALTER TABLE annotations ADD COLUMN polygon TEXT`) if missing; old rows stay NULL (plain boxes), no
-rebuild is needed. Detect jobs (#9), `drop_overlapping` and all detectors are unchanged: they use the
-bbox only and model boxes have `polygon` NULL. `polygon` and `mask` are independent; #14 and #21 use
-`polygon` first (see #14).
+rebuild is needed. `drop_overlapping` uses the bbox only. Model boxes have `polygon` NULL, except
+`yoloe` boxes (#9, examples mode). `polygon` and `mask` are independent; #14 and #21 use `polygon`
+first (see #14).
 
 Image review status (`images.review_status`):
 
@@ -180,6 +182,7 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 |---|---|---|
 | 400 | `bad_request` | invalid body or query (incl. FastAPI validation), empty/duplicate names, unknown `status` |
 | 400 | `unknown_model` | `model` not in `list_detectors()` |
+| 400 | `unknown_mode` | #9 `mode` not in the detector's #16 list |
 | 400 | `no_classes` | detect job on a project with no classes |
 | 400 | `bad_image_ids` | `image_ids` not all in this project |
 | 400 | `bad_class_id` | `class_id` not in this image's project |
@@ -285,24 +288,104 @@ Response `{"classes": [Class, ...]}`. If an omitted class still has annotations,
 ### 9. POST /projects/{pid}/jobs
 Request:
 ```json
-{"model": "pipeline", "image_ids": null, "options": {}}
+{"model": "pipeline", "mode": null, "image_ids": null, "options": {}}
 ```
 `model` is one of the names in `autolabel.models.list_detectors()` (section 3), and
-`image_ids: null` means all images. Response 202 is a **Job**:
+`image_ids: null` means all images.
+
+| `mode` in the request | Result |
+|---|---|
+| absent or `null` | the detector's first mode in #16, or `null` if it has none. Existing callers keep today's behaviour. |
+| a mode in the detector's #16 list | used |
+| anything else | 400 `unknown_mode` |
+
+`mode` is a top-level field, never in `options`: `get_detector` builds one instance per name and uses
+`options` only the first time. `config.mode` stores the mode that was resolved. Jobs created before
+this change have no `config.mode`.
+
+Response 202 is a **Job**:
 ```json
 {"id": 5, "project_id": 1, "kind": "detect", "status": "queued", "progress": 0.0,
- "done": 0, "total": 47, "error": null, "config": {"model": "pipeline", "image_ids": null, "options": {}},
+ "done": 0, "total": 47, "error": null, "config": {"model": "pipeline", "mode": null, "image_ids": null, "options": {}},
  "result": null, "created_at": "2026-10-30T14:02:00Z", "started_at": null, "finished_at": null}
 ```
 On images that already have boxes, the overlap rule from section 1 applies: a model box is dropped
 when an existing non-rejected box of the same class overlaps it at IoU >= 0.5. The worker first
 deletes the earlier model boxes (section 1), then passes the image's remaining non-rejected boxes to
-`pipeline.drop_overlapping` and stores what it returns.
+`pipeline.drop_overlapping` and stores what it returns. This is the same in every mode.
+
+#### Examples mode
+A detector learns from the project's own boxes, with no training. Detectors and modes:
+
+| `model` | `mode` | Status | Stored `source` | Polygon |
+|---|---|---|---|---|
+| `yoloe` | `examples` | new | `yoloe_examples` | yes |
+| `owlv2` | `text` | exists, unchanged | `owlv2` | no |
+| `owlv2` | `examples` | new | `owlv2_image` | no |
+| `fake` | `text`, `examples` | `examples` returns its usual boxes for classes with examples | `fake` | no |
+
+Which boxes are examples:
+
+| Box status | Example? |
+|---|---|
+| `accepted` or `edited`, any `source` (`human`, `import` or a model) | yes |
+| `rejected`, `auto_accepted` or `needs_review`, any `source` | no |
+
+So a reviewed model box teaches the next run; a box nobody has reviewed does not.
+
+| Rule | Value |
+|---|---|
+| Scope | all images of the project, whatever `image_ids` says |
+| What is used | the bbox only; a `polygon` or `mask` on the row is ignored |
+| Clean-up (worker) | bbox clipped to the image; no area left, or image file missing -> not an example |
+| Cap | at most **30** examples per class, evenly spaced through the class's rows in annotation id order. Fixed value, not an option. |
+| Storage | embeddings are computed at job start and kept in memory for that job. Nothing new is stored. |
+| Class with no examples | not run, no error. Listed in `result.skipped_classes`; its earlier model boxes are kept (section 1). |
+| No class left | the job finishes `done` at once with `done` = `total`; no images are run and nothing is deleted. |
+| Unreadable example image | the job becomes `failed`, like an unreadable target image |
+
+Worker order: (1) read and clean the examples; (2) call `pipeline.prepare_examples` unless no class
+has examples (`status` is `running`, `progress` stays 0 while it embeds); (3) write `result` to the
+job; (4) run the images as above, deleting earlier model boxes of the classes that ran only.
+
+`result` of an examples-mode job, readable from step 3 on:
+```json
+{"mode": "examples",
+ "examples_by_class": {"person": 30, "biax": 6},
+ "skipped_classes": [{"class_name": "sb", "reason": "no examples"},
+                     {"class_name": "rb", "reason": "no usable examples"}]}
+```
+`examples_by_class` counts the examples actually used, and only classes that ran. `reason` is
+`no examples` (nothing left after the worker's clean-up) or `no usable examples` (the detector
+rejected all of them). `skipped_classes` is `[]` when nothing was skipped.
+
+Scores: `score` is always 0..1, so `min_score` and `accept_score` work the same way in every mode.
+They are one setting per class, shared by all modes; a value tuned for one mode is not tuned for another.
+
+| Detector | Prototype | Score |
+|---|---|---|
+| `owlv2` | per class, the mean of `query_embedding` over its examples, one query per class | `sigmoid(class_predictor logit)`, as `detect_image_guided` does today. Never `post_process_image_guided_detection`: it rescales per image, so the best box becomes 1.0 even with no object. |
+| `yoloe` | per class, the mean of its example embeddings, L2-normalized, given to `set_classes(names, vpe)` | `boxes.conf` as returned; the head already applies the sigmoid. Pass `conf` = the lowest class floor, because the ultralytics default would hide low scores. |
+
+Default floor when `min_score` is NULL: 0.05, as `owlv2` and `yolo`.
+
+`yoloe` rules:
+
+| Rule | Value |
+|---|---|
+| Weights | `AUTOLABEL_YOLOE_WEIGHTS`, else `models/yoloe-26s-seg.pt` under the repo root (gitignored). File missing -> the job fails with a one-line error; it never downloads at job time. Must be a `-seg` file, not `-seg-pf`. |
+| Enabling | `AUTOLABEL_DETECTORS` contains `yoloe`, as the other real detectors |
+| Image size | 640, for example embedding and for detection |
+| Model state | `set_classes` changes the model, so each job loads a fresh model in `prepare_examples` and the instance from `get_detector` keeps no job state |
+| Example too small | prompts are rasterized on a 1/8 grid, and an empty prompt silently becomes a whole-image embedding. A box whose shorter side is under 8 px after scaling to 640 is not used. |
+| Mask to polygon | predict with `retina_masks=True`; `cv2.findContours` with `RETR_EXTERNAL`; keep the **largest part** by area (holes and other parts are dropped); simplify with `cv2.approxPolyDP`, closed, tolerance **0.001 x the image's longest side** (1.28 px at 1280); divide by width / height, round to 6 decimals |
+| Bbox | the polygon's bounding box, computed by the detector after simplifying (section 1 bbox rule) |
+| Bad polygon | fewer than 3 points or zero area -> `polygon` None, the model's own bbox is kept. `mask` is always None. |
 
 ### 10. GET /jobs/{jid}
 Response is a Job. The UI polls it every 1–2 s until `status` is `done` or `failed`.
-Every Job has `result`: `null` for `detect` and `roboflow_push`, the import summary for `import`
-(#22).
+Every Job has `result`: the import summary for `import` (#22), the examples summary for an
+examples-mode `detect` job (#9), and `null` otherwise. It stays `null` until #9 step 3.
 
 ### 11. GET /images/{iid}/annotations?status=
 Response `{"image": Image, "annotations": [Annotation, ...]}`. **Annotation**:
@@ -387,11 +470,18 @@ and documented in its notes. Owner: export.
 Replaced by #21. Nothing was built for it.
 
 ### 16. GET /models
-Response `{"models": [...]}`, which is exactly `autolabel.models.list_detectors()`. Today:
+Response `{"models": [...], "modes": {...}}`. `models` is exactly
+`autolabel.models.list_detectors()`; `modes` has one key per model, from
+`autolabel.models.detector_modes(name)`, default mode first. `[]` = the detector has no modes. Today:
 ```json
-{"models": ["fake"]}
+{"models": ["fake"], "modes": {"fake": ["text", "examples"]}}
 ```
-The UI uses it to choose the `model` for #9. The default `"pipeline"` in #9 stays; it is
+With `AUTOLABEL_DETECTORS=owlv2,yolo,yoloe`:
+```json
+{"models": ["fake", "owlv2", "yolo", "yoloe"],
+ "modes": {"fake": ["text", "examples"], "owlv2": ["text", "examples"], "yolo": [], "yoloe": ["examples"]}}
+```
+The UI uses it to choose the `model` and `mode` for #9. The default `"pipeline"` in #9 stays; it is
 rejected with 400 `unknown_model` until the real pipeline is registered. Owner: backend.
 
 ### 17. PATCH /projects/{pid}
@@ -628,6 +718,16 @@ def plan_import(root: Path) -> ImportPlan: ...
 
 ---
 
+### Examples mode: who builds what
+
+| Role | Builds |
+|---|---|
+| models | `autolabel/models/yoloe.py` (weights, `prepare_examples`, `mask_to_polygon` as a pure function); `prepare_examples` on `owlv2` and `fake`; `Example`, `ExampleRun`, `Prediction.polygon` in `base.py`; `detector_modes` and the `yoloe` registry entry; `pipeline.prepare_examples` and the `example_run` argument of `pipeline.run`. Tests with mocked models, plus one slow test running two `yoloe` jobs with different class lists in one process. `autolabel/owlv2.py` stays read-only: use `query_embedding` and `detect_image_guided` as they are. |
+| backend | `mode` in #9 (`unknown_mode`, default, `config.mode`); `modes` in #16; worker: select, clean and cap the examples, order of #9, `result`, delete limited to classes that ran, store `Prediction.polygon` in detect jobs. Text jobs keep calling `run` exactly as today. Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`, using `fake`. |
+| ui | mode choice beside the detector (from #16; hidden when a detector has fewer than 2 modes), `mode` sent in #9, a "preparing examples" state while `running` at 0, skipped classes and example counts shown from `result`, the same in the `?mock=1` layer. |
+| export | nothing: rows with `polygon` already export. |
+| integrator | this contract, `docs/fixtures/`, `requirements.txt` comment, README weights step. |
+
 ### Polygons: who builds what
 
 | Role | Builds |
@@ -656,20 +756,38 @@ class ClassSpec:
 
 @dataclass(frozen=True)
 class Prediction(Box):             # Box gives: image_id: str, category: str, bbox (x,y,w,h px), score
-    source: str = ""               # "owlv2", "owlv2_image", "gdino", "pipeline", ...
+    source: str = ""               # "owlv2", "owlv2_image", "yoloe_examples", "gdino", "pipeline", ...
     mask: dict | None = field(default=None, hash=False, compare=False)   # COCO RLE or None
+    polygon: list | None = field(default=None, hash=False, compare=False)  # [[x, y], ...] 0..1, or None
+
+@dataclass(frozen=True)
+class Example:
+    image_id: str
+    path: str                      # image on disk
+    category: str                  # class name
+    bbox: tuple                    # (x, y, w, h) px, clipped to the image, area > 0
+
+class ExampleRun(Protocol):        # one job's prototypes; built at job start, kept in memory
+    classes: list[ClassSpec]       # the classes that will run, in input order
+    used: dict[str, int]           # class name -> examples used (classes that run only)
+    unusable: list[str]            # class names the detector rejected all examples for
+    def detect(self, image: Image.Image, image_id: str) -> list[Prediction]: ...
 ```
-`mask` is left out of hashing and `==` because a dict is not hashable (a frozen dataclass
-hashes every field). Two predictions that differ only in their mask compare equal.
+`mask` and `polygon` are left out of hashing and `==` because a dict or list is not hashable (a
+frozen dataclass hashes every field). Two predictions that differ only there compare equal.
 ```python
 class Detector(Protocol):
     name: str                      # the string used in POST .../jobs "model"
     def detect(self, image: Image.Image, image_id: str,
                classes: list[ClassSpec]) -> list[Prediction]: ...
+    # only detectors with mode "examples" have this one:
+    def prepare_examples(self, classes: list[ClassSpec],
+                         examples: dict[str, list[Example]]) -> ExampleRun: ...
 
 # autolabel/models/__init__.py
 def list_detectors() -> list[str]: ...                 # e.g. ["owlv2", "gdino", "pipeline", "fake"]
 def get_detector(name: str, **options) -> Detector: ...  # loads weights lazily, once
+def detector_modes(name: str) -> list[str]: ...        # default first; [] for unknown names or no modes
 
 # autolabel/pipeline.py
 def run(images: Iterable[tuple[str, str]],            # (image_id, path on disk)
@@ -677,7 +795,13 @@ def run(images: Iterable[tuple[str, str]],            # (image_id, path on disk)
         detector: str = "pipeline",
         options: dict | None = None,
         on_progress: Callable[[int, int], None] | None = None,   # (done, total)
+        example_run: ExampleRun | None = None,                    # set: use it instead of get_detector
         ) -> Iterator[tuple[str, list[Prediction]]]: ...          # yields one image at a time
+
+def prepare_examples(detector: str,
+                     classes: list[ClassSpec],                    # classes with at least one example
+                     examples: dict[str, list[Example]],          # class name -> its examples
+                     options: dict | None = None) -> ExampleRun: ...
 
 def drop_overlapping(predictions: list[Prediction],
                      existing: list[Box],              # the image's non-rejected boxes, category = class name
@@ -691,6 +815,7 @@ Rules:
 - `category` must be one of the `ClassSpec.name` values passed in, and `image_id` must be
   the string that was passed in. The backend turns these back into `class_id` and `image.id`.
 - `score` is between 0 and 1. Detectors drop boxes below `min_score` themselves.
+- When `polygon` is set, `bbox` is its bounding box in pixels.
 - Because `Prediction` is a `Box`, the existing `evaluate`, `merge.keep_higher` and
   `thresholds` code works on it unchanged.
 - The models session also provides a `"fake"` detector. It uses no GPU and returns the same

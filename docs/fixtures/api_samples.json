@@ -284,6 +284,7 @@
   "error": null,
   "config": {
    "model": "pipeline",
+   "mode": null,
    "image_ids": null,
    "options": {}
   },
@@ -303,6 +304,7 @@
   "error": null,
   "config": {
    "model": "pipeline",
+   "mode": null,
    "image_ids": null,
    "options": {}
   },
@@ -322,6 +324,7 @@
   "error": null,
   "config": {
    "model": "pipeline",
+   "mode": null,
    "image_ids": null,
    "options": {}
   },
@@ -341,6 +344,7 @@
   "error": "CUDA out of memory while loading owlv2",
   "config": {
    "model": "pipeline",
+   "mode": null,
    "image_ids": null,
    "options": {}
   },
@@ -694,7 +698,49 @@
  "GET /api/models": {
   "models": [
    "fake"
-  ]
+  ],
+  "modes": {
+   "fake": [
+    "text",
+    "examples"
+   ]
+  }
+ },
+ "GET /api/jobs/10 (detect, examples)": {
+  "id": 10,
+  "project_id": 1,
+  "kind": "detect",
+  "status": "done",
+  "progress": 1.0,
+  "done": 3,
+  "total": 3,
+  "error": null,
+  "config": {
+   "model": "yoloe",
+   "mode": "examples",
+   "image_ids": null,
+   "options": {}
+  },
+  "result": {
+   "mode": "examples",
+   "examples_by_class": {
+    "person": 30,
+    "biax": 6
+   },
+   "skipped_classes": [
+    {
+     "class_name": "sb",
+     "reason": "no examples"
+    },
+    {
+     "class_name": "rb",
+     "reason": "no usable examples"
+    }
+   ]
+  },
+  "created_at": "2026-10-30T14:02:00Z",
+  "started_at": "2026-10-30T14:02:00Z",
+  "finished_at": "2026-10-30T14:03:00Z"
  },
  "error example (404)": {
   "error": {

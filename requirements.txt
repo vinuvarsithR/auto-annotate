@@ -13,6 +13,7 @@ pillow               # opens images
 pyyaml               # reads classes.yaml
 
 # Models: YOLO detector (autolabel/models/yolo.py, only imported when AUTOLABEL_DETECTORS has yolo)
+# Also used by "yoloe" (autolabel/models/yoloe.py), same opt-in. It brings opencv-python, which yoloe uses.
 # AGPL-3.0. Verified 2026-11-03 on Python 3.14.0; did not change torch/torchvision (models CR 2)
 ultralytics==8.4.199
 
