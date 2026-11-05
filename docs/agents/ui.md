@@ -142,6 +142,15 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   a GUESS: the test tool drops Ctrl on scroll, so those used dispatched wheel events. Width checks
   used iframes of exact widths, not real Chrome zoom.
 
+- 2026-11-05 Examples mode (branch `ui`, contract "Examples mode: who builds what"): Run step has a
+  Mode choice from #16 (hidden under 2 modes; a single mode is still sent, no modes sends null); #9
+  sends `mode`; job text and step 4 show "preparing examples" while running at 0 with `result` null;
+  example counts and skipped classes shown from `result`; a job where no class had examples says
+  nothing was run. Mock: #16 modes, unknown_mode, config.mode, the example rule, cap 30, a 2-poll
+  preparing state, `result`, delete limited to classes that ran; mock detect now keeps `import` boxes
+  (section 1). VERIFIED on ?mock=1 (Node + Chrome). PENDING: real-backend checks, until backend and
+  models are on main. "no usable examples" is only checked from fixture job 10: fake rejects nothing.
+
 ## Polygon spec (from the integrator, user decisions 2026-11-04)
 
 Build against docs/CONTRACT.md #11-#14. Polygons are normalized 0..1; the server computes the bbox.

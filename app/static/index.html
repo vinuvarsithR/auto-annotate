@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-05.5";
+  window.ASSET_VERSION = "2026-11-05.6";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -134,6 +134,7 @@
       <h2>Run detection</h2>
       <div class="row run-row">
         <label class="field">Model <select id="modelSelect"></select></label>
+        <label class="field" id="modeField" hidden>Mode <select id="modeSelect"></select></label>
         <button id="runBtn" type="button" class="primary">Run on all images</button>
         <button id="openReviewBtn" type="button" class="primary go" hidden>Open in review &rarr;</button>
       </div>
@@ -142,6 +143,7 @@
         <div class="bar"><div id="jobBar"></div></div>
         <div id="jobText" class="muted num-tab"></div>
       </div>
+      <div id="jobResult" class="import-result" hidden></div>
     </section>
 
     <div class="step-nav">

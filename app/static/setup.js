@@ -8,6 +8,8 @@
 const UPLOAD_BATCH = 10;   // files per POST, so one bad file does not lose a big upload
 const POLL_MS = 1500;      // job status poll interval
 const MAX_TILES = 120;     // upload thumbnails shown per upload (the rest are counted)
+const MODE_LABELS = { text: "Text prompts", examples: "Examples (your boxes)" };
+const NOTHING_RAN = "no class has examples, so nothing was run. Draw or accept some boxes first.";
 
 const setup = {
   project: null,       // Project from the last "project-opened" event
@@ -15,6 +17,8 @@ const setup = {
   uploading: false,
   jobId: null,         // job being polled
   lastJob: null,       // last Job seen for this project (step 4 summary)
+  modes: {},           // detector name -> its modes (#16), default first
+  resultJob: null,     // id of the job whose result is on screen
   savedClasses: 0,     // classes saved on the server for this project
   step: 1,             // step on screen (1-4)
   tileUrls: [],        // object URLs of upload thumbnails (revoked on the next upload)
@@ -27,6 +31,7 @@ function onProjectOpened(p) {
   setup.project = p;
   if (changed) {
     setup.lastJob = null;
+    clearJobResult();
     clearTiles();
     if (!imp.sending && !imp.jobId) { setImportParts([], ""); $("importBox").hidden = true; $("importResult").hidden = true; }
   }
@@ -66,7 +71,8 @@ function stepDone(n) {
   if (n === 3) return setup.savedClasses > 0 && !setup.dirty;
   const boxes = ["auto_accepted", "needs_review", "accepted", "rejected", "edited"]
     .reduce((t, k) => t + (p.counts[k] || 0), 0);
-  return (setup.lastJob && setup.lastJob.status === "done") || boxes > 0;
+  const j = setup.lastJob;
+  return (!!j && j.status === "done" && !nothingRan(j)) || boxes > 0;
 }
 
 function showStep(n) {
@@ -93,7 +99,8 @@ function renderStepper() {
   $("sum3").classList.toggle("warn", !!p && setup.dirty);
   const j = setup.lastJob;
   $("sum4").textContent = !p ? "-" : !j ? (stepDone(4) ? "Has boxes" : "Not run yet") :
-    j.status === "done" ? "Done" : j.status === "failed" ? "Failed" : `${j.done} / ${j.total}`;
+    nothingRan(j) ? "Nothing run" : j.status === "done" ? "Done" : j.status === "failed" ? "Failed" :
+    preparingExamples(j) ? "Preparing" : `${j.done} / ${j.total}`;
   $("stepBack").hidden = setup.step === 1;
   $("stepNext").hidden = setup.step === 4;
   $("stepNext").textContent = STEP_NEXT[setup.step] || "Next";
@@ -558,7 +565,26 @@ async function loadModels() {
   const note = $("modelNote");
   note.hidden = !(data && data.fallback);
   note.textContent = "Model list not available from the server (endpoint 16 missing); showing defaults.";
+  setup.modes = (data && data.modes) || {};
+  renderModes();
   updateButtons();
+}
+
+// The mode choice of the selected detector. With fewer than 2 modes there is nothing to choose,
+// so it is hidden; a single mode stays in the select and is still sent.
+function renderModes() {
+  const sel = $("modeSelect");
+  const keep = sel.value;
+  const modes = setup.modes[$("modelSelect").value] || [];
+  sel.innerHTML = "";
+  for (const m of modes) {
+    const o = document.createElement("option");
+    o.value = m;
+    o.textContent = MODE_LABELS[m] || m;
+    sel.appendChild(o);
+  }
+  if (modes.includes(keep)) sel.value = keep;
+  $("modeField").hidden = modes.length < 2;
 }
 
 async function runDetection() {
@@ -566,8 +592,10 @@ async function runDetection() {
   const model = $("modelSelect").value;
   if (!pid || !model || setup.jobId) return;
   if (setup.dirty) { showBanner("Save the class list first (it has unsaved changes)."); return; }
-  const job = await guard(() => api.startJob(pid, { model, image_ids: null, options: {} }));
+  const mode = $("modeSelect").value || null;
+  const job = await guard(() => api.startJob(pid, { model, mode, image_ids: null, options: {} }));
   if (!job) return;
+  clearJobResult();
   setup.jobId = job.id;
   $("jobBox").hidden = false;
   renderJob(job);
@@ -575,12 +603,50 @@ async function runDetection() {
   pollJob(job.id, 0);
 }
 
+// Worker step 2 of #9: running at 0, and result is only written once the embedding is finished.
+function preparingExamples(job) {
+  return job.status === "running" && job.config.mode === "examples" && !job.progress && !job.result;
+}
+
+// An examples job where no class had examples ends "done" without running any image.
+function nothingRan(job) {
+  return job.status === "done" && !!job.result && job.result.mode === "examples" &&
+    !Object.keys(job.result.examples_by_class || {}).length;
+}
+
 function renderJob(job) {
-  if (setup.project && job.project_id === setup.project.id) { setup.lastJob = job; renderStepper(); }
-  const text = `Job ${job.id} (${job.config.model}): ${job.status}, ${job.done} / ${job.total} images` +
-               (job.error ? ` - ${job.error}` : "");
+  const mine = !!setup.project && job.project_id === setup.project.id;
+  if (mine) { setup.lastJob = job; renderStepper(); }
+  const c = job.config;
+  const head = `Job ${job.id} (${c.mode ? `${c.model}, ${c.mode}` : c.model})`;
+  const text = preparingExamples(job) ? `${head}: preparing examples...` :
+    nothingRan(job) ? `${head}: done, ${NOTHING_RAN}` :
+    `${head}: ${job.status}, ${job.done} / ${job.total} images` + (job.error ? ` - ${job.error}` : "");
   setBar("jobBar", "jobText", job.status === "done" ? 1 : job.progress, text);
   $("jobBar").classList.toggle("failed", job.status === "failed");
+  if (mine && job.result && job.result.mode === "examples" && setup.resultJob !== job.id) {
+    setup.resultJob = job.id;
+    renderExamplesResult(job.result);
+  }
+}
+
+// Example counts and skipped classes, once: result never changes after #9 step 3.
+function renderExamplesResult(r) {
+  const box = $("jobResult");
+  box.innerHTML = "";
+  box.hidden = false;
+  const used = Object.entries(r.examples_by_class || {});
+  const skipped = r.skipped_classes || [];
+  if (used.length) box.appendChild(numTable(["Class", "Examples used"], used));
+  if (skipped.length) {
+    box.appendChild(numTable(["Skipped class", "Why"], skipped.map((s) => [s.class_name, s.reason])));
+  }
+}
+
+function clearJobResult() {
+  setup.resultJob = null;
+  $("jobResult").innerHTML = "";
+  $("jobResult").hidden = true;
 }
 
 async function pollJob(jid, errors) {
@@ -606,6 +672,7 @@ async function pollJob(jid, errors) {
   setup.jobId = null;
   updateButtons();
   if (job.status === "failed") showBanner(`Job ${jid} failed: ${job.error || "no message"}`);
+  else if (nothingRan(job)) showBanner(`Job ${jid}: ${NOTHING_RAN}`, "info");
   else showBanner(`Job ${jid} done: ${job.total} image(s) processed.`, "info");
   if (job.project_id === state.projectId) await openProject(job.project_id); // refresh image list
 }
@@ -689,6 +756,7 @@ $("stepNext").addEventListener("click", () => showStep(Math.min(4, setup.step + 
 $("addClassBtn").addEventListener("click", () => { addClassRow().querySelector(".c-name").focus(); setDirty(true); });
 $("saveClassesBtn").addEventListener("click", saveClasses);
 $("classTable").addEventListener("input", () => setDirty(true));
+$("modelSelect").addEventListener("change", renderModes);
 $("runBtn").addEventListener("click", runDetection);
 $("openReviewBtn").addEventListener("click", () => showScreen("review"));
 document.addEventListener("project-opened", (e) => onProjectOpened(e.detail));
