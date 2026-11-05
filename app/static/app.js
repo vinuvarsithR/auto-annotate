@@ -42,10 +42,18 @@ const canvas = new BoxCanvas($("canvas"), {
     select(ann ? ann.id : null, false);
   },
   onBoxChanged: (ann, bbox) => {
-    if (ann.id === PENDING) { state.pending.bbox = bbox; canvas.render(); return; }
+    if (ann.id === PENDING) {
+      const p = state.pending;
+      if (p.polygon) setPendingPolygon(scalePolygon(p.polygon, p.bbox, bbox, canvas.imgW, canvas.imgH));
+      else { p.bbox = bbox; canvas.render(); }
+      return;
+    }
     editBox(ann, { bbox }, "move box");
   },
   onBoxDrawn: (bbox) => startPending(bbox),
+  onPolygonStart: () => startPolygon(),
+  onPolygonDrawn: (polygon) => finishPolygon(polygon),
+  onPolygonChanged: (ann, polygon, label) => changePolygon(ann, polygon, label),
   onView: (zoom, scale) => renderZoom(zoom, scale),
   onRender: () => positionPopup(),
 });
@@ -119,7 +127,7 @@ function showScreen(name) {
   // The project picker and review progress belong to Setup / Review; Projects lists them all.
   $("projectField").hidden = name === "projects";
   $("progress").style.visibility = name === "review" ? "visible" : "hidden";
-  if (name !== "review") { canvas.setTempDraw(false); canvas.setHideAll(false); closeAdjust(); }
+  if (name !== "review") { canvas.setTempDraw(false); canvas.setHideAll(false); canvas.cancelPolygon(); closeAdjust(); }
   document.dispatchEvent(new CustomEvent("screen-shown", { detail: name }));
 }
 
@@ -465,9 +473,13 @@ async function patch(ann, body) {
   return updated;
 }
 
-const snapOf = (a) => ({ status: a.status, bbox: a.bbox.slice(), class_id: a.class_id });
+const clonePolygon = (poly) => (poly ? poly.map((p) => p.slice()) : null);
+const snapOf = (a) => ({ status: a.status, bbox: a.bbox.slice(), class_id: a.class_id, polygon: clonePolygon(a.polygon) });
 const sameBbox = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 0.05);
-const sameSnap = (a, b) => a.status === b.status && a.class_id === b.class_id && sameBbox(a.bbox, b.bbox);
+const samePolygon = (a, b) => (!a || !b ? !a && !b : a.length === b.length &&
+  a.every((p, i) => Math.abs(p[0] - b[i][0]) < 1e-7 && Math.abs(p[1] - b[i][1]) < 1e-7));
+const sameSnap = (a, b) => a.status === b.status && a.class_id === b.class_id && sameBbox(a.bbox, b.bbox) &&
+  samePolygon(a.polygon, b.polygon);
 
 // A PATCH that can be undone.
 async function editBox(ann, body, label) {
@@ -554,13 +566,13 @@ async function deleteBox() {
 
 // ---- new boxes: drawing makes an unsaved box and opens the popup on it; Save (Enter) POSTs it,
 // Esc drops it.
-function startPending(bbox) {
+function startPending(bbox, polygon = null) {
   if (!state.image) return;
   const cls = newBoxClass();
   if (!cls) { showBanner("This project has no classes yet. Add them in Setup.", "error"); return; }
   state.pending = {
     id: PENDING, image_id: state.image.id, class_id: cls.id, class_name: cls.name, bbox,
-    mask: null, score: null, source: "human", status: "accepted", reviewer: null,
+    mask: null, polygon, score: null, source: "human", status: "accepted", reviewer: null,
   };
   syncCanvas();
   pop.forId = null; // a fresh popup, even if another unsaved box was open
@@ -579,6 +591,61 @@ function dropPending() {
   renderPopup();
 }
 
+// ---- polygons
+// What stops this polygon being kept (too few points, no area, smaller than a box may be), or null.
+function polygonProblem(polygon) {
+  const err = polygonError(polygon);
+  if (err) return err[0].toUpperCase() + err.slice(1) + ".";
+  const b = polygonBbox(polygon, canvas.imgW, canvas.imgH);
+  return b[2] < MIN_SIZE || b[3] < MIN_SIZE ? "This polygon is too small to keep." : null;
+}
+
+// The first click of a new polygon. Whatever was open closes, so the keys act on the drawing.
+function startPolygon() {
+  if (!state.image) return false;
+  if (!newBoxClass()) { showBanner("This project has no classes yet. Add them in Setup.", "error"); return false; }
+  dropPending();
+  select(null);
+  return true;
+}
+
+// The shape was closed: same class choice as a new box. False keeps the drawing open.
+function finishPolygon(polygon) {
+  const problem = polygonProblem(polygon);
+  if (problem) { showBanner(problem, "info"); return false; }
+  startPending(polygonBbox(polygon, canvas.imgW, canvas.imgH), polygon);
+  return true;
+}
+
+function setPendingPolygon(polygon) {
+  state.pending.polygon = polygon;
+  state.pending.bbox = polygonBbox(polygon, canvas.imgW, canvas.imgH);
+  canvas.render();
+}
+
+// A point was moved, added or deleted: #13 with the whole polygon (one undo step).
+async function changePolygon(ann, polygon, label) {
+  const problem = polygonProblem(polygon);
+  if (problem) { canvas.clearVertex(); showBanner(problem, "info"); return; }
+  if (ann.id === PENDING) { setPendingPolygon(polygon); return; }
+  const updated = await editBox(ann, { polygon }, label);
+  if (!updated) canvas.clearVertex();
+}
+
+async function deleteVertex() {
+  const a = selectedAnn();
+  const i = canvas.selVertex();
+  if (a.polygon.length <= 3) { showBanner("A polygon needs at least 3 points, so this one stays.", "info"); return; }
+  canvas.clearVertex();
+  await changePolygon(a, a.polygon.filter((_, k) => k !== i), "delete point of");
+}
+
+// Body of a #12 POST: a polygon goes without a bbox (the server computes it).
+function boxBody(classId, bbox, polygon) {
+  return polygon ? { class_id: classId, polygon, mask: null, reviewer: reviewer() }
+                 : { class_id: classId, bbox, mask: null, reviewer: reviewer() };
+}
+
 const EMPTY_MSG = "Image is marked empty - press N to unmark it first.";
 
 // POST #12. On an image marked empty the server answers 409: say how to fix it.
@@ -595,7 +662,7 @@ async function postBox(iid, body) {
 async function savePending(cls) {
   const p = state.pending;
   const iid = p.image_id;
-  const created = await postBox(iid, { class_id: cls.id, bbox: p.bbox, mask: null, reviewer: reviewer() });
+  const created = await postBox(iid, boxBody(cls.id, p.bbox, p.polygon));
   if (!created && state.pending === p) { dropPending(); return null; } // nothing saved: remove the unsaved box
   if (!created || !state.image || state.image.id !== iid || state.pending !== p) return null;
   state.pending = null;
@@ -644,7 +711,7 @@ function renderPopup() {
   }
   if (a.id === PENDING) {
     $("bpStatus").className = "status-line st-needs_review";
-    $("bpStatus").textContent = "New box, not saved";
+    $("bpStatus").textContent = a.polygon ? "New polygon, not saved" : "New box, not saved";
     $("bpMeta").textContent = "";
   } else {
     $("bpStatus").className = `status-line st-${a.status}`;
@@ -749,11 +816,11 @@ function cancelPopup() {
 function popupOpen() { return !$("boxPop").hidden && pop.forId != null; }
 
 // ------------------------------------------------------------ copy / paste, repeat previous
-// POST boxes ({class_id, bbox}) onto image img as human boxes, one by one; one undo step.
+// POST boxes ({class_id, bbox, polygon}) onto image img as human boxes, one by one; one undo step.
 async function createBoxes(img, boxes, label) {
   const created = [];
   for (const t of boxes) {
-    const c = await postBox(img.id, { ...t, mask: null, reviewer: reviewer() });
+    const c = await postBox(img.id, boxBody(t.class_id, t.bbox, t.polygon));
     if (!c) break;
     created.push(c);
     if (state.image === img) state.anns.push(c);
@@ -778,7 +845,7 @@ function copyBox() {
   const a = selectedAnn();
   if (!a || a.id === PENDING || !state.image) return false;
   state.clipboard = { width: state.image.width, height: state.image.height,
-                      boxes: [{ class_id: a.class_id, bbox: a.bbox.slice() }] };
+                      boxes: [{ class_id: a.class_id, bbox: a.bbox.slice(), polygon: clonePolygon(a.polygon) }] };
   showBanner(`Copied box #${a.id} (${a.class_name}). Ctrl+V pastes it on any image.`, "info");
   return true;
 }
@@ -788,7 +855,7 @@ async function pasteBoxes() {
   if (!cb) { showBanner("Nothing copied yet. Select a box and press Ctrl+C.", "info"); return; }
   if (!state.image || state.busy) return;
   const boxes = cb.boxes.filter((b) => classById(b.class_id))
-    .map((b) => ({ class_id: b.class_id, bbox: scaleBox(b.bbox, cb.width, cb.height) }))
+    .map((b) => ({ ...b, bbox: scaleBox(b.bbox, cb.width, cb.height) })) // a polygon is normalized: no scaling
     .filter((b) => b.bbox[2] >= MIN_SIZE && b.bbox[3] >= MIN_SIZE);
   if (!boxes.length) { showBanner("The copied box does not fit this image.", "info"); return; }
   dropPending();
@@ -833,7 +900,7 @@ async function repeatPrevious() {
       const b = scaleBox(a.bbox, data.image.width, data.image.height);
       if (b[2] < MIN_SIZE || b[3] < MIN_SIZE) { skipped++; continue; }
       const dup = existing.concat(todo).some((e) => e.class_id === a.class_id && iou(e.bbox, b) >= COPY_IOU);
-      if (dup) skipped++; else todo.push({ class_id: a.class_id, bbox: b });
+      if (dup) skipped++; else todo.push({ class_id: a.class_id, bbox: b, polygon: clonePolygon(a.polygon) });
     }
     const created = await createBoxes(img, todo, "repeat");
     if (state.image !== img) return;
@@ -879,7 +946,7 @@ function remapId(oldId, newAnn) {
 async function recreate(snap) {
   const who = snap.reviewer || reviewer();
   const c = await guard(() => api.createAnnotation(snap.image_id,
-    { class_id: snap.class_id, bbox: snap.bbox, mask: snap.mask || null, reviewer: who }));
+    { ...boxBody(snap.class_id, snap.bbox, snap.polygon), mask: snap.mask || null, reviewer: who }));
   if (!c) return null;
   if (c.status === snap.status) return c;
   const u = await guard(() => api.patchAnnotation(c.id, { status: snap.status, reviewer: who }));
@@ -893,7 +960,9 @@ async function applyOp(op, dir) {
     const target = dir === "undo" ? op.before : op.after;
     const other = dir === "undo" ? op.after : op.before;
     const body = { status: target.status, reviewer: reviewer() };
-    if (!sameBbox(target.bbox, other.bbox)) body.bbox = target.bbox;
+    // The old polygon itself, not a bbox: scaling back could leave a rounding error.
+    if (!samePolygon(target.polygon, other.polygon)) body.polygon = target.polygon;
+    if (!target.polygon && !sameBbox(target.bbox, other.bbox)) body.bbox = target.bbox;
     if (target.class_id !== other.class_id) body.class_id = target.class_id;
     let u;
     try { u = await api.patchAnnotation(op.aid, body); }
@@ -931,6 +1000,7 @@ async function applyOp(op, dir) {
 async function runHistory(dir) {
   if (state.busy || !state.image) return;
   dropPending();
+  canvas.clearVertex(); // the points may change; an index would point at the wrong one
   const from = dir === "undo" ? undoLog.undo : undoLog.redo;
   const to = dir === "undo" ? undoLog.redo : undoLog.undo;
   const op = from.pop();
@@ -953,12 +1023,15 @@ async function runHistory(dir) {
 
 // ------------------------------------------------------------ tools
 // Drag: click selects, drag moves / resizes, Ctrl+drag draws. Box: every drag draws a box.
+// Polygon: every click adds a point.
 function setTool(tool) {
   state.tool = tool;
   syncDrawColor();
   canvas.setDrawMode(tool === "box");
+  canvas.setPolyMode(tool === "polygon");
   $("toolDrag").setAttribute("aria-pressed", String(tool === "drag"));
   $("toolBox").setAttribute("aria-pressed", String(tool === "box"));
+  $("toolPolygon").setAttribute("aria-pressed", String(tool === "polygon"));
 }
 
 // Image review status via #20. N toggles "empty", Ctrl+Enter toggles "done"; pressing again
@@ -1077,6 +1150,7 @@ $("stripToggle").addEventListener("click", () => setStripOpen($("strip").classLi
 $("labelsBtn").addEventListener("click", () => setLabelsOpen($("labelsPanel").hidden));
 $("toolDrag").addEventListener("click", () => setTool("drag"));
 $("toolBox").addEventListener("click", () => setTool("box"));
+$("toolPolygon").addEventListener("click", () => setTool("polygon"));
 $("undoBtn").addEventListener("click", () => runHistory("undo"));
 $("redoBtn").addEventListener("click", () => runHistory("redo"));
 $("repeatBtn").addEventListener("click", repeatPrevious);
@@ -1138,6 +1212,13 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     return;
   }
+  if (canvas.polyDraft && !e.altKey && ["Enter", "Backspace", "Escape"].includes(k)) {
+    e.preventDefault();
+    if (k === "Enter") canvas.closeDraft();
+    else if (k === "Backspace") canvas.removeDraftPoint();
+    else canvas.cancelPolygon();
+    return;
+  }
   if (tag === "select" && !["Tab", "Escape"].includes(k)) return;
   if (e.altKey || e.metaKey) return;
   const onButton = tag === "button";
@@ -1145,7 +1226,7 @@ document.addEventListener("keydown", (e) => {
   if (k === "a" || k === "A") setStatus("accepted");
   else if (k === "r" || k === "R") setStatus("rejected");
   else if (k === "u" || k === "U") unreview();
-  else if (k === "Delete" || k === "Backspace") deleteBox();
+  else if (k === "Delete" || k === "Backspace") { if (canvas.selVertex() != null) deleteVertex(); else deleteBox(); }
   else if (k === "Tab") cycleBox(e.shiftKey ? -1 : 1);
   else if (k === "ArrowRight") stepImage(1);
   else if (k === "ArrowLeft") stepImage(-1);
@@ -1153,6 +1234,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "Enter" && popupOpen() && !onButton) savePopup();
   else if (k === "d" || k === "D") setTool("drag");
   else if (k === "b" || k === "B") setTool("box");
+  else if (k === "g" || k === "G") setTool("polygon");
   else if (k === "n" || k === "N") toggleReview("empty");
   else if (k === "p" || k === "P") repeatPrevious();
   else if (k === "+" || k === "=") canvas.zoomAt(1.25);
@@ -1162,8 +1244,9 @@ document.addEventListener("keydown", (e) => {
   else if (k === "Escape") {
     if (!$("adjustPop").hidden) closeAdjust();
     else if (canvas.cancelDraw()) { /* dropped the box being dragged out */ }
+    else if (canvas.selVertex() != null) canvas.clearVertex();
     else if (popupOpen()) cancelPopup();
-    else if (state.tool === "box") setTool("drag");
+    else if (state.tool !== "drag") setTool("drag");
     else select(null);
   }
   else if (k === "?") openHelp();

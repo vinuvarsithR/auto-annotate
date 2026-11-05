@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-03.1";
+  window.ASSET_VERSION = "2026-11-05.1";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -221,6 +221,9 @@
     <button id="toolBox" type="button" class="icon tool tip tip-left" data-tip="Box (B)" aria-label="Box (B)" aria-pressed="false">
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2.2 1.6"/><path d="M1.5 3h3M3 1.5v3M11.5 13h3M13 11.5v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
     </button>
+    <button id="toolPolygon" type="button" class="icon tool tip tip-left" data-tip="Polygon (G)" aria-label="Polygon (G)" aria-pressed="false">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 5.5 8.5 2.5l5 4-2 6.5H4.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><g fill="currentColor"><circle cx="3" cy="5.5" r="1.3"/><circle cx="8.5" cy="2.5" r="1.3"/><circle cx="13.5" cy="6.5" r="1.3"/><circle cx="11.5" cy="13" r="1.3"/><circle cx="4.5" cy="13" r="1.3"/></g></svg>
+    </button>
     <span class="tool-sep" aria-hidden="true"></span>
     <button id="repeatBtn" type="button" class="icon tool tip tip-left" data-tip="Repeat previous (P)" aria-label="Repeat previous (P)">
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 10.5V3.5a1 1 0 0 1 1-1h7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
@@ -288,6 +291,12 @@
     <div><dt><kbd>D</kbd></dt><dd>Drag / select tool</dd></div>
     <div><dt><kbd>B</kbd></dt><dd>Box tool: drag on the image to draw a box</dd></div>
     <div><dt>Hold <kbd>Ctrl</kbd> + drag</dt><dd>Draw a box while in the drag tool</dd></div>
+    <div><dt><kbd>G</kbd></dt><dd>Polygon tool: each click adds a point</dd></div>
+    <div><dt><kbd>Enter</kbd> or click the first point</dt><dd>Polygon tool: close the shape (at least 3 points)</dd></div>
+    <div><dt><kbd>Backspace</kbd></dt><dd>Polygon tool: remove the last point</dd></div>
+    <div><dt>Drag a polygon point</dt><dd>Move that point (polygon selected)</dd></div>
+    <div><dt>Click a polygon edge</dt><dd>Add a point there; keep the button down to drag it (polygon selected)</dd></div>
+    <div><dt>Click a polygon point, then <kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete that point (a polygon keeps at least 3)</dd></div>
     <div><dt><kbd>P</kbd></dt><dd>Repeat previous: copy the kept boxes of the image you had open before</dd></div>
     <div><dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo (this image)</dd></div>
     <div><dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Redo</dd></div>
@@ -299,7 +308,7 @@
     <div><dt><kbd>Del</kbd> or <kbd>Backspace</kbd></dt><dd>Delete selected box (model boxes are rejected, so they still count for precision)</dd></div>
     <div><dt><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>Select next / previous box</dd></div>
     <div><dt><kbd>Enter</kbd></dt><dd>Box popup: save</dd></div>
-    <div><dt><kbd>Esc</kbd></dt><dd>Box popup: cancel (a new, unsaved box is removed); else leave the box tool / deselect</dd></div>
+    <div><dt><kbd>Esc</kbd></dt><dd>Cancel the polygon being drawn; box popup: cancel (a new, unsaved box is removed); else leave the box or polygon tool / deselect</dd></div>
     <div><dt><kbd>&uarr;</kbd> / <kbd>&darr;</kbd></dt><dd>Box popup: previous / next class</dd></div>
     <div><dt><kbd>&larr;</kbd> / <kbd>&rarr;</kbd></dt><dd>Previous / next image</dd></div>
     <div><dt><kbd>+</kbd> / <kbd>-</kbd></dt><dd>Zoom in / out</dd></div>
