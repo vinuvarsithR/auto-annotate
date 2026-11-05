@@ -326,12 +326,18 @@ A detector learns from the project's own boxes, with no training. Detectors and 
 
 Which boxes are examples:
 
-| Box status | Example? |
-|---|---|
-| `accepted` or `edited`, any `source` (`human`, `import` or a model) | yes |
-| `rejected`, `auto_accepted` or `needs_review`, any `source` | no |
+A box is an example when (`source` is `human` AND `status` is not `rejected`) OR `status` is
+`accepted` or `edited`.
 
-So a reviewed model box teaches the next run; a box nobody has reviewed does not.
+| Box | Example? |
+|---|---|
+| `source` `human`, any status except `rejected` | yes |
+| any other `source` (`import` or a model), status `accepted` or `edited` | yes |
+| any other `source`, status `auto_accepted` or `needs_review` | no |
+| `rejected`, any `source` | no |
+
+So a hand-drawn box always teaches unless it was rejected, and a reviewed model or imported box
+teaches the next run; an unreviewed model or imported box does not.
 
 | Rule | Value |
 |---|---|
@@ -378,8 +384,8 @@ Default floor when `min_score` is NULL: 0.05, as `owlv2` and `yolo`.
 | Image size | 640, for example embedding and for detection |
 | Model state | `set_classes` changes the model, so each job loads a fresh model in `prepare_examples` and the instance from `get_detector` keeps no job state |
 | Example too small | prompts are rasterized on a 1/8 grid, and an empty prompt silently becomes a whole-image embedding. A box whose shorter side is under 8 px after scaling to 640 is not used. |
-| Mask to polygon | predict with `retina_masks=True`; `cv2.findContours` with `RETR_EXTERNAL`; keep the **largest part** by area (holes and other parts are dropped); simplify with `cv2.approxPolyDP`, closed, tolerance **0.001 x the image's longest side** (1.28 px at 1280); divide by width / height, round to 6 decimals |
-| Bbox | the polygon's bounding box, computed by the detector after simplifying (section 1 bbox rule) |
+| Mask to polygon | predict with `retina_masks=True`; `cv2.findContours` with `RETR_EXTERNAL` gives the parts, and holes are dropped. A part's area is `cv2.contourArea`. **One part:** use it. **Several parts:** use the largest only if it holds **>= 90%** of the summed area of all parts; otherwise `polygon` None and the model's own bbox is kept (long beams often split, and the largest piece would shrink the box). Then simplify with `cv2.approxPolyDP`, closed, tolerance **0.001 x the image's longest side** (1.28 px at 1280); divide by width / height, round to 6 decimals |
+| Bbox | with a polygon: its bounding box, computed by the detector after simplifying (section 1 bbox rule). Without one: the model's own bbox. |
 | Bad polygon | fewer than 3 points or zero area -> `polygon` None, the model's own bbox is kept. `mask` is always None. |
 
 ### 10. GET /jobs/{jid}
