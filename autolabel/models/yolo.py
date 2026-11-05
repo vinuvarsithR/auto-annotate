@@ -65,6 +65,19 @@ def _as_list(x) -> list:
     return x.tolist() if hasattr(x, "tolist") else list(x)
 
 
+def disable_autoinstall() -> None:
+    """Never pip-install during a job.
+
+    ultralytics patches PIL.Image.open: after that, any file Pillow cannot identify runs
+    `pip install pi-heif` in the live environment (VERIFIED 2026-11-05, 8.4.199). The env variable
+    is read once at import, so also set the flag, in case ultralytics was imported earlier.
+    """
+    os.environ["YOLO_AUTOINSTALL"] = "false"
+    from ultralytics.utils import checks
+
+    checks.AUTOINSTALL = False
+
+
 class YoloDetector:
     name = "yolo"
 
@@ -82,6 +95,7 @@ class YoloDetector:
             # A bare name like "yolo11n.pt" may be downloaded by ultralytics; a path must exist.
             if not os.path.isfile(weights) and ("/" in weights or "\\" in weights):
                 raise ValueError(f"yolo weights not found: {weights}")
+            disable_autoinstall()
             from ultralytics import YOLO
             model = YOLO(weights)
         self.model = model

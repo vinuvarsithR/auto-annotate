@@ -106,11 +106,9 @@ Real check on the spike's 40 frames (VERIFIED, CPU, thresholds tuned on those fr
 7. **Weights (integrator / README):** `D:\autoannotate\weights\yoloe-26s-seg.pt` does not exist yet. Tests
    and the real check used the spike's copy through `AUTOLABEL_YOLOE_WEIGHTS`.
 
-8. **`yolo.py` has the same pip-install risk (OK needed, not changed):** once ultralytics is imported, a file
-   Pillow cannot identify runs `pip install pi-heif` in the live environment. `yoloe.py` turns this off
-   (`disable_autoinstall`), which applies to the whole process but only once a yoloe job has started. Proposal:
-   call it in `YoloDetector.__init__` too. Also: the full run on 2026-11-05 installed `pi_heif==1.4.0` in the
-   shared .venv this way; removing it is the user's decision.
+8. **Done 2026-11-05:** once ultralytics is imported, a file Pillow cannot identify runs `pip install pi-heif`
+   in the live environment. `yolo.disable_autoinstall()` turns this off before `yolo` or `yoloe` load a model.
+   The `pi_heif` a test run put in the shared .venv was removed the same day.
 
 ## Open questions
 - Should `get_detector` key its cache on `(name, options)` instead of `name` only? With real models, two jobs with

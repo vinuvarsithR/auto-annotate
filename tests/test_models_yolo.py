@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import numpy as np
@@ -200,6 +201,39 @@ def test_pipeline_run_with_yolo(monkeypatch, tmp_path):
     results = list(pipeline.run([("7", str(path))], CLASSES, detector="yolo",
                                 options={"model": m}))
     assert results == [("7", [Prediction("7", "sb", (1.0, 1.0, 10.0, 10.0), 0.6, source="yolo")])]
+
+
+def fake_ultralytics(monkeypatch):
+    """Fake ultralytics modules; YOLO() records the AUTOINSTALL flag it was loaded under."""
+    checks = types.SimpleNamespace(AUTOINSTALL=True)
+    seen = []
+
+    class FakeYOLO:
+        names = {0: "person"}
+
+        def __init__(self, weights):
+            seen.append(checks.AUTOINSTALL)
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=FakeYOLO))
+    monkeypatch.setitem(sys.modules, "ultralytics.utils", types.SimpleNamespace(checks=checks))
+    return checks, seen
+
+
+def test_loading_weights_turns_pip_install_off_first(monkeypatch, tmp_path):
+    checks, seen = fake_ultralytics(monkeypatch)
+    monkeypatch.setenv("YOLO_AUTOINSTALL", "true")
+    weights = tmp_path / "w.pt"
+    weights.touch()
+    YoloDetector(weights=str(weights))
+    assert seen == [False]                                   # off before the model loads
+    assert checks.AUTOINSTALL is False
+    assert os.environ["YOLO_AUTOINSTALL"] == "false"
+
+
+def test_an_injected_model_does_not_touch_ultralytics(monkeypatch):
+    checks, _ = fake_ultralytics(monkeypatch)
+    YoloDetector(model=types.SimpleNamespace(names={0: "person"}), imgsz=640)
+    assert checks.AUTOINSTALL is True
 
 
 def test_importing_yolo_module_does_not_load_torch():

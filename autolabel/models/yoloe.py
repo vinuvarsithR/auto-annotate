@@ -31,7 +31,7 @@ import numpy as np
 from PIL import Image
 
 from autolabel.models.base import ClassSpec, Example, ExampleRun, Prediction
-from autolabel.models.yolo import _as_list
+from autolabel.models.yolo import _as_list, disable_autoinstall
 
 ENV_WEIGHTS = "AUTOLABEL_YOLOE_WEIGHTS"
 DEFAULT_WEIGHTS = Path(__file__).resolve().parents[2] / "models" / "yoloe-26s-seg.pt"
@@ -89,19 +89,6 @@ def usable(bbox: tuple, image_size: tuple[int, int]) -> bool:
     """True when the box's shorter side is at least 8 px once the image is scaled to 640."""
     scale = IMGSZ / max(image_size)
     return min(bbox[2], bbox[3]) * scale >= MIN_EXAMPLE_SIDE
-
-
-def disable_autoinstall() -> None:
-    """Never pip-install during a job.
-
-    ultralytics patches PIL.Image.open: after that, any file Pillow cannot identify runs
-    `pip install pi-heif` in the live environment (VERIFIED 2026-11-05, 8.4.199). The env variable
-    is read once at import, so also set the flag, in case ultralytics was imported earlier.
-    """
-    os.environ["YOLO_AUTOINSTALL"] = "false"
-    from ultralytics.utils import checks
-
-    checks.AUTOINSTALL = False
 
 
 class UltralyticsYoloe:
