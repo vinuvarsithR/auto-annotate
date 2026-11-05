@@ -13,8 +13,15 @@ from typing import Callable, Iterable, Iterator
 from PIL import Image
 
 from autolabel.evaluate import Box, iou
-from autolabel.models import get_detector, list_detectors
-from autolabel.models.base import ClassSpec, Prediction
+from autolabel.models import detector_modes, get_detector, list_detectors
+from autolabel.models.base import ClassSpec, Example, ExampleRun, Prediction
+
+
+def _check_available(detector: str) -> None:
+    if detector not in list_detectors():
+        raise ValueError(
+            f"detector {detector!r} is not available yet; choose one of {list_detectors()}"
+        )
 
 
 def run(images: Iterable[tuple[str, str]],            # (image_id, path on disk)
@@ -22,22 +29,38 @@ def run(images: Iterable[tuple[str, str]],            # (image_id, path on disk)
         detector: str = "pipeline",
         options: dict | None = None,
         on_progress: Callable[[int, int], None] | None = None,   # (done, total)
+        example_run: ExampleRun | None = None,                    # set: use it instead of get_detector
         ) -> Iterator[tuple[str, list[Prediction]]]:
-    """Yield (image_id, predictions) for each image, in input order."""
-    if detector not in list_detectors():
-        raise ValueError(
-            f"detector {detector!r} is not available yet; choose one of {list_detectors()}"
-        )
-    det = get_detector(detector, **(options or {}))
+    """Yield (image_id, predictions) for each image, in input order.
+
+    With example_run, its own classes and prototypes are used; `classes` and `detector` are ignored.
+    """
+    if example_run is not None:
+        detect = example_run.detect
+    else:
+        _check_available(detector)
+        det = get_detector(detector, **(options or {}))
+        detect = lambda image, image_id: det.detect(image, image_id, classes)
     items = list(images)
     total = len(items)
     for done, (image_id, path) in enumerate(items, start=1):
         with Image.open(path) as im:
             rgb = im.convert("RGB")
-        preds = det.detect(rgb, image_id, classes)
+        preds = detect(rgb, image_id)
         if on_progress is not None:
             on_progress(done, total)
         yield image_id, preds
+
+
+def prepare_examples(detector: str,
+                     classes: list[ClassSpec],                    # classes with at least one example
+                     examples: dict[str, list[Example]],          # class name -> its examples
+                     options: dict | None = None) -> ExampleRun:
+    """Learn one job's prototypes from its examples. Pass the result to run(example_run=...)."""
+    _check_available(detector)
+    if "examples" not in detector_modes(detector):
+        raise ValueError(f"detector {detector!r} has no examples mode")
+    return get_detector(detector, **(options or {})).prepare_examples(classes, examples)
 
 
 def drop_overlapping(predictions: list[Prediction],
