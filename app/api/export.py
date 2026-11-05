@@ -1,5 +1,5 @@
 """
-export.py - endpoints 14 (COCO / YOLO zip download) and 21 (start a Roboflow push job).
+export.py - endpoints 14 (COCO / YOLO / YOLO-seg zip download) and 21 (start a Roboflow push job).
 
 Both only load rows and call autolabel.export; the rules (which images, which boxes,
 zip layout) live there. #21 only checks and queues the job; the worker does the uploads.
@@ -18,7 +18,13 @@ from pydantic import BaseModel
 from app.api.deps import get_conn, require_project
 from app.api.errors import ApiError
 from app.db import db
-from autolabel.export import NothingToExport, build_zip, roboflow_settings, validate_statuses
+from autolabel.export import (
+    FORMATS,
+    NothingToExport,
+    build_zip,
+    roboflow_settings,
+    validate_statuses,
+)
 
 router = APIRouter()
 
@@ -49,8 +55,8 @@ def export_project(pid: int, body: ExportIn | None = Body(default=None),
                    conn: sqlite3.Connection = Depends(get_conn)):
     project = require_project(conn, pid)
     body = body or ExportIn()
-    if body.format not in ("coco", "yolo"):
-        raise ApiError(400, "bad_request", "format must be 'coco' or 'yolo'")
+    if body.format not in FORMATS:
+        raise ApiError(400, "bad_request", f"format must be one of {list(FORMATS)}")
     statuses = _statuses(body.statuses)
 
     image_rows = conn.execute("SELECT * FROM images WHERE project_id=? ORDER BY id",

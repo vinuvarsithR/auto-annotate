@@ -51,6 +51,31 @@ Part 2 (2026-11-01): `app/api/export.py` routes #14 and #21, tests `tests/test_e
   (after `\` -> `/`), not case-insensitive.
 - `ImportItem` has no width/height (contract), so the worker re-reads the size when inserting.
 
+Polygons (2026-11-05, from contract-polygons): tests `tests/test_export_polygons.py`,
+`tests/test_importers_polygons.py` (fixtures in `docs/fixtures/polygons/`, 1e-6 tolerance).
+- `yolo-seg` in `formats.py` (`to_yolo_seg`, 6 decimals), accepted by #14; zip name
+  `<project>_yolo-seg.zip`. `to_coco` / `coco_for_image` write pixel `segmentation` + polygon `area`;
+  polygon comes before mask. Plain `yolo` writes the polygon's bbox.
+- Importers: YOLO polygon rows, COCO `segmentation`, one note per COCO file. Every imported box now
+  has a `polygon` key (`None` for a plain box).
+- Choices inside the contract: "no area" means shoelace area <= 1e-12 normalized, so float noise on
+  collinear points counts as zero. A COCO row with a usable polygon does not need a good `bbox`
+  (bbox computed). A COCO row whose box is not stored (bad bbox, or no area left) is not counted in
+  the note. `"segmentation": null` is "anything else", so it is counted.
+- Real zips, `plan_import` (2026-11-05, VERIFIED, not committed): `v1_yolo.zip.zip` 1649 images, 5,430
+  boxes, 5,416 with polygon. `v1_coco.zip` 1649 images, 5,430 boxes, 4,121 with polygon, notes 8 (test) +
+  1,280 (train) + 21 (valid) = 1,309; all 1,309 are RLE, none multi-part. So 1,295 boxes have a
+  polygon in the YOLO zip but not the COCO zip, because RLE is not decoded (contract).
+
+Polygon test upload (2026-11-05, VERIFIED): SDK, key from `.env`, workspace `vinus-workspace-4ji2t`,
+project `test-g9qbh`, **project type `object-detection`**. One 640x360 image (batch
+`polygon-contract-test-mixed1`, Roboflow id `MmOF433Jz02aor6G99yq`, left in the project) with one
+polygon row and one box row with `segmentation: []`, sent through the real `push_image`. Read back with
+`project.image(id)`: 2 rows, polygon `type: "polygon"` with `points` [[64, 72], [192, 72], [128, 216]]
+(px, as sent), box `rb` x/y (centre) 400/135, 160x90, as sent. The box row was **not dropped**, so the
+4-corner fallback was not added. GUESS: an instance-segmentation project behaves the same; only an
+object-detection project was tried.
+
 ## Packages needed
 - roboflow==1.7.3 (already pinned by integrator). `single_upload(image_path, annotation_path={"name","rawText"}, batch_name, annotation_overwrite)` checked in the installed 1.7.3 source: VERIFIED.
 - python-dotenv (already listed).

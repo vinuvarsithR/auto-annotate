@@ -8,8 +8,8 @@ This module only provides:
     settings = roboflow_settings()     # RoboflowSettings, or the list of missing .env names
     rf_id = push_image(settings, image, boxes, class_names, batch_name)
 
-`image` = {"id", "file_name", "path", "width", "height"}; `boxes` = [{"class_name", "bbox"}]
-(already filtered by the worker; an empty list = image with no labels).
+`image` = {"id", "file_name", "path", "width", "height"}; `boxes` = [{"class_name", "bbox",
+"polygon"}], `polygon` optional (already filtered by the worker; an empty list = image with no labels).
 
 The key is never printed, logged or put into an error: SDK output is swallowed and every
 SDK error becomes a one-line PushError with the key replaced by `***`.
@@ -27,6 +27,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Mapping
+
+from autolabel.export.formats import coco_polygon
 
 log = logging.getLogger(__name__)
 
@@ -121,8 +123,9 @@ ANNOTATION_NAME = "annotation.coco.json"   # same name the SDK importer uses
 
 def coco_for_image(image: dict, boxes: list[dict], class_names: list[str]) -> dict:
     """
-    One-image COCO dict; categories 1-based in class_names order. No boxes -> only the
-    NULL_PLACEHOLDER annotation (Roboflow then marks the image as null).
+    One-image COCO dict; categories 1-based in class_names order. Rows with a polygon get
+    `segmentation` + polygon `area` as in #14. No boxes -> only the NULL_PLACEHOLDER
+    annotation (Roboflow then marks the image as null).
     """
     idx = {n: i for i, n in enumerate(class_names)}
     anns = []
@@ -130,8 +133,12 @@ def coco_for_image(image: dict, boxes: list[dict], class_names: list[str]) -> di
         if b["class_name"] not in idx:
             raise PushError(f"image {image['id']}: unknown class {b['class_name']!r}")
         x, y, w, h = (float(v) for v in b["bbox"])
+        segmentation, area = [], w * h
+        if b.get("polygon"):
+            segmentation, area = coco_polygon(b["polygon"], image["width"], image["height"])
         anns.append({"id": i, "image_id": 1, "category_id": idx[b["class_name"]] + 1,
-                     "bbox": [x, y, w, h], "area": w * h, "iscrowd": 0, "segmentation": []})
+                     "bbox": [x, y, w, h], "area": area, "iscrowd": 0,
+                     "segmentation": segmentation})
     return {
         "info": {},
         "licenses": [],

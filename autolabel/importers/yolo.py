@@ -3,7 +3,8 @@
 Detected when a `labels/` folder with .txt files sits next to an `images/` folder, and a
 `data.yaml` (`names`: list or {index: name}) or `classes.txt` exists; the top-most one is used.
 `images/<sub>/<stem>.<ext>` pairs with `labels/<sub>/<stem>.txt` (same parent folder).
-Each line is `class cx cy w h`, normalized 0..1.
+Each line is a box `class cx cy w h` or a polygon `class x1 y1 x2 y2 ...` (odd count >= 7, at least
+3 points), normalized 0..1. Both can be mixed in one file.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from autolabel.importers.base import clip_box, skip
+from autolabel.importers.base import clamp_polygon, clip_box, polygon_bbox, skip
 
 CONFIG_NAMES = ("data.yaml", "classes.txt")
 
@@ -94,14 +95,14 @@ def find_yolo(root: Path, files: list[str]) -> YoloConfig | None:
 
 
 def _parse_label(text: str, names: dict[int, str]):
-    """Returns ([(class_name, cx, cy, w, h)], [error reasons])."""
+    """Returns ([(class_name, [cx, cy, w, h] or None, clamped polygon or None)], [error reasons])."""
     rows, errors = [], []
     for n, line in enumerate(text.splitlines(), start=1):
         tokens = line.split()
         if not tokens:
             continue
-        if len(tokens) != 5:
-            errors.append(f"line {n}: expected 5 values, got {len(tokens)}")
+        if len(tokens) != 5 and (len(tokens) < 7 or len(tokens) % 2 == 0):
+            errors.append(f"line {n}: expected 5 values or an odd count >= 7, got {len(tokens)}")
             continue
         try:
             nums = [float(t) for t in tokens]
@@ -115,7 +116,14 @@ def _parse_label(text: str, names: dict[int, str]):
         if cls not in names:
             errors.append(f"line {n}: unknown class index {cls}")
             continue
-        rows.append((names[cls], *nums[1:]))
+        if len(tokens) == 5:
+            rows.append((names[cls], nums[1:], None))
+            continue
+        polygon = clamp_polygon([nums[i:i + 2] for i in range(1, len(nums), 2)])
+        if polygon is None:
+            errors.append(f"line {n}: polygon has no area")
+            continue
+        rows.append((names[cls], None, polygon))
     return rows, errors
 
 
@@ -145,12 +153,17 @@ def yolo_boxes(root: Path, cfg: YoloConfig, image_files: list[str],
         if rel not in sizes:
             continue
         width, height = sizes[rel]
-        for name, cx, cy, w, h in parsed[lp]:
-            clipped = clip_box((cx - w / 2) * width, (cy - h / 2) * height,
-                               w * width, h * height, width, height)
+        for name, box, polygon in parsed[lp]:
+            if polygon is not None:
+                clipped = polygon_bbox(polygon, width, height)
+            else:
+                cx, cy, w, h = box
+                clipped = clip_box((cx - w / 2) * width, (cy - h / 2) * height,
+                                   w * width, h * height, width, height)
             if clipped is None:
                 continue
-            boxes.setdefault(rel, []).append({"class_name": name, "bbox": clipped})
+            boxes.setdefault(rel, []).append(
+                {"class_name": name, "bbox": clipped, "polygon": polygon})
             used.add(name)
 
     for lp in sorted(cfg.label_files - matched):
