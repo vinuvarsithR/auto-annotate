@@ -444,9 +444,10 @@ function syncCanvas() {
 }
 
 // glide: animate the selection from the old box to the new one (used after accept / reject and Tab).
-function select(id, redraw = true, glide = false) {
+// reveal: bring the box into view (Tab only).
+function select(id, redraw = true, glide = false, reveal = false) {
   state.selectedId = id;
-  if (redraw) canvas.setSelected(id, glide); else canvas.selectedId = id;
+  if (redraw) canvas.setSelected(id, glide, reveal); else canvas.selectedId = id;
   renderPopup();
 }
 
@@ -461,7 +462,7 @@ function cycleBox(delta) {
   const i = list.findIndex((a) => a.id === state.selectedId);
   const next = i < 0 ? (delta > 0 ? 0 : list.length - 1) : (i + delta + list.length) % list.length;
   if (state.pending && list[next].id !== PENDING) dropPending();
-  select(list[next].id, true, true);
+  select(list[next].id, true, true, true);
 }
 
 function replaceAnn(updated) {

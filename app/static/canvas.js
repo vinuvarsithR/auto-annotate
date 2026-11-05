@@ -69,7 +69,6 @@ class BoxCanvas {
     new ResizeObserver(() => { this.render(); this.notifyView(); }).observe(canvas.parentElement);
     if (document.fonts) document.fonts.ready.then(() => this.render());
     canvas.addEventListener("mousedown", (e) => this.onDown(e));
-    canvas.addEventListener("dblclick", (e) => { if (!this.drawing() && !e.ctrlKey) this.resetView(); });
     window.addEventListener("mousemove", (e) => this.onMove(e));
     window.addEventListener("mouseup", (e) => this.onUp(e));
   }
@@ -110,12 +109,13 @@ class BoxCanvas {
 
   setAnnotations(anns) { this.anns = anns; this.render(); }
   // glide: the selection frame slides from the old box to the new one.
-  setSelected(id, glide = false) {
+  // reveal: bring the box into view. Only Tab asks for it; edits and reviews never move the view.
+  setSelected(id, glide = false, reveal = false) {
     const from = this.selected();
     this.selectedId = id;
     const to = this.selected();
     this.fx = this.fx.filter((f) => f.kind !== "glide");
-    if (to) this.ensureVisible(to.bbox);
+    if (to && reveal) this.ensureVisible(to.bbox);
     if (glide && from && to && from.id !== to.id) {
       this.startFx({ kind: "glide", id: to.id, from: from.bbox.slice(), dur: 180, delay: 50 });
     } else this.render();
