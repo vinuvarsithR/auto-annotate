@@ -47,6 +47,12 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   frame, Windows CPU = 0.133 s/image (0.072 s at 640). VERIFIED for the stand-in only; the real file should be
   close (GUESS).
 
+## Examples mode (CONTRACT #9, 2026-11-05)
+Built: `autolabel/models/yoloe.py`; `prepare_examples` on `fake` and `owlv2`; `Example`, `ExampleRun`,
+`Prediction.polygon`; `detector_modes`; `pipeline.prepare_examples`, `run(example_run=...)`.
+Real check on the spike's 40 frames (VERIFIED, CPU, thresholds tuned on those frames): avg F1 0.415,
+0.21 s/img at the default floor 0.05 including polygons; `prepare_examples` 6.4 s for 19 images.
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 - None new for `fake`. `owlv2` needs torch, torchvision (used by `autolabel/owlv2.py` for NMS) and transformers.
@@ -91,6 +97,14 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
      Merging both (`merge.keep_higher`) is a separate choice.
 5. **CONTRACT section 3/#16:** `"yolo"` exists when `AUTOLABEL_DETECTORS` contains `yolo` and
    `AUTOLABEL_YOLO_WEIGHTS` points at the weights; add `'yolo'` to the `annotations.source` comment.
+
+6. **CONTRACT #9, `yoloe` prototype (integrator):** please say "one embedding per image per class: all
+   of the class's boxes in an image form one prompt". Built this way, because the wording "mean of its
+   example embeddings" also fits one embedding per box, and that scored much worse on the spike's 40 frames:
+   avg F1 0.33 against 0.42, person 0.54 against 0.62, biax 0.01 against 0.27 (VERIFIED, small sample).
+   `used` still counts boxes, so `examples_by_class` means the same.
+7. **Weights (integrator / README):** `D:\autoannotate\weights\yoloe-26s-seg.pt` does not exist yet. Tests
+   and the real check used the spike's copy through `AUTOLABEL_YOLOE_WEIGHTS`.
 
 ## Open questions
 - Should `get_detector` key its cache on `(name, options)` instead of `name` only? With real models, two jobs with

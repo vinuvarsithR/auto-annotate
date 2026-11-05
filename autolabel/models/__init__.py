@@ -7,7 +7,9 @@ so real models (added later) load their weights only the first time.
 
 "fake" is always available. Real detectors are opt-in through the environment
 variable AUTOLABEL_DETECTORS (comma-separated), e.g. AUTOLABEL_DETECTORS=owlv2,yolo
-("yolo" also needs AUTOLABEL_YOLO_WEIGHTS=path/to/best.pt).
+("yolo" also needs AUTOLABEL_YOLO_WEIGHTS=path/to/best.pt; "yoloe" uses
+AUTOLABEL_YOLOE_WEIGHTS, else models/yoloe-26s-seg.pt under the repo root).
+detector_modes(name) -> the modes a detector supports, default first (CONTRACT #16).
 Unset -> only "fake", so tests stay fast. Real detectors import torch inside
 their own constructors, never at module level, so importing this package
 stays cheap and works without a GPU.
@@ -18,7 +20,7 @@ from __future__ import annotations
 import os
 from typing import Callable
 
-from autolabel.models.base import ClassSpec, Detector, Prediction
+from autolabel.models.base import ClassSpec, Detector, Example, ExampleRun, Prediction
 
 
 def _make_fake(**options) -> Detector:
@@ -36,11 +38,23 @@ def _make_yolo(**options) -> Detector:
     return YoloDetector(**options)
 
 
+def _make_yoloe(**options) -> Detector:
+    from autolabel.models.yoloe import YoloeDetector
+    return YoloeDetector(**options)
+
+
 # name -> factory. Factories import their module lazily.
 _FACTORIES: dict[str, Callable[..., Detector]] = {
     "fake": _make_fake,
     "owlv2": _make_owlv2,
     "yolo": _make_yolo,
+    "yoloe": _make_yoloe,
+}
+# name -> modes, default first (CONTRACT #16). A name left out has no modes.
+_MODES: dict[str, tuple[str, ...]] = {
+    "fake": ("text", "examples"),
+    "owlv2": ("text", "examples"),
+    "yoloe": ("examples",),
 }
 ALWAYS_ON = ("fake",)
 ENV_VAR = "AUTOLABEL_DETECTORS"
@@ -52,6 +66,11 @@ def list_detectors() -> list[str]:
     """"fake" plus the real detectors named in AUTOLABEL_DETECTORS (read on every call)."""
     extra = [n.strip() for n in os.environ.get(ENV_VAR, "").split(",") if n.strip()]
     return [n for n in _FACTORIES if n in ALWAYS_ON or n in extra]
+
+
+def detector_modes(name: str) -> list[str]:
+    """Modes of a detector, default first; [] for unknown names or no modes."""
+    return list(_MODES.get(name, ()))
 
 
 def get_detector(name: str, **options) -> Detector:
@@ -67,4 +86,5 @@ def get_detector(name: str, **options) -> Detector:
     return _CACHE[name]
 
 
-__all__ = ["ClassSpec", "Detector", "Prediction", "get_detector", "list_detectors"]
+__all__ = ["ClassSpec", "Detector", "Example", "ExampleRun", "Prediction", "detector_modes",
+           "get_detector", "list_detectors"]

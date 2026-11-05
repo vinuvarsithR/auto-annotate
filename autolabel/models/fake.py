@@ -11,19 +11,33 @@ whole job flow on a CPU-only machine:
 
 W, H = image width and height, so boxes always fit inside the image.
 Fewer than 2 classes -> fewer boxes. Boxes below a class's min_score are dropped.
+
+Examples mode: the usual boxes, for the classes that have examples. Example images are
+opened, so an unreadable one fails the job exactly as with a real detector.
 """
 
 from __future__ import annotations
 
 from PIL import Image
 
-from autolabel.models.base import ClassSpec, Prediction
+from autolabel.models.base import ClassSpec, Example, ExampleRun, Prediction
 
 # (relative x, y, w, h, score) for box 1 and box 2
 _LAYOUT = [
     (0.1, 0.1, 0.3, 0.3, 0.9),
     (0.5, 0.5, 0.3, 0.3, 0.3),
 ]
+
+
+class FakeExampleRun:
+    def __init__(self, detector: "FakeDetector", classes: list[ClassSpec], used: dict[str, int]) -> None:
+        self.detector = detector
+        self.classes = classes
+        self.used = used
+        self.unusable: list[str] = []
+
+    def detect(self, image: Image.Image, image_id: str) -> list[Prediction]:
+        return self.detector.detect(image, image_id, self.classes)
 
 
 class FakeDetector:
@@ -48,3 +62,12 @@ class FakeDetector:
                 mask=None,
             ))
         return out
+
+    def prepare_examples(self, classes: list[ClassSpec],
+                         examples: dict[str, list[Example]]) -> ExampleRun:
+        ran = [c for c in classes if examples.get(c.name)]
+        for c in ran:
+            for ex in examples[c.name]:
+                with Image.open(ex.path) as im:
+                    im.load()
+        return FakeExampleRun(self, ran, {c.name: len(examples[c.name]) for c in ran})
