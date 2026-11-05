@@ -371,7 +371,7 @@ They are one setting per class, shared by all modes; a value tuned for one mode 
 | Detector | Prototype | Score |
 |---|---|---|
 | `owlv2` | per class, the mean of `query_embedding` over its examples, one query per class | `sigmoid(class_predictor logit)`, as `detect_image_guided` does today. Never `post_process_image_guided_detection`: it rescales per image, so the best box becomes 1.0 even with no object. |
-| `yoloe` | per class, the mean of its example embeddings, L2-normalized, given to `set_classes(names, vpe)` | `boxes.conf` as returned; the head already applies the sigmoid. Pass `conf` = the lowest class floor, because the ultralytics default would hide low scores. |
+| `yoloe` | one embedding per example **image** per class (all that class's example boxes in that image form one visual prompt), then the mean over images, L2-normalized, given to `set_classes(names, vpe)` | `boxes.conf` as returned; the head already applies the sigmoid. Pass `conf` = the lowest class floor, because the ultralytics default would hide low scores. |
 
 Default floor when `min_score` is NULL: 0.05, as `owlv2` and `yolo`.
 
