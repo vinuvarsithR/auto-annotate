@@ -345,6 +345,8 @@ statuses; an unknown one is 400 `bad_request`.
 | `bbox` only, on a row with a polygon | the polygon is scaled and moved to fill the new bbox, so box-only clients keep working and the bbox rule still holds. Points are clamped to 0..1, then the bbox is recomputed. |
 | `polygon` absent | polygon untouched |
 
+A bbox-only PATCH on a polygon row whose new bbox leaves no area inside the image -> 400 `bad_request`, nothing changes.
+
 The response is the updated Annotation. The third example comes back with `status: "edited"`.
 Rule: an explicit `status` in the body wins; only when `status` is absent does a bbox / mask /
 polygon / class change make the box `edited`. So the last example comes back `auto_accepted`. Undo uses
