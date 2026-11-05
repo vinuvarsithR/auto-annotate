@@ -75,8 +75,9 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   - Run step compact (no min-height), "Open in review ->" once the job is done / boxes exist.
   - Zoom: Ctrl+wheel or touchpad pinch anywhere on the review screen zooms the image around the
     cursor (100-800% of fit), never the page; plain wheel / drag on empty area / middle button
-    pans when zoomed; 0, double-click or the zoom button = fit; every new image starts at fit;
-    a programmatically selected box (Tab, after accept) is brought into view.
+    pans when zoomed; 0 or the zoom button = fit; every new image starts at fit;
+    Tab brings the box it selects into view. Besides the user's own zoom and pan, only an image
+    change, Reset, the 0 key and Tab move the view: edits and reviews never do.
   - Hold Ctrl: crosshair, drag draws a box (also over existing boxes); N / Draw still work.
   - Delete (Del / Backspace / panel button): human box -> DELETE (#19); model box -> rejected.
     Server without #19 (405) -> rejected instead, with a message.
