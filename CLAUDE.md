@@ -73,7 +73,7 @@ route + import jobs, `jobs.result`), export (#14 export zip, #21 push_image, aut
 ui (setup flow, review page, export + push buttons). Run the app: `uvicorn app.main:app --port 8000`,
 open http://localhost:8000/. (`/?mock=1` needs a static server on the repo root, e.g.
 `python -m http.server`; uvicorn does not serve docs/fixtures/.) Bulk import (#22) has no UI yet:
-use http://localhost:8000/docs. Export worktree: D:utoannotatea-export (branch export).
+use http://localhost:8000/docs. Export worktree: D:\autoannotate\aa-export (branch export).
 Next:
 - backend: wire the #9 overlap rule in app/worker/worker.py (after deleting old model boxes, pass
   the image's non-rejected boxes to `pipeline.drop_overlapping`, store what it returns). Not wired
