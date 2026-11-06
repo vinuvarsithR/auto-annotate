@@ -53,6 +53,15 @@ Built: `autolabel/models/yoloe.py`; `prepare_examples` on `fake` and `owlv2`; `E
 Real check on the spike's 40 frames (VERIFIED, CPU, thresholds tuned on those frames): avg F1 0.415,
 0.21 s/img at the default floor 0.05 including polygons; `prepare_examples` 6.4 s for 19 images.
 
+- 2026-11-06: **owlv2 examples fix** (CONTRACT, `owlv2` examples-mode rules). New `Owlv2Detector.image_guided_logits`
+  in `autolabel/owlv2.py` (raw logits + boxes); `detect_image_guided` is no longer used by examples mode but is
+  unchanged (scripts/run_models.py still calls it). Score = `sigmoid(logit - class_cutoff)`, cutoff = median example
+  logit, floors on that score, top 5 per class per image after NMS and clipping. NMS and the cap order by
+  `logit - cutoff`, because the sigmoid rounds to 1.0 far above the cutoff. Cutoffs add one model pass per example image.
+  Real check (VERIFIED, Windows CPU, cutoffs from the examples, nothing tuned): 40 spike frames, floor 0.05: 20.0
+  boxes/img (629.5 without the cap), macro-F1 0.173, 4.8 s/img; prepare 268 s for 19 images, 37 examples. Same numbers
+  as calib2 on the saved logits. Cap 5 costs recall: sb 0.90 -> 0.60, biax 0.88 -> 0.38, person 0.99 -> 0.87.
+
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
 - None new for `fake`. `owlv2` needs torch, torchvision (used by `autolabel/owlv2.py` for NMS) and transformers.

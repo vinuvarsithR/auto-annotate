@@ -12,20 +12,26 @@ Plain-English summary
 * The heavy work is done by autolabel/owlv2.py (read-only, Phase 1 code). This
   file only turns its output into Prediction objects.
 * Examples mode (source "owlv2_image"): per class, the mean of the normalized
-  `query_embedding` of its examples is one query for `detect_image_guided`. The score
-  is its sigmoid, 0..1 like every mode, but on a very different scale from text
-  scores (best-F1 thresholds near 0.9995 on the crane data, VERIFIED in the spike).
+  `query_embedding` of its examples is one query. Raw sigmoids sit near 0.9995 on the crane
+  data, so the score is calibrated per class: sigmoid(logit - class_cutoff), where class_cutoff
+  is the median logit of the class's own examples against the prototype. 0.5 means "as good
+  as a typical example". After NMS only the TOP_PER_CLASS best boxes per class per image stay.
 * Weights download once into the Hugging Face cache (~/.cache/huggingface,
   or HF_HOME); get_detector() keeps one loaded instance per process.
 """
 
 from __future__ import annotations
 
+from collections import Counter
+from statistics import median
+
 from PIL import Image
 
 from autolabel.models.base import ClassSpec, Example, ExampleRun, Prediction
+from autolabel.owlv2 import Detection, best_box_index, xywh_to_rel_xyxy
 
 DEFAULT_MIN_SCORE = 0.05
+TOP_PER_CLASS = 5       # examples mode only, fixed by CONTRACT
 
 
 def prompt_for(cls: ClassSpec) -> str:
@@ -58,22 +64,59 @@ def to_predictions(dets, classes: list[ClassSpec], floors: list[float],
     return out
 
 
+def top_per_class(preds: list[Prediction], limit: int = TOP_PER_CLASS) -> list[Prediction]:
+    """Keep the first `limit` boxes of each class. preds must be best-first."""
+    out, seen = [], Counter()
+    for p in preds:
+        seen[p.category] += 1
+        if seen[p.category] <= limit:
+            out.append(p)
+    return out
+
+
 class Owlv2ExampleRun:
-    def __init__(self, backend, classes: list[ClassSpec], prototypes: list,
-                 floors: list[float], used: dict[str, int]) -> None:
+    def __init__(self, backend, classes: list[ClassSpec], prototypes: list, cutoffs: list[float],
+                 floors: list[float], used: dict[str, int], nms_iou: float = 0.5) -> None:
         self.backend = backend
         self.classes = classes
         self.prototypes = prototypes
+        self.cutoffs = cutoffs
         self.floors = floors
         self.used = used
+        self.nms_iou = nms_iou
         self.unusable: list[str] = []
 
     def detect(self, image: Image.Image, image_id: str) -> list[Prediction]:
         if not self.classes:
             return []
-        queries = [[p] for p in self.prototypes]
-        dets = self.backend.detect_image_guided(image, queries, threshold=min(self.floors))
-        return to_predictions(dets, self.classes, self.floors, image_id, "owlv2_image")
+        import torch
+        from torchvision.ops import batched_nms
+
+        logits, boxes = self.backend.image_guided_logits(image, self.prototypes)
+        margin = logits - torch.tensor(self.cutoffs, dtype=logits.dtype)
+        scores = torch.sigmoid(margin)
+        patch, label = (scores >= torch.tensor(self.floors, dtype=scores.dtype)).nonzero(as_tuple=True)
+        if len(patch) == 0:
+            return []
+
+        width, height = image.size
+        size = float(max(width, height))
+        cx, cy, bw, bh = boxes[patch].unbind(-1)
+        xyxy = torch.stack([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], -1) * size
+        # margin, not score: far above the cutoff the sigmoid rounds to exactly 1.0 and order is lost.
+        kept = batched_nms(xyxy, margin[patch, label], label, self.nms_iou)   # best first
+
+        dets = []
+        for i in kept.tolist():
+            x1, y1, x2, y2 = xyxy[i].tolist()
+            # Clip to the real image: the padded area can produce boxes past the edge.
+            x1, y1 = max(0.0, x1), max(0.0, y1)
+            x2, y2 = min(float(width), x2), min(float(height), y2)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            c = int(label[i])
+            dets.append(Detection(c, float(scores[patch[i], c]), (x1, y1, x2 - x1, y2 - y1)))
+        return top_per_class(to_predictions(dets, self.classes, self.floors, image_id, "owlv2_image"))
 
 
 class Owlv2TextDetector:
@@ -85,6 +128,7 @@ class Owlv2TextDetector:
         """backend: anything with detect(image, prompts, threshold) -> list[owlv2.Detection].
         Left as None, the real OWLv2 model is loaded (torch imported here, not at module level)."""
         self.min_score = min_score
+        self.nms_iou = nms_iou
         if backend is None:
             from autolabel.owlv2 import DEFAULT_MODEL, Owlv2Detector
             backend = Owlv2Detector(model_id or DEFAULT_MODEL, device=device, nms_iou=nms_iou)
@@ -120,4 +164,24 @@ class Owlv2TextDetector:
             prototypes.append(normalize(torch.stack(embeddings).mean(0), dim=-1))
             used[c.name] = len(items)
         floors = [floor_for(c, self.min_score) for c in ran]
-        return Owlv2ExampleRun(self.backend, ran, prototypes, floors, used)
+        cutoffs = self._class_cutoffs(ran, prototypes, examples)
+        return Owlv2ExampleRun(self.backend, ran, prototypes, cutoffs, floors, used, self.nms_iou)
+
+    def _class_cutoffs(self, classes: list[ClassSpec], prototypes: list,
+                       examples: dict[str, list[Example]]) -> list[float]:
+        """Per class, the median logit against its prototype of the patches query_embedding picked.
+        One model pass per example image, whatever the number of examples in it."""
+        by_image: dict[str, list[tuple[int, tuple]]] = {}
+        for c, cls in enumerate(classes):
+            for ex in examples[cls.name]:
+                by_image.setdefault(ex.path, []).append((c, ex.bbox))
+
+        found: list[list[float]] = [[] for _ in classes]
+        for path, items in by_image.items():
+            with Image.open(path) as im:
+                rgb = im.convert("RGB")
+            logits, boxes = self.backend.image_guided_logits(rgb, prototypes)
+            for c, bbox in items:
+                i, _overlap = best_box_index(boxes, xywh_to_rel_xyxy(list(bbox), max(rgb.size)))
+                found[c].append(float(logits[i, c]))
+        return [median(values) for values in found]

@@ -181,6 +181,19 @@ class Owlv2Detector:
             dets.append(Detection(int(label[i]), float(sc[i]), (x1, y1, x2 - x1, y2 - y1)))
         return dets
 
+    def image_guided_logits(self, image, queries: list) -> tuple[object, object]:
+        """
+        queries[c] = one query embedding for class c.
+        Returns (logits [patches, classes], boxes [patches, 4]) on the CPU: raw class_predictor logits,
+        no sigmoid, no threshold, no NMS; boxes as cx, cy, w, h relative to the padded square.
+        """
+        torch = self.torch
+        feats, boxes = self._image_features(image)
+        q = torch.stack(queries)[None].to(self.device)
+        with torch.inference_mode():
+            logits, _ = self.model.class_predictor(feats, query_embeds=q, query_mask=torch.ones(q.shape[:2], device=self.device))
+        return logits[0].float().cpu(), boxes.float().cpu()
+
     def peak_vram_gb(self) -> float | None:
         if self.device.startswith("cuda"):
             return self.torch.cuda.max_memory_allocated() / 1024**3
