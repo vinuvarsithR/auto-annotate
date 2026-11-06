@@ -21,7 +21,7 @@ setup and layout. This file holds the working rules, current state and next step
    | integrator | docs/CONTRACT.md, CLAUDE.md, requirements.txt, docs/fixtures/, merges |
    | backend | app/api/, app/db/, app/worker/, app/main.py + their tests |
    | ui | app/static/ |
-   | models | autolabel/models/, autolabel/pipeline.py |
+   | models | autolabel/models/, autolabel/pipeline.py, one logit method in autolabel/owlv2.py (CONTRACT, Examples mode) |
    | export | autolabel/export/, autolabel/importers/, app/api/export.py + their tests |
 3. **Scope:** build only what docs/CONTRACT.md says. No extra features: propose them and wait for OK.
 4. **Tests:** evaluation, backend and export code need tests. Run them with

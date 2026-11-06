@@ -324,6 +324,9 @@ A detector learns from the project's own boxes, with no training. Detectors and 
 | `owlv2` | `examples` | new | `owlv2_image` | no |
 | `fake` | `text`, `examples` | `examples` returns its usual boxes for classes with examples | `fake` | no |
 
+`yoloe` stays the default detector for examples mode: the one to use unless there is a reason to
+try `owlv2`. This is guidance only: the `model` default in #9 and the list in #16 do not change.
+
 Which boxes are examples:
 
 A box is an example when (`source` is `human` AND `status` is not `rejected`) OR `status` is
@@ -370,10 +373,20 @@ They are one setting per class, shared by all modes; a value tuned for one mode 
 
 | Detector | Prototype | Score |
 |---|---|---|
-| `owlv2` | per class, the mean of `query_embedding` over its examples, one query per class | `sigmoid(class_predictor logit)`, as `detect_image_guided` does today. Never `post_process_image_guided_detection`: it rescales per image, so the best box becomes 1.0 even with no object. |
+| `owlv2` | per class, the mean of `query_embedding` over its examples, one query per class | `sigmoid(logit - class_cutoff)`, see the `owlv2` rules below. Never `post_process_image_guided_detection`: it rescales per image, so the best box becomes 1.0 even with no object. |
 | `yoloe` | one embedding per example **image** per class (all that class's example boxes in that image form one visual prompt), then the mean over images, L2-normalized, given to `set_classes(names, vpe)` | `boxes.conf` as returned; the head already applies the sigmoid. Pass `conf` = the lowest class floor, because the ultralytics default would hide low scores. |
 
 Default floor when `min_score` is NULL: 0.05, as `owlv2` and `yolo`.
+
+`owlv2` examples-mode rules (text-mode scoring is unchanged):
+
+| Rule | Value |
+|---|---|
+| `class_cutoff` | per class, the median logit of the class's examples against its own prototype, computed once in `prepare_examples` from the examples actually used. An even count takes the mean of the two middle values. A single example uses its own logit. |
+| An example's logit | the `class_predictor` logit, against the prototype, of the patch `query_embedding` picked for that example on its own image |
+| Score | `sigmoid(logit - class_cutoff)`. 0.5 = "as good as a typical example". |
+| `min_score`, `accept_score` | apply to this calibrated score, including the default floor above |
+| Top boxes | after NMS, keep the **5** highest-scoring boxes per class per image. Fixed value, not an option. |
 
 `yoloe` rules:
 
@@ -728,7 +741,7 @@ def plan_import(root: Path) -> ImportPlan: ...
 
 | Role | Builds |
 |---|---|
-| models | `autolabel/models/yoloe.py` (weights, `prepare_examples`, `mask_to_polygon` as a pure function); `prepare_examples` on `owlv2` and `fake`; `Example`, `ExampleRun`, `Prediction.polygon` in `base.py`; `detector_modes` and the `yoloe` registry entry; `pipeline.prepare_examples` and the `example_run` argument of `pipeline.run`. Tests with mocked models, plus one slow test running two `yoloe` jobs with different class lists in one process. `autolabel/owlv2.py` stays read-only: use `query_embedding` and `detect_image_guided` as they are. |
+| models | `autolabel/models/yoloe.py` (weights, `prepare_examples`, `mask_to_polygon` as a pure function); `prepare_examples` on `owlv2` and `fake`; `Example`, `ExampleRun`, `Prediction.polygon` in `base.py`; `detector_modes` and the `yoloe` registry entry; `pipeline.prepare_examples` and the `example_run` argument of `pipeline.run`. Tests with mocked models, plus one slow test running two `yoloe` jobs with different class lists in one process. `owlv2` examples-mode rules in `autolabel/models/owlv2.py` (`class_cutoff`, calibrated score, top 5). `autolabel/owlv2.py`: models may add a logit-returning method; existing functions and the text path stay unchanged. |
 | backend | `mode` in #9 (`unknown_mode`, default, `config.mode`); `modes` in #16; worker: select, clean and cap the examples, order of #9, `result`, delete limited to classes that ran, store `Prediction.polygon` in detect jobs. Text jobs keep calling `run` exactly as today. Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`, using `fake`. |
 | ui | mode choice beside the detector (from #16; hidden when a detector has fewer than 2 modes), `mode` sent in #9, a "preparing examples" state while `running` at 0, skipped classes and example counts shown from `result`, the same in the `?mock=1` layer. |
 | export | nothing: rows with `polygon` already export. |
@@ -845,7 +858,8 @@ Rules:
 Rules:
 - **Don't edit files you don't own.** If you need a change somewhere else, write it in your notes.
 - Existing `autolabel/*.py` files (evaluate, owlv2, gdino, merge, coco, ...) are **read-only** for
-  everyone. Import them, wrap them, or ask the integrator.
+  everyone. Import them, wrap them, or ask the integrator. One exception: models may add
+  the logit-returning method to `autolabel/owlv2.py` (see *Examples mode: who builds what*).
 - Each session keeps `docs/agents/<name>.md` up to date with these sections: *Done*, *Packages needed* (with
   versions and VERIFIED/GUESS), *Contract change requests*, and *Open questions*.
 - Export works as **pure functions on the API JSON shapes**, so it can be built from the fixtures
