@@ -27,6 +27,8 @@ setup and layout. This file holds the working rules, current state and next step
 4. **Tests:** evaluation, backend and export code need tests. Run them with
    `D:\autoannotate\auto-annotate\.venv\Scripts\python.exe -m pytest` (worktrees have no .venv).
    All must pass before committing, and before saying anything works.
+   Slow tests (`AUTOLABEL_SLOW=1`) need `$env:AUTOLABEL_YOLOE_WEIGHTS="D:\autoannotate\weights\yoloe-26s-seg.pt"`
+   (and `AUTOLABEL_YOLO_WEIGHTS` if used).
 5. **Commits:** on your own branch only. Never merge into main; the integrator does that
    (`git merge --no-edit YOUR_BRANCH`, pytest, `git push --all`).
 6. **App:** run it on a free port, not 8000 or 8001: `uvicorn app.main:app --port YOUR_PORT`.
