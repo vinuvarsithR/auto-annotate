@@ -47,6 +47,8 @@ class Example:
     path: str                      # image on disk
     category: str                  # class name
     bbox: tuple                    # (x, y, w, h) px, clipped to the image, area > 0
+    labelled: tuple = ()           # every non-rejected box of this class on this image, any source or
+                                   # status, cap ignored, as (x, y, w, h) px clipped, area > 0 (owlv2 bg)
 
 
 class ExampleRun(Protocol):        # one job's prototypes; built at job start, kept in memory

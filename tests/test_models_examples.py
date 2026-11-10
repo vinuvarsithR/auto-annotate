@@ -231,6 +231,50 @@ def test_owlv2_bg_is_median_over_example_images_and_pos_without_bg(img, tmp_path
     assert run.thresholds == pytest.approx([1.0])
 
 
+# bg and Example.labelled (CONTRACT owlv2 `bg`): the worker puts every NON-REJECTED box of the class on the
+# example image into `labelled` (any source or status, including boxes beyond the 30 cap). The detector
+# excludes bbox + labelled from bg; anything else (rejected, other class, never boxed) is background.
+# Scene: 5 examples [1, 0] (pos 1.0), box U scoring 0.9 at (50, 50), free box scoring 0.3 at (70, 70).
+U = (50, 50, 10, 10)
+
+
+def _bg_scene():
+    return scene([[1, 0]] * 5 + [[0.9, 0.43589], [0.3, 0.95394]], FIVE + [U, (70, 70, 10, 10)])
+
+
+def _labelled(path, category, labelled_first=()):
+    """5 examples; only the first carries `labelled` (the union over examples is what counts)."""
+    return [Example("1", path, category, b, tuple(labelled_first) if i == 0 else ()) for i, b in enumerate(FIVE)]
+
+
+@pytest.mark.parametrize("case", ["unreviewed (needs_review) same-class box",
+                                  "imported same-class box",
+                                  "same-class box beyond the 30 cap"])
+def test_owlv2_bg_excludes_labelled_boxes(img, case):
+    # The worker passes all three in `labelled`, so U is not background: bg = 0.3, threshold (1 + 0.3) / 2.
+    run = Owlv2TextDetector(backend=FakeOwl([_bg_scene()])).prepare_examples(
+        [PERSON], {"person": _labelled(img, "person", [U])})
+    assert run.thresholds == pytest.approx([0.65], abs=1e-4)
+
+
+def test_owlv2_bg_counts_a_rejected_box(img):
+    # A rejected box is not in `labelled` (the worker leaves it out), so U is background: bg = 0.9.
+    run = Owlv2TextDetector(backend=FakeOwl([_bg_scene()])).prepare_examples(
+        [PERSON], {"person": _labelled(img, "person")})
+    assert run.thresholds == pytest.approx([0.95], abs=1e-4)
+
+
+def test_owlv2_bg_counts_other_class_boxes(img):
+    # U is a labelled biax box on the same image: excluded for biax, background for person.
+    run = Owlv2TextDetector(backend=FakeOwl([_bg_scene()])).prepare_examples(
+        [PERSON, BIAX], {"person": _labelled(img, "person"), "biax": _labelled(img, "biax", [U])})
+    assert run.thresholds == pytest.approx([0.95, 0.65], abs=1e-4)
+
+
+def test_example_labelled_defaults_to_empty():
+    assert Example("1", "p", "person", (1, 2, 3, 4)).labelled == ()
+
+
 def test_owlv2_class_with_4_examples_is_skipped_with_reason_5_runs(img):
     s = scene([[1, 0]] * 5 + [[0, 1]], FIVE + [(60, 60, 8, 8)])
     backend = FakeOwl([s])

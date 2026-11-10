@@ -17,7 +17,8 @@ Plain-English summary
   - a box's score for a class = raw cosine to the class's examples, the MAX over them (no mean);
   - one threshold per class, from the examples only: pos = median leave-one-out cosine between
     examples, bg = median over the example images of the best score on a box that overlaps no
-    example box; threshold = min(pos, (pos + bg) / 2);
+    labelled box of the class (Example.bbox + Example.labelled, which the worker fills with every
+    non-rejected box of the class); threshold = min(pos, (pos + bg) / 2);
   - keep boxes with objectness >= 0.01 and score >= threshold and >= min_score, then one
     class-agnostic NMS at IoU 0.3. No top-N cap.
   - a class needs at least 5 examples, else it is skipped ("needs at least 5 examples").
@@ -242,9 +243,13 @@ class Owlv2TextDetector:
                 embeds, boxes, objectness = features[ex.path]
                 target = xywh_to_rel_xyxy(list(ex.bbox), sizes[ex.path])
                 rows.append(embeds[example_box_index(boxes, objectness, target)])
-                by_image.setdefault(ex.path, []).append(target)
+                # Not background: the example box plus every labelled box the worker passed (union per image).
+                labelled = by_image.setdefault(ex.path, {})
+                for b in (ex.bbox, *ex.labelled):
+                    labelled[tuple(float(v) for v in b)] = None
             mine = torch.stack(rows)
-            bgs = [background_score(*features[path], targets, mine) for path, targets in by_image.items()]
+            bgs = [background_score(*features[path], [xywh_to_rel_xyxy(list(b), sizes[path]) for b in boxes_px], mine)
+                   for path, boxes_px in by_image.items()]
             bgs = [b for b in bgs if b is not None]
             ran.append(c)
             embeddings.append(mine)

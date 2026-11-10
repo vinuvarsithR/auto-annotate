@@ -69,7 +69,12 @@ Real check on the spike's 40 frames (VERIFIED, CPU, thresholds tuned on those fr
   40-frame benchmark, 5 examples/class, Windows CPU, nothing tuned (VERIFIED): macro-F1 0.546, 3.6 boxes/img,
   4.6 s/img, prepare 88 s (spike C was 0.559 / 4.0). Person is lower (R 0.61 -> 0.37) because its example images
   hold more persons than the 1 example box, and the contract counts them as background: bg rises above pos, so the
-  threshold becomes pos (0.869, spike 0.846). With every person box in those images given as examples: macro-F1 0.564, 1.8 boxes/img.
+  threshold becomes pos (0.869, spike 0.846).
+- 2026-11-10: **owlv2 bg uses `Example.labelled`** (CONTRACT def255c). `Example.labelled` added to base.py; bg excludes
+  the union of `bbox` and `labelled` per image. Filtering (non-rejected, any source/status, cap ignored) is the
+  worker's job; models only trusts the list. Benchmark, 5 examples (1 box per image) + labelled = the other gold boxes
+  of the class there (person 15, biax 2), Windows CPU (VERIFIED): macro-F1 0.586, 4.0 boxes/img, person P 0.91 R 0.56,
+  4.8 s/img, prepare 134 s. Person threshold 0.869 -> 0.850. With every person box in those images given as examples: macro-F1 0.564, 1.8 boxes/img.
 
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->
