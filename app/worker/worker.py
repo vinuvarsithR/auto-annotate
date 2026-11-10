@@ -337,7 +337,9 @@ class Worker:
             example_run = pipeline.prepare_examples(
                 model, ready, {s.name: examples[s.name] for s in ready}, options)
             used = dict(example_run.used)
-            skipped += [{"class_name": name, "reason": "no usable examples"}
+            # the detector may say why (e.g. owlv2 "needs at least 5 examples"); fake/yoloe don't
+            reasons = getattr(example_run, "skip_reasons", None) or {}
+            skipped += [{"class_name": name, "reason": reasons.get(name) or "no usable examples"}
                         for name in example_run.unusable]
         result = {"mode": "examples", "examples_by_class": used, "skipped_classes": skipped}
         with conn:
