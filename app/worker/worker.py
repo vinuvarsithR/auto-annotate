@@ -129,25 +129,36 @@ def read_examples(conn: sqlite3.Connection, pid: int, example_type: type) -> dic
 
     Only the bbox of a row is used. A box with no area left after clipping, or whose image
     file is missing, is not an example. The cap comes last, so those do not use up places.
+
+    `labelled` of each example: every other non-rejected box of the same class on the same
+    image (any source or status, cap ignored, same clipping), so owlv2 does not count them as
+    background. The example's own box is in `bbox`, so it is left out of `labelled`.
     """
     rows = conn.execute(
-        "SELECT a.x, a.y, a.w, a.h, c.name AS class_name, i.id AS image_id, i.path, i.width, "
-        "i.height FROM annotations a JOIN classes c ON c.id = a.class_id "
-        "JOIN images i ON i.id = a.image_id WHERE i.project_id=? AND a.status IN (?, ?) "
-        "ORDER BY a.id", (pid, *EXAMPLE_STATUSES))
+        "SELECT a.id, a.x, a.y, a.w, a.h, a.status, c.name AS class_name, i.id AS image_id, "
+        "i.path, i.width, i.height FROM annotations a JOIN classes c ON c.id = a.class_id "
+        "JOIN images i ON i.id = a.image_id WHERE i.project_id=? AND a.status != 'rejected' "
+        "ORDER BY a.id", (pid,))
     has_file: dict[int, bool] = {}
-    by_class: dict[str, list] = {}
+    by_class: dict[str, list] = {}  # class -> [(annotation id, row, clipped box)] of examples
+    labelled: dict[tuple, list] = {}  # (class, image id) -> [(annotation id, clipped box)]
     for r in rows:
         box = clip_box(r["x"], r["y"], r["w"], r["h"], r["width"], r["height"])
         if box is None:
             continue
+        labelled.setdefault((r["class_name"], r["image_id"]), []).append((r["id"], box))
+        if r["status"] not in EXAMPLE_STATUSES:
+            continue
         if r["image_id"] not in has_file:
             has_file[r["image_id"]] = Path(r["path"]).is_file()
         if has_file[r["image_id"]]:
-            by_class.setdefault(r["class_name"], []).append(
-                example_type(image_id=str(r["image_id"]), path=r["path"],
-                             category=r["class_name"], bbox=box))
-    return {name: evenly_spaced(found, EXAMPLE_CAP) for name, found in by_class.items()}
+            by_class.setdefault(r["class_name"], []).append((r["id"], r, box))
+    return {name: [example_type(image_id=str(r["image_id"]), path=r["path"],
+                                category=name, bbox=box,
+                                labelled=tuple(b for aid, b in labelled[(name, r["image_id"])]
+                                               if aid != own_id))
+                   for own_id, r, box in evenly_spaced(found, EXAMPLE_CAP)]
+            for name, found in by_class.items()}
 
 
 class Worker:

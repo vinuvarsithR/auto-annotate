@@ -26,6 +26,7 @@ class StandInExample:  # same fields as the contract's Example, used until model
     path: str
     category: str
     bbox: tuple
+    labelled: tuple = ()
 
 
 class FakeExampleRun:
@@ -209,6 +210,69 @@ def test_cap_is_per_class(client, models):
     _insert(client, s["image_ids"][0], s["class_ids"]["sb"])
     job = _run(client, s["pid"])
     assert job["result"]["examples_by_class"] == {"rb": 30, "sb": 1}
+
+
+# ------------------------------------------------------------------ Example.labelled
+
+def _labelled_with(client, models, *others):
+    """One example rb box on a 1-image project, plus `others` = (class, status, source, bbox).
+    Returns the labelled boxes sent with that example."""
+    s = setup_project(client, n_images=1)
+    iid = s["image_ids"][0]
+    _insert(client, iid, s["class_ids"]["rb"], bbox=(10, 20, 30, 40))
+    for cls, status, source, bbox in others:
+        _insert(client, iid, s["class_ids"][cls], status, source, bbox)
+    _run(client, s["pid"])
+    sent = _sent(models, "rb")
+    assert [e.bbox for e in sent] == [(10.0, 20.0, 30.0, 40.0)]
+    return list(sent[0].labelled)
+
+
+def test_labelled_has_an_unreviewed_model_box(client, models):
+    assert _labelled_with(client, models, ("rb", "needs_review", "owlv2", (100, 0, 20, 20)),
+                          ("rb", "auto_accepted", "owlv2", (200, 0, 20, 20))) == \
+        [(100.0, 0.0, 20.0, 20.0), (200.0, 0.0, 20.0, 20.0)]
+
+
+def test_labelled_has_an_imported_box(client, models):
+    assert _labelled_with(client, models, ("rb", "needs_review", "import", (100, 0, 20, 20))) == \
+        [(100.0, 0.0, 20.0, 20.0)]
+
+
+def test_labelled_leaves_out_rejected_boxes(client, models):
+    assert _labelled_with(client, models, ("rb", "rejected", "owlv2", (100, 0, 20, 20)),
+                          ("rb", "rejected", "human", (200, 0, 20, 20))) == []
+
+
+def test_labelled_leaves_out_other_class_boxes(client, models):
+    assert _labelled_with(client, models, ("sb", "accepted", "human", (100, 0, 20, 20))) == []
+
+
+def test_labelled_is_empty_when_the_image_has_only_the_example_box(client, models):
+    assert _labelled_with(client, models) == []
+
+
+def test_labelled_is_clipped_and_skips_boxes_with_no_area(client, models):
+    assert _labelled_with(client, models, ("rb", "needs_review", "owlv2", (1270, 0, 50, 20)),
+                          ("rb", "needs_review", "owlv2", (5000, 0, 10, 10))) == \
+        [(1270.0, 0.0, 10.0, 20.0)]
+
+
+def test_labelled_has_boxes_beyond_the_30_cap(client, models):
+    s = setup_project(client, n_images=1)
+    iid, cid = s["image_ids"][0], s["class_ids"]["rb"]
+    for i in range(31):
+        _insert(client, iid, cid, bbox=(i, 0, 10, 10))
+    _run(client, s["pid"])
+    sent = _sent(models, "rb")
+    assert len(sent) == 30
+    capped_out = [(float(i), 0.0, 10.0, 10.0) for i in range(31)
+                  if (float(i), 0.0, 10.0, 10.0) not in {e.bbox for e in sent}]
+    assert len(capped_out) == 1
+    for e in sent:  # every other rb box on the image, the capped-out one included
+        assert e.bbox not in e.labelled
+        assert set(e.labelled) == {(float(i), 0.0, 10.0, 10.0) for i in range(31)} - {e.bbox}
+        assert capped_out[0] in e.labelled
 
 
 def test_cap_counts_only_examples_left_after_clean_up(client, models):
