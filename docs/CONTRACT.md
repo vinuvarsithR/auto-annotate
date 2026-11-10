@@ -365,28 +365,40 @@ job; (4) run the images as above, deleting earlier model boxes of the classes th
                      {"class_name": "rb", "reason": "no usable examples"}]}
 ```
 `examples_by_class` counts the examples actually used, and only classes that ran. `reason` is
-`no examples` (nothing left after the worker's clean-up) or `no usable examples` (the detector
-rejected all of them). `skipped_classes` is `[]` when nothing was skipped.
+`no examples` (nothing left after the worker's clean-up), `needs at least 5 examples` (`owlv2`
+only, see its rules below) or `no usable examples` (the detector rejected all of them).
+`skipped_classes` is `[]` when nothing was skipped. The worker takes the reason for a class in
+`ExampleRun.unusable` from `ExampleRun.skip_reasons` (section 3), and uses `no usable examples`
+when the class is not there.
 
 Scores: `score` is always 0..1, so `min_score` and `accept_score` work the same way in every mode.
 They are one setting per class, shared by all modes; a value tuned for one mode is not tuned for another.
 
 | Detector | Prototype | Score |
 |---|---|---|
-| `owlv2` | per class, the mean of `query_embedding` over its examples, one query per class | `sigmoid(logit - class_cutoff)`, see the `owlv2` rules below. Never `post_process_image_guided_detection`: it rescales per image, so the best box becomes 1.0 even with no object. |
+| `owlv2` | none: one embedding per example, all kept (no mean) | raw cosine similarity, see the `owlv2` rules below. Never `post_process_image_guided_detection`: it rescales per image, so the best box becomes 1.0 even with no object. |
 | `yoloe` | one embedding per example **image** per class (all that class's example boxes in that image form one visual prompt), then the mean over images, L2-normalized, given to `set_classes(names, vpe)` | `boxes.conf` as returned; the head already applies the sigmoid. Pass `conf` = the lowest class floor, because the ultralytics default would hide low scores. |
 
 Default floor when `min_score` is NULL: 0.05, as `owlv2` and `yolo`.
 
-`owlv2` examples-mode rules (text-mode scoring is unchanged):
+`owlv2` examples-mode rules (text mode is unchanged). Method from the models spike
+(`D:\autoannotate\spikes\owl_embed.py`); threshold "rule C" from the spike report.
 
 | Rule | Value |
 |---|---|
-| `class_cutoff` | per class, the median logit of the class's examples against its own prototype, computed once in `prepare_examples` from the examples actually used. An even count takes the mean of the two middle values. A single example uses its own logit. |
-| An example's logit | the `class_predictor` logit, against the prototype, of the patch `query_embedding` picked for that example on its own image |
-| Score | `sigmoid(logit - class_cutoff)`. 0.5 = "as good as a typical example". |
-| `min_score`, `accept_score` | apply to this calibrated score, including the default floor above |
-| Top boxes | after NMS, keep the **5** highest-scoring boxes per class per image. Fixed value, not an option. |
+| Box features | per image, one vision pass gives every predicted box its class embedding (L2-normalized), its box and its objectness (sigmoid). Boxes are normalized to max(W, H) (OWLv2 pads to a square). |
+| Example embedding | among the image's predicted boxes with IoU >= **0.9 x** the highest IoU to the drawn box, the class embedding of the one with the highest objectness |
+| Box score for a class | raw cosine similarity between the box's embedding and each of the class's example embeddings; the class score is the **max** over those examples (no averaging) |
+| Fewer than 5 examples | a class with fewer than **5** examples (after the worker's clean-up and cap) is not run: it goes in `unusable`, with `skip_reasons[class] = "needs at least 5 examples"`. Fixed value, not an option. |
+| Example images | assumed **fully labelled** for that class: every instance of the class in an example image has a box. Missing boxes raise `bg` and so the threshold. |
+| `pos` | **TO BE FILLED BY MODELS before building**: the exact definition from the spike report, as a contract change request in `docs/agents/models.md`. In the same request, pin for `bg`: the overlap test ("overlaps a labelled box"), whether the objectness filter applies, and what happens when no example image gives a `bg` value. |
+| `bg` | per example image of the class: the highest class score on a predicted box that overlaps no labelled box of that class in that image; `bg` = the median of those values over the images. Labelled boxes = that class's examples on the image. |
+| Class threshold (rule C) | `min(pos, (pos + bg) / 2)`: halfway between `pos` and `bg`, never above `pos`. Raised to 0 if negative, so scores stay 0..1. Computed once per class in `prepare_examples`. |
+| Keep a box | objectness >= **0.01** AND class score >= the class threshold AND class score >= `min_score` (or the 0.05 floor) |
+| NMS | **class-agnostic**, IoU **0.3**, over all kept (box, class) candidates of the image; a box that passes for two classes keeps the higher score |
+| `score` | the cosine class score |
+| `min_score`, `accept_score` | apply to this cosine score, including the default floor above |
+| Not used | no prototype mean, no `class_cutoff`, no calibrated sigmoid, no per-class top-5 cap |
 
 `yoloe` rules:
 
@@ -741,7 +753,8 @@ def plan_import(root: Path) -> ImportPlan: ...
 
 | Role | Builds |
 |---|---|
-| models | `autolabel/models/yoloe.py` (weights, `prepare_examples`, `mask_to_polygon` as a pure function); `prepare_examples` on `owlv2` and `fake`; `Example`, `ExampleRun`, `Prediction.polygon` in `base.py`; `detector_modes` and the `yoloe` registry entry; `pipeline.prepare_examples` and the `example_run` argument of `pipeline.run`. Tests with mocked models, plus one slow test running two `yoloe` jobs with different class lists in one process. `owlv2` examples-mode rules in `autolabel/models/owlv2.py` (`class_cutoff`, calibrated score, top 5). `autolabel/owlv2.py`: models may add a logit-returning method; existing functions and the text path stay unchanged. |
+| models | `autolabel/models/yoloe.py` (weights, `prepare_examples`, `mask_to_polygon` as a pure function); `prepare_examples` on `owlv2` and `fake`; `Example`, `ExampleRun`, `Prediction.polygon` in `base.py`; `detector_modes` and the `yoloe` registry entry; `pipeline.prepare_examples` and the `example_run` argument of `pipeline.run`. Tests with mocked models, plus one slow test running two `yoloe` jobs with different class lists in one process. `owlv2` examples-mode rules in `autolabel/models/owlv2.py` (example embedding, cosine score, 5-example minimum, rule C threshold, class-agnostic NMS), and `skip_reasons` on its `ExampleRun`. `autolabel/owlv2.py`: models may add one method returning per-box class embeddings, boxes and objectness (it may replace the logit method models added); existing functions and the text path stay unchanged. |
+| backend (owlv2 examples change) | worker: reason from `ExampleRun.skip_reasons` (read with `getattr(run, "skip_reasons", {})`, so `fake` and `yoloe` need no change), else `no usable examples`. Test with a fake run giving `needs at least 5 examples`. |
 | backend | `mode` in #9 (`unknown_mode`, default, `config.mode`); `modes` in #16; worker: select, clean and cap the examples, order of #9, `result`, delete limited to classes that ran, store `Prediction.polygon` in detect jobs. Text jobs keep calling `run` exactly as today. Tests in `tests/test_api_*.py` / `tests/test_worker_*.py`, using `fake`. |
 | ui | mode choice beside the detector (from #16; hidden when a detector has fewer than 2 modes), `mode` sent in #9, a "preparing examples" state while `running` at 0, skipped classes and example counts shown from `result`, the same in the `?mock=1` layer. |
 | export | nothing: rows with `polygon` already export. |
@@ -790,6 +803,7 @@ class ExampleRun(Protocol):        # one job's prototypes; built at job start, k
     classes: list[ClassSpec]       # the classes that will run, in input order
     used: dict[str, int]           # class name -> examples used (classes that run only)
     unusable: list[str]            # class names the detector rejected all examples for
+    skip_reasons: dict[str, str]   # optional: class in `unusable` -> reason for #9 `result`
     def detect(self, image: Image.Image, image_id: str) -> list[Prediction]: ...
 ```
 `mask` and `polygon` are left out of hashing and `==` because a dict or list is not hashable (a
@@ -859,7 +873,7 @@ Rules:
 - **Don't edit files you don't own.** If you need a change somewhere else, write it in your notes.
 - Existing `autolabel/*.py` files (evaluate, owlv2, gdino, merge, coco, ...) are **read-only** for
   everyone. Import them, wrap them, or ask the integrator. One exception: models may add
-  the logit-returning method to `autolabel/owlv2.py` (see *Examples mode: who builds what*).
+  one method to `autolabel/owlv2.py` for examples mode (see *Examples mode: who builds what*).
 - Each session keeps `docs/agents/<name>.md` up to date with these sections: *Done*, *Packages needed* (with
   versions and VERIFIED/GUESS), *Contract change requests*, and *Open questions*.
 - Export works as **pure functions on the API JSON shapes**, so it can be built from the fixtures
