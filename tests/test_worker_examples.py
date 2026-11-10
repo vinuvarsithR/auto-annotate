@@ -29,7 +29,12 @@ class StandInExample:  # same fields as the contract's Example, used until model
 
 
 class FakeExampleRun:
-    def __init__(self, classes, examples, unusable):
+    def __init__(self, classes, examples, unusable, min_examples=None):
+        if min_examples:  # like owlv2: a class with too few examples is not run
+            unusable = set(unusable) | {s.name for s in classes
+                                        if len(examples[s.name]) < min_examples}
+            self.skip_reasons = {s.name: f"needs at least {min_examples} examples"
+                                 for s in classes if len(examples[s.name]) < min_examples}
         self.classes = [s for s in classes if s.name not in unusable]
         self.used = {s.name: len(examples[s.name]) for s in self.classes}
         self.unusable = [s.name for s in classes if s.name in unusable]
@@ -40,6 +45,7 @@ class Models:
 
     def __init__(self):
         self.unusable = ()    # class names the detector rejects
+        self.min_examples = None  # set: the fake run gives skip_reasons like owlv2
         self.prepare_error = None
         self.prepare_calls = []
         self.run_calls = []
@@ -52,7 +58,7 @@ class Models:
                                    "examples": examples, "options": options})
         if self.prepare_error:
             raise self.prepare_error
-        return FakeExampleRun(classes, examples, self.unusable)
+        return FakeExampleRun(classes, examples, self.unusable, self.min_examples)
 
     def run(self, images, classes, **kwargs):
         images = list(images)
@@ -389,6 +395,37 @@ def test_result_has_counts_and_both_skip_reasons(client, models):
         "skipped_classes": [{"class_name": "sb", "reason": "no examples"},
                             {"class_name": "rb", "reason": "no usable examples"}]}
     assert [k.name for k in models.run_calls[0]["classes"]] == ["person", "biax"]
+
+
+def test_reason_comes_from_the_detectors_skip_reasons(client, models):
+    models.min_examples = 5
+    models.unusable = ("rb",)  # rejected with no reason given -> the default reason
+    s = setup_project(client, n_images=1)
+    iid, ids = s["image_ids"][0], s["class_ids"]
+    for _ in range(5):
+        _insert(client, iid, ids["person"])
+        _insert(client, iid, ids["rb"])
+    for _ in range(4):
+        _insert(client, iid, ids["biax"])
+    job = _run(client, s["pid"])
+    assert job["status"] == "done" and job["error"] is None
+    status = client.get(f"/api/jobs/{job['id']}").json()  # the #10 job status endpoint
+    assert status["result"]["examples_by_class"] == {"person": 5}
+    assert status["result"]["skipped_classes"] == [
+        {"class_name": "sb", "reason": "no examples"},
+        {"class_name": "rb", "reason": "no usable examples"},
+        {"class_name": "biax", "reason": "needs at least 5 examples"}]
+    assert [k.name for k in models.run_calls[0]["classes"]] == ["person"]
+
+
+def test_no_skips_with_skip_reasons_gives_an_empty_list(client, models):
+    models.min_examples = 5
+    s = setup_project(client, n_images=1)
+    for cid in s["class_ids"].values():
+        for _ in range(5):
+            _insert(client, s["image_ids"][0], cid)
+    job = _run(client, s["pid"])
+    assert client.get(f"/api/jobs/{job['id']}").json()["result"]["skipped_classes"] == []
 
 
 def test_skipped_classes_is_empty_when_nothing_was_skipped(client, models):
