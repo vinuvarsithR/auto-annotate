@@ -61,6 +61,15 @@ Real check on the spike's 40 frames (VERIFIED, CPU, thresholds tuned on those fr
   Real check (VERIFIED, Windows CPU, cutoffs from the examples, nothing tuned): 40 spike frames, floor 0.05: 20.0
   boxes/img (629.5 without the cap), macro-F1 0.173, 4.8 s/img; prepare 268 s for 19 images, 37 examples. Same numbers
   as calib2 on the saved logits. Cap 5 costs recall: sb 0.90 -> 0.60, biax 0.88 -> 0.38, person 0.99 -> 0.87.
+- 2026-11-10: **owlv2 examples = spike method, rule C** (CONTRACT 6845950). Replaced the prototype mean, class_cutoff,
+  calibrated sigmoid and top-5 cap. `autolabel/owlv2.py`: `box_features` (normalized class embeddings, boxes,
+  objectness) replaces `image_guided_logits`. `ExampleRun.skip_reasons` added to base.py. On the user's instruction the
+  `pos` row was written straight into CONTRACT.md (was a placeholder), with the `bg` details pinned: overlap = IoU >= 0.3,
+  objectness >= 0.01 counts, no bg value -> threshold = pos. One model pass per example image.
+  40-frame benchmark, 5 examples/class, Windows CPU, nothing tuned (VERIFIED): macro-F1 0.546, 3.6 boxes/img,
+  4.6 s/img, prepare 88 s (spike C was 0.559 / 4.0). Person is lower (R 0.61 -> 0.37) because its example images
+  hold more persons than the 1 example box, and the contract counts them as background: bg rises above pos, so the
+  threshold becomes pos (0.869, spike 0.846). With every person box in those images given as examples: macro-F1 0.564, 1.8 boxes/img.
 
 ## Packages needed
 <!-- package, version, why, VERIFIED or GUESS. The integrator adds them to requirements.txt. -->

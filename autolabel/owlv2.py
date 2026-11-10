@@ -181,18 +181,23 @@ class Owlv2Detector:
             dets.append(Detection(int(label[i]), float(sc[i]), (x1, y1, x2 - x1, y2 - y1)))
         return dets
 
-    def image_guided_logits(self, image, queries: list) -> tuple[object, object]:
+    def box_features(self, image) -> tuple[object, object, object]:
         """
-        queries[c] = one query embedding for class c.
-        Returns (logits [patches, classes], boxes [patches, 4]) on the CPU: raw class_predictor logits,
-        no sigmoid, no threshold, no NMS; boxes as cx, cy, w, h relative to the padded square.
+        Examples mode (CONTRACT #9, owlv2 rules): one vision pass, every predicted box of the image.
+        Returns on the CPU, float32: class embeddings [boxes, 512] L2-normalized, boxes [boxes, 4] as
+        cx, cy, w, h relative to the padded square (side = longer image side), objectness [boxes] (sigmoid).
         """
         torch = self.torch
-        feats, boxes = self._image_features(image)
-        q = torch.stack(queries)[None].to(self.device)
+        inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         with torch.inference_mode():
-            logits, _ = self.model.class_predictor(feats, query_embeds=q, query_mask=torch.ones(q.shape[:2], device=self.device))
-        return logits[0].float().cpu(), boxes.float().cpu()
+            feature_map, _ = self.model.image_embedder(pixel_values=inputs["pixel_values"])
+            b, h, w, d = feature_map.shape
+            feats = feature_map.reshape(b, h * w, d)
+            _, class_embeds = self.model.class_predictor(feats)       # returned un-normalized
+            boxes = self.model.box_predictor(feats, feature_map)
+            objectness = self.model.objectness_predictor(feats).sigmoid()
+        embeds = torch.nn.functional.normalize(class_embeds[0].float(), dim=-1)
+        return embeds.cpu(), boxes[0].float().cpu(), objectness[0].float().cpu()
 
     def peak_vram_gb(self) -> float | None:
         if self.device.startswith("cuda"):

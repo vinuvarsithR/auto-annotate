@@ -1,7 +1,7 @@
 """Examples mode outside yoloe: fake, owlv2, detector_modes, pipeline. CPU only, mocked model,
-except one slow test: skipped unless AUTOLABEL_SLOW=1. AUTOLABEL_SLOW_IMAGE=path picks its frame."""
+except one slow test: skipped unless AUTOLABEL_SLOW=1. It needs crane frames
+(AUTOLABEL_CRANE_DATA, default: see CRANE below)."""
 
-import math
 import os
 
 import pytest
@@ -12,7 +12,8 @@ import autolabel.models as models
 from autolabel import pipeline
 from autolabel.models import detector_modes, get_detector
 from autolabel.models.base import ClassSpec, Example, Prediction
-from autolabel.models.owlv2 import TOP_PER_CLASS, Owlv2ExampleRun, Owlv2TextDetector
+from autolabel.models.owlv2 import (Owlv2ExampleRun, Owlv2TextDetector, class_threshold,
+                                    example_box_index, pos_value)
 from autolabel.owlv2 import Detection
 
 CLASSES = [ClassSpec("person", "p"), ClassSpec("biax", "b", min_score=0.5), ClassSpec("sb", "s")]
@@ -99,167 +100,171 @@ def test_prepare_passes_options_to_get_detector(img, monkeypatch):
     assert seen == {"k": 1}
 
 
-# ---- owlv2 ----
+# ---- owlv2 (CONTRACT #9 owlv2 rules: cosine, max over examples, rule C threshold) ----
 
 class FakeOwl:
-    """scenes: what image_guided_logits returns, one (logits, boxes) per call, in order."""
+    """scenes: what box_features returns, one (embeds, boxes, objectness) per call, in order."""
 
-    def __init__(self, vectors=None, scenes=()):
-        self.vectors = list(vectors or [])
+    def __init__(self, scenes=()):
         self.scenes = list(scenes)
-        self.boxes, self.queries = [], None
         self.calls = 0
 
-    def query_embedding(self, image, bbox):
-        self.boxes.append(bbox)
-        return torch.tensor(self.vectors.pop(0), dtype=torch.float32), 0.9
-
-    def image_guided_logits(self, image, queries):
-        self.queries = queries
+    def box_features(self, image):
         self.calls += 1
         return self.scenes.pop(0)
 
 
-def scene(rows, boxes=None):
-    """rows: logits [patches][classes]. boxes: pixels x, y, w, h on a 100 px image; default one
-    far-apart 8 px box per patch, so NMS leaves them all alone."""
-    boxes = boxes or [(i % 10 * 10, i // 10 * 10, 8, 8) for i in range(len(rows))]
+def scene(embeds, boxes=None, objectness=None):
+    """embeds: one vector per predicted box (normalized here). boxes: pixels x, y, w, h on a 100 px
+    image; default one far-apart 8 px box each, so NMS leaves them alone. objectness default 1."""
+    boxes = boxes or [(i % 10 * 10, i // 10 * 10, 8, 8) for i in range(len(embeds))]
     rel = [((x + w / 2) / 100, (y + h / 2) / 100, w / 100, h / 100) for x, y, w, h in boxes]
-    return torch.tensor(rows, dtype=torch.float32), torch.tensor(rel, dtype=torch.float32)
+    obj = objectness or [1.0] * len(embeds)
+    e = torch.nn.functional.normalize(torch.tensor(embeds, dtype=torch.float32), dim=-1)
+    return e, torch.tensor(rel, dtype=torch.float32), torch.tensor(obj, dtype=torch.float32)
 
 
-def owl_run(classes, cutoffs, scenes, floors=None):
-    """A run with chosen cutoffs, to test detect on its own. prepare_examples has its own tests."""
-    floors = floors or [0.05] * len(classes)
-    return Owlv2ExampleRun(FakeOwl(scenes=scenes), classes, [torch.zeros(2) for _ in classes],
-                           cutoffs, floors, {c.name: 1 for c in classes})
+def owl_run(classes, examples, thresholds, scenes, floors=None):
+    """A run with chosen example embeddings and thresholds, to test detect on its own."""
+    ex_t = [torch.nn.functional.normalize(torch.tensor(e, dtype=torch.float32), dim=-1) for e in examples]
+    return Owlv2ExampleRun(FakeOwl(scenes), classes, ex_t, thresholds,
+                           floors or [0.0] * len(classes), {c.name: 5 for c in classes})
 
 
 IM100 = Image.new("RGB", (100, 100))
 PERSON, BIAX = ClassSpec("person", "p"), ClassSpec("biax", "b")
+FIVE = [(i * 20, 0, 10, 10) for i in range(5)]             # five far-apart example boxes
 
 
-def test_owlv2_prototype_is_the_mean_of_normalized_embeddings(img):
-    backend = FakeOwl([[2.0, 0.0], [0.0, 5.0]], [scene([[1.0], [2.0]], [(1, 2, 30, 20), (5, 6, 7, 8)])])
-    run = Owlv2TextDetector(backend=backend).prepare_examples(
-        CLASSES[:1], {"person": [ex(img, "person"), ex(img, "person", (5, 6, 7, 8))]})
-    assert backend.boxes == [[1, 2, 30, 20], [5, 6, 7, 8]]     # x, y, w, h
-    assert run.used == {"person": 2} and run.unusable == []
-    assert run.prototypes[0].tolist() == pytest.approx([0.70710677, 0.70710677])
+def five(path, category="person"):
+    return [ex(path, category, b) for b in FIVE]
 
 
-def test_owlv2_runs_one_query_per_class_with_examples(img):
-    backend = FakeOwl([[1.0, 0.0], [0.0, 1.0]], [
-        scene([[3.0, 3.0]], [(1, 2, 30, 20)]),                       # cutoffs, one example image
-        scene([[3.0, -9.0], [-9.0, 3.0], [-9.0, 2.0]])])
-    run = Owlv2TextDetector(backend=backend).prepare_examples(
-        CLASSES, {"person": [ex(img, "person")], "biax": [ex(img, "biax")]})
-    assert [c.name for c in run.classes] == ["person", "biax"]      # sb has no examples
-    preds = run.detect(Image.new("RGB", (100, 100)), "3")
-    assert len(backend.queries) == 2
-    assert [(p.category, p.score, p.source, p.polygon) for p in preds] == [
-        ("person", pytest.approx(0.5), "owlv2_image", None),
-        ("biax", pytest.approx(0.5), "owlv2_image", None)]           # biax's 0.27 box: under its 0.5 floor
-    assert preds[0].image_id == "3"
+def test_owlv2_example_embedding_picks_highest_objectness_among_near_best_iou(img):
+    target = (0, 0, 40, 40)
+    boxes = [(0, 0, 40, 40),      # IoU 1.0,  objectness 0.2
+             (2, 0, 40, 40),      # IoU 0.905 (>= 0.9 x best), objectness 0.9  <- picked
+             (20, 0, 40, 40),     # IoU 0.33, objectness 0.99: too far from the best IoU
+             (60, 60, 8, 8)]
+    s = scene([[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]], boxes, [0.2, 0.9, 0.99, 0.5])
+    assert example_box_index(s[1], s[2], [0, 0, 0.4, 0.4]) == 1
+    run = Owlv2TextDetector(backend=FakeOwl([s])).prepare_examples(
+        [PERSON], {"person": [ex(img, "person", target)] * 5})
+    assert run.examples[0].tolist() == [[0.0, 1.0, 0.0]] * 5
 
 
-def test_owlv2_score_is_half_at_class_cutoff():
-    run = owl_run([PERSON], [7.0], [scene([[7.0], [9.0]])])
-    assert [p.score for p in run.detect(IM100, "1")] == pytest.approx([1 / (1 + math.exp(-2)), 0.5])
+def test_owlv2_score_is_raw_cosine_max_over_examples_not_mean():
+    # Examples [1, 0] and [0, 1]. The mean prototype would give 0.707 to [1, 0]; max gives 1.0.
+    run = owl_run([PERSON], [[[1, 0], [0, 1]]], [0.0], [scene([[1, 0], [0.6, 0.8], [-1, 0]])])
+    preds = run.detect(IM100, "7")
+    assert [p.score for p in preds] == pytest.approx([1.0, 0.8, 0.0])  # [-1, 0]: best is 0 (vs [0, 1])
+    assert all(p.source == "owlv2_image" and p.image_id == "7" and p.polygon is None for p in preds)
 
 
-def test_owlv2_cutoff_is_median_of_example_logits(img):
-    # Each example box matches its own patch exactly. The 9.0 patch belongs to no example.
-    boxes = [(0, 0, 10, 10), (20, 0, 10, 10), (40, 0, 10, 10), (60, 0, 10, 10), (80, 0, 10, 10)]
-    rows = [[1.0], [100.0], [5.0], [6.0], [9.0]]
-    items = [ex(img, "person", b) for b in boxes[:4]]
-    odd = Owlv2TextDetector(backend=FakeOwl([[1.0, 0.0]] * 3, [scene(rows, boxes)]))
-    assert odd.prepare_examples([PERSON], {"person": items[:3]}).cutoffs == [5.0]
-    even = Owlv2TextDetector(backend=FakeOwl([[1.0, 0.0]] * 4, [scene(rows, boxes)]))
-    assert even.prepare_examples([PERSON], {"person": items}).cutoffs == [5.5]  # mean of 5 and 6
+def test_owlv2_objectness_filter_is_0_01():
+    run = owl_run([PERSON], [[[1, 0]]], [0.0], [scene([[1, 0], [1, 0]], objectness=[0.009, 0.01])])
+    preds = run.detect(IM100, "1")
+    assert [p.bbox[0] for p in preds] == [10]          # only the 0.01 box (the second, at x 10)
 
 
-def test_owlv2_cutoff_runs_the_model_once_per_example_image(img, tmp_path):
+@pytest.mark.parametrize("shift,kept", [(20, 1), (27, 2)])   # IoU 0.33 -> suppressed, IoU 0.19 -> kept
+def test_owlv2_nms_is_class_agnostic_at_0_3(shift, kept):
+    boxes = [(0, 0, 40, 40), (shift, 0, 40, 40)]
+    run = owl_run([PERSON, BIAX], [[[1, 0]], [[0, 1]]], [0.5, 0.5], [scene([[1, 0], [0.1, 1]], boxes)])
+    preds = run.detect(IM100, "1")
+    assert len(preds) == kept and preds[0].category == "person"
+    assert [p.category for p in preds] == ["person", "biax"][:kept]
+
+
+def test_owlv2_box_passing_two_classes_keeps_the_higher_score():
+    run = owl_run([PERSON, BIAX], [[[1, 0]], [[0, 1]]], [0.0, 0.0], [scene([[0.8, 0.6]])])
+    assert [(p.category, round(p.score, 3)) for p in run.detect(IM100, "1")] == [("person", 0.8)]
+
+
+def test_owlv2_box_must_pass_its_class_threshold_and_floor():
+    run = owl_run([PERSON, BIAX], [[[1, 0]], [[0, 1]]], [0.9, 0.1],
+                  [scene([[0.8, 0.6], [0.6, 0.8], [0.95, 0.31]])], floors=[0.05, 0.7])
+    # box 0: person 0.8 < 0.9, biax 0.6 < floor 0.7; box 1: biax 0.8 passes; box 2: person 0.95 passes.
+    assert [(p.category, round(p.score, 2)) for p in run.detect(IM100, "1")] == [("person", 0.95), ("biax", 0.8)]
+
+
+@pytest.mark.parametrize("pos,bg,expected", [(0.9, 0.8, 0.85), (0.8, 0.9, 0.8), (0.5, None, 0.5), (-0.2, -0.4, 0.0)])
+def test_owlv2_threshold_is_halfway_never_above_pos(pos, bg, expected):
+    assert class_threshold(pos, bg) == pytest.approx(expected)
+
+
+def test_owlv2_pos_is_median_leave_one_out_cosine():
+    e = torch.nn.functional.normalize(torch.tensor(
+        [[1, 0, 0], [1, 0, 0], [0.8, 0.6, 0], [0.6, 0.8, 0], [0, 1, 0]], dtype=torch.float32), dim=-1)
+    assert pos_value(e) == pytest.approx(0.96)          # best others: 1, 1, 0.96, 0.96, 0.8
+    assert pos_value(e[1:]) == pytest.approx(0.88)      # even count: 0.8, 0.96, 0.96, 0.8 -> mean of 0.8 and 0.96
+
+
+def test_owlv2_prepare_threshold_from_pos_and_bg(img):
+    # One image holds the 5 examples (pos 0.96, see above) plus three other boxes:
+    #  [0.6, 0, 0.8] free background, score 0.6 -> bg 0.6
+    #  [1, 0, 0] with objectness 0.005: ignored by the objectness filter
+    #  [1, 0, 0] overlapping an example (IoU 0.6 >= 0.3): not background
+    embeds = [[1, 0, 0], [1, 0, 0], [0.8, 0.6, 0], [0.6, 0.8, 0], [0, 1, 0], [0.6, 0, 0.8], [1, 0, 0], [1, 0, 0]]
+    boxes = FIVE + [(50, 50, 10, 10), (70, 70, 10, 10), (0, 0, 10, 6)]
+    s = scene(embeds, boxes, [1.0] * 6 + [0.005, 1.0])
+    backend = FakeOwl([s])
+    run = Owlv2TextDetector(backend=backend).prepare_examples([PERSON], {"person": five(img)})
+    assert backend.calls == 1                            # one model pass per example image
+    assert run.thresholds == pytest.approx([(0.96 + 0.6) / 2])
+    assert run.used == {"person": 5} and run.unusable == [] and run.skip_reasons == {}
+
+
+def test_owlv2_bg_is_median_over_example_images_and_pos_without_bg(img, tmp_path):
     other = tmp_path / "other.png"
     Image.new("RGB", (100, 50)).save(other)
-    backend = FakeOwl([[1.0, 0.0]] * 3, [scene([[2.0]], [(1, 2, 30, 20)]), scene([[4.0]], [(1, 2, 30, 20)])])
+    same = [[1, 0]] * 5
+    # image 1: 3 examples + background 0.2; image 2: 2 examples + background 0.6 -> bg = median(0.2, 0.6) = 0.4
+    s1 = scene(same[:3] + [[0.2, 0.9798]], FIVE[:3] + [(60, 60, 8, 8)])
+    s2 = scene(same[:2] + [[0.6, 0.8]], FIVE[:2] + [(60, 60, 8, 8)])
+    items = [ex(img, "person", b) for b in FIVE[:3]] + [ex(str(other), "person", b) for b in FIVE[:2]]
+    run = Owlv2TextDetector(backend=FakeOwl([s1, s2])).prepare_examples([PERSON], {"person": items})
+    assert run.thresholds == pytest.approx([(1.0 + 0.4) / 2], abs=1e-4)
+    # No free box anywhere -> threshold = pos.
+    lonely = scene(same, FIVE)
+    run = Owlv2TextDetector(backend=FakeOwl([lonely])).prepare_examples([PERSON], {"person": five(img)})
+    assert run.thresholds == pytest.approx([1.0])
+
+
+def test_owlv2_class_with_4_examples_is_skipped_with_reason_5_runs(img):
+    s = scene([[1, 0]] * 5 + [[0, 1]], FIVE + [(60, 60, 8, 8)])
+    backend = FakeOwl([s])
     run = Owlv2TextDetector(backend=backend).prepare_examples(
-        [PERSON], {"person": [ex(img, "person"), ex(img, "person"), ex(str(other), "person")]})
-    assert backend.calls == 2 and run.cutoffs == [2.0]
+        CLASSES, {"person": five(img)[:4], "biax": five(img, "biax")})
+    assert [c.name for c in run.classes] == ["biax"]     # sb: no examples, not listed (worker: "no examples")
+    assert run.unusable == ["person"]
+    assert run.skip_reasons == {"person": "needs at least 5 examples"}
+    assert run.used == {"biax": 5}
+    assert backend.calls == 1
 
 
-def test_owlv2_single_example_cutoff(img):
-    backend = FakeOwl([[1.0, 0.0]], [scene([[-1.0], [4.5]], [(50, 50, 9, 9), (1, 2, 30, 20)])])
-    run = Owlv2TextDetector(backend=backend).prepare_examples([PERSON], {"person": [ex(img, "person")]})
-    assert run.cutoffs == [4.5]
+def test_owlv2_no_top_5_cap():
+    rows = [[1.0, 0.1 * i] for i in range(8)]
+    preds = owl_run([PERSON], [[[1, 0]]], [0.0], [scene(rows)]).detect(IM100, "1")
+    assert len(preds) == 8
+    assert [p.score for p in preds] == sorted(p.score for p in preds)[::-1]   # best first
 
 
-def test_owlv2_each_class_has_its_own_cutoff(img):
-    boxes = [(0, 0, 20, 20), (50, 50, 20, 20)]
-    scenes = [scene([[3.0, 0.0], [0.0, 8.0]], boxes),   # logits of both prototypes, cutoffs 3 and 8
-              scene([[3.0, 3.0]], [(0, 0, 9, 9)])]      # one logit of 3: typical person, weak biax
-    run = Owlv2TextDetector(backend=FakeOwl([[1.0, 0.0], [0.0, 1.0]], scenes)).prepare_examples(
-        [PERSON, BIAX], {"person": [ex(img, "person", boxes[0])], "biax": [ex(img, "biax", boxes[1])]})
-    assert run.cutoffs == [3.0, 8.0]
-    assert {p.category: p.score for p in run.detect(IM100, "1")} == pytest.approx({"person": 0.5})
-    # 3 vs a cutoff of 8 is 0.0067, under the 0.05 floor. Lower the floor to see the score.
-    run.floors = [0.05, 0.001]
-    run.backend.scenes = [scene([[3.0, 3.0]], [(0, 0, 9, 9)])]
-    assert {p.category: p.score for p in run.detect(IM100, "1")} == pytest.approx(
-        {"person": 0.5, "biax": 1 / (1 + math.exp(5))})
+def test_owlv2_boxes_are_clipped_and_empty_ones_dropped():
+    im = Image.new("RGB", (100, 50))                    # wide: the padded square is 100 x 100
+    boxes = [(90, 40, 20, 20), (10, 70, 8, 8)]          # past the edge; fully in the padding
+    preds = owl_run([PERSON], [[[1, 0]]], [0.0], [scene([[1, 0], [1, 0]], boxes)]).detect(im, "1")
+    assert [p.bbox for p in preds] == [pytest.approx((90, 40, 10, 10))]
 
 
-def test_owlv2_min_score_uses_calibrated_score():
-    # Raw sigmoid of 9.9 is 0.99995, calibrated it is 0.475: under a 0.5 floor.
-    run = owl_run([PERSON], [10.0], [scene([[9.9], [10.0]])], floors=[0.5])
-    assert [p.score for p in run.detect(IM100, "1")] == pytest.approx([0.5])
-    # The default floor 0.05 is logit 2.94 under the cutoff.
-    run = owl_run([PERSON], [10.0], [scene([[7.0], [7.1]])])
-    assert [p.score for p in run.detect(IM100, "1")] == pytest.approx([1 / (1 + math.exp(2.9))])
-
-
-def test_owlv2_cap_is_per_class_and_keeps_best():
-    rows = [[float(i), float(i)] for i in range(8)]
-    preds = owl_run([PERSON, BIAX], [0.0, 0.0], [scene(rows)]).detect(IM100, "1")
-    assert TOP_PER_CLASS == 5
-    for name in ("person", "biax"):
-        kept = [p.score for p in preds if p.category == name]
-        assert kept == pytest.approx([1 / (1 + math.exp(-i)) for i in (7, 6, 5, 4, 3)])
-
-
-def test_owlv2_cap_keeps_order_where_the_score_rounds_to_one():
-    rows = [[100.0 + i] for i in range(8)]
-    boxes = [(i * 10, 0, 8, 8) for i in range(8)]
-    preds = owl_run([PERSON], [0.0], [scene(rows, boxes)]).detect(IM100, "1")
-    assert all(p.score == 1.0 for p in preds)
-    assert [p.bbox[0] for p in preds] == pytest.approx([70, 60, 50, 40, 30])
-
-
-def test_owlv2_cap_runs_after_nms():
-    # Six near-copies of the best box, then 5 others. A cap before NMS would leave one box.
-    boxes = [(10, 10, 20, 20)] * 6 + [(50 + i * 10, 60, 8, 8) for i in range(5)]
-    rows = [[9.0 - i * 0.01] for i in range(6)] + [[5.0 - i] for i in range(5)]
-    preds = owl_run([PERSON], [0.0], [scene(rows, boxes)]).detect(IM100, "1")
-    assert [p.bbox[0] for p in preds] == pytest.approx([10, 50, 60, 70, 80])
-
-
-def test_owlv2_cap_counts_only_boxes_inside_the_image():
-    # Wide image: the first patches sit in the padding below it and clip to nothing.
-    im = Image.new("RGB", (100, 50))
-    boxes = [(i * 10, 70, 8, 8) for i in range(5)] + [(i * 15, 0, 8, 8) for i in range(5)]
-    rows = [[9.0 - i * 0.1] for i in range(10)]
-    preds = owl_run([PERSON], [0.0], [scene(rows, boxes)]).detect(im, "1")
-    assert len(preds) == 5 and all(p.bbox[1] == 0 for p in preds)
-
-
-def test_owlv2_no_box_above_floor_returns_empty():
-    run = owl_run([PERSON], [10.0], [scene([[1.0], [2.0]])])
+def test_owlv2_no_box_above_threshold_returns_empty():
+    run = owl_run([PERSON], [[[1, 0]]], [0.9], [scene([[0, 1], [0.5, 0.5]])])
     assert run.detect(IM100, "1") == []
 
 
 def test_owlv2_run_with_no_classes_finds_nothing():
     run = Owlv2TextDetector(backend=FakeOwl()).prepare_examples(CLASSES, {})
-    assert run.classes == [] and run.detect(Image.new("RGB", (8, 8)), "1") == []
+    assert run.classes == [] and run.unusable == [] and run.detect(Image.new("RGB", (8, 8)), "1") == []
 
 
 def test_owlv2_text_detect_still_uses_its_own_source():
@@ -270,7 +275,7 @@ def test_owlv2_text_detect_still_uses_its_own_source():
 
 
 def test_owlv2_text_scores_unchanged():
-    # Text mode: the backend's sigmoid is the score, no cutoff, no cap.
+    # Text mode: the backend's sigmoid is the score, no threshold rule, no cap.
     scores = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
     backend = FakeOwl()
     backend.detect = lambda image, prompts, threshold: [Detection(0, s, (i, 0, 3, 4)) for i, s in enumerate(scores)]
@@ -278,36 +283,47 @@ def test_owlv2_text_scores_unchanged():
     assert [p.score for p in preds] == pytest.approx(scores)
 
 
-@pytest.mark.skipif(os.environ.get("AUTOLABEL_SLOW") != "1", reason="slow: set AUTOLABEL_SLOW=1")
-def test_owlv2_real_model_boxes_per_image_are_capped(tmp_path):
-    path = os.environ.get("AUTOLABEL_SLOW_IMAGE")
-    if path:
-        frame = Image.open(path).convert("RGB")
-    else:   # busy noise: without the cap this leaves far more than 5 boxes per class
-        frame = Image.effect_noise((640, 480), 80).convert("RGB")
-    example = tmp_path / "example.png"
-    frame.save(example)
-    w, h = frame.size
-    classes = [ClassSpec("a", "a"), ClassSpec("b", "b", min_score=0.001)]
-    examples = {"a": [Example("1", str(example), "a", (w * 0.1, h * 0.1, w * 0.2, h * 0.2)),
-                      Example("1", str(example), "a", (w * 0.6, h * 0.1, w * 0.2, h * 0.2))],
-                "b": [Example("1", str(example), "b", (w * 0.4, h * 0.6, w * 0.3, h * 0.2))]}
-    det = Owlv2TextDetector(device="cpu", min_score=0.001)
-    run = det.prepare_examples(classes, examples)
-    preds = run.detect(frame, "x")
-    print(f"\nOWLv2 examples: {len(preds)} boxes, cutoffs {run.cutoffs}")
-    assert len(preds) <= TOP_PER_CLASS * len(classes)
-    for name in ("a", "b"):
-        assert sum(p.category == name for p in preds) <= TOP_PER_CLASS
-    assert all(p.source == "owlv2_image" and 0 <= p.score <= 1 for p in preds)
+# Crane frames for the slow test (gitignored data; AUTOLABEL_CRANE_DATA overrides the folder).
+CRANE = os.environ.get("AUTOLABEL_CRANE_DATA", r"D:\autoannotate\testdata\v1_yolo_unzipped")
+RB_EXAMPLES = [   # rb boxes x1, y1, x2, y2 px, from the provisional Roboflow labels
+    ("rb_1__cam0_2026-09-29_16-24-22_00000_jpg.rf.d2810ddfc9001ba14f98395ed989cb7d.jpg", (645, 151, 714, 446)),
+    ("rb_1__cam0_2026-09-29_16-24-22_00599_jpg.rf.3c0294df4705ef456dfd84c4a2a80c84.jpg", (574, 152, 671, 532)),
+    ("rb_1__cam0_2026-09-29_16-34-20_00320_jpg.rf.390160db9e8d6a492be3e32f5b21ea95.jpg", (557, 161, 668, 552)),
+    ("rb_1__cam0_2026-09-29_16-44-25_00028_jpg.rf.445f08aff4a838eb8924f98eb4376f40.jpg", (561, 191, 634, 499)),
+    ("rb_load__cam0_2026-09-29_18-14-10_00237_jpg.rf.3c82467ae591ceabcbadc573644c9d9f.jpg", (517, 136, 712, 583))]
+RB_TEST = ("rb_load__cam0_2026-09-29_18-24-11_00000_jpg.rf.e817a2afc43fa7115f5bae32a93bd093.jpg", (539, 153, 712, 546))
 
-    # The logit method agrees with the existing scoring: same logits, same best sigmoid.
-    logits, boxes = det.backend.image_guided_logits(frame, run.prototypes)
-    assert boxes.shape == (logits.shape[0], 4) and logits.shape[1] == 2
-    guided = det.backend.detect_image_guided(frame, [[p] for p in run.prototypes], threshold=0.0)
-    for c in (0, 1):
-        best = max(d.score for d in guided if d.label == c)
-        assert best == pytest.approx(float(torch.sigmoid(logits[:, c]).max()), abs=1e-5)
+
+def _iou(a, b):
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    i = ix * iy
+    return i / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i)
+
+
+@pytest.mark.skipif(os.environ.get("AUTOLABEL_SLOW") != "1", reason="slow: set AUTOLABEL_SLOW=1")
+def test_owlv2_real_model_finds_rb_on_a_crane_frame():
+    images = os.path.join(CRANE, "train", "images")
+    if not os.path.isdir(images):
+        pytest.skip(f"crane frames not found in {images} (set AUTOLABEL_CRANE_DATA)")
+    examples = {"rb": [Example("1", os.path.join(images, f), "rb", (x1, y1, x2 - x1, y2 - y1))
+                       for f, (x1, y1, x2, y2) in RB_EXAMPLES],
+                "person": [Example("1", os.path.join(images, RB_EXAMPLES[0][0]), "person", (2, 215, 53, 39))] * 4}
+    det = Owlv2TextDetector(device="cpu")
+    run = det.prepare_examples([ClassSpec("person", "person"), ClassSpec("rb", "rb")], examples)
+    assert run.unusable == ["person"] and run.skip_reasons == {"person": "needs at least 5 examples"}
+    assert run.used == {"rb": 5} and 0 < run.thresholds[0] <= 1
+
+    frame = Image.open(os.path.join(images, RB_TEST[0])).convert("RGB")
+    embeds, boxes, objectness = det.backend.box_features(frame)
+    assert embeds.shape[0] == boxes.shape[0] == objectness.shape[0] and boxes.shape[1] == 4
+    assert torch.linalg.vector_norm(embeds, dim=1) == pytest.approx(torch.ones(len(embeds)), abs=1e-4)
+    preds = run.detect(frame, "x")
+    print(f"\nOWLv2 examples on a crane frame: rb threshold {run.thresholds[0]:.3f}, "
+          f"{len(preds)} boxes, scores {[round(p.score, 3) for p in preds]}")
+    assert preds and all(p.category == "rb" and p.source == "owlv2_image" and 0 <= p.score <= 1 for p in preds)
+    best = max(_iou((p.bbox[0], p.bbox[1], p.bbox[0] + p.bbox[2], p.bbox[1] + p.bbox[3]), RB_TEST[1]) for p in preds)
+    assert best >= 0.5
 
 
 def test_get_detector_fake_has_prepare_examples():

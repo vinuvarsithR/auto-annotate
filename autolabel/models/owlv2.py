@@ -1,5 +1,5 @@
 """
-owlv2.py - the real OWLv2 text-prompt detector, behind the same interface as "fake".
+owlv2.py - the real OWLv2 detector, behind the same interface as "fake".
 
 Plain-English summary
 ---------------------
@@ -11,27 +11,38 @@ Plain-English summary
   0.20 far too high for the crane data and the project favours recall.
 * The heavy work is done by autolabel/owlv2.py (read-only, Phase 1 code). This
   file only turns its output into Prediction objects.
-* Examples mode (source "owlv2_image"): per class, the mean of the normalized
-  `query_embedding` of its examples is one query. Raw sigmoids sit near 0.9995 on the crane
-  data, so the score is calibrated per class: sigmoid(logit - class_cutoff), where class_cutoff
-  is the median logit of the class's own examples against the prototype. 0.5 means "as good
-  as a typical example". After NMS only the TOP_PER_CLASS best boxes per class per image stay.
+* Examples mode (source "owlv2_image", CONTRACT #9 owlv2 rules, the models spike's "rule C"):
+  - each example keeps its own embedding: the class embedding of the model's predicted box that
+    matches the drawn box (highest objectness among boxes with IoU >= 0.9 x the best IoU);
+  - a box's score for a class = raw cosine to the class's examples, the MAX over them (no mean);
+  - one threshold per class, from the examples only: pos = median leave-one-out cosine between
+    examples, bg = median over the example images of the best score on a box that overlaps no
+    example box; threshold = min(pos, (pos + bg) / 2);
+  - keep boxes with objectness >= 0.01 and score >= threshold and >= min_score, then one
+    class-agnostic NMS at IoU 0.3. No top-N cap.
+  - a class needs at least 5 examples, else it is skipped ("needs at least 5 examples").
 * Weights download once into the Hugging Face cache (~/.cache/huggingface,
   or HF_HOME); get_detector() keeps one loaded instance per process.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from statistics import median
 
 from PIL import Image
 
 from autolabel.models.base import ClassSpec, Example, ExampleRun, Prediction
-from autolabel.owlv2 import Detection, best_box_index, xywh_to_rel_xyxy
+from autolabel.owlv2 import xywh_to_rel_xyxy
 
 DEFAULT_MIN_SCORE = 0.05
-TOP_PER_CLASS = 5       # examples mode only, fixed by CONTRACT
+
+# Examples mode, fixed by CONTRACT (not options).
+MIN_EXAMPLES = 5
+TOO_FEW_REASON = "needs at least 5 examples"
+MATCH_FRACTION = 0.9      # example embedding: boxes with IoU >= 0.9 x the best IoU compete on objectness
+MIN_OBJECTNESS = 0.01
+BG_OVERLAP_IOU = 0.3      # a box with IoU >= 0.3 to an example box is not background
+NMS_IOU = 0.3             # class-agnostic
 
 
 def prompt_for(cls: ClassSpec) -> str:
@@ -64,49 +75,97 @@ def to_predictions(dets, classes: list[ClassSpec], floors: list[float],
     return out
 
 
-def top_per_class(preds: list[Prediction], limit: int = TOP_PER_CLASS) -> list[Prediction]:
-    """Keep the first `limit` boxes of each class. preds must be best-first."""
-    out, seen = [], Counter()
-    for p in preds:
-        seen[p.category] += 1
-        if seen[p.category] <= limit:
-            out.append(p)
-    return out
+# ---- examples mode: small pure functions (tested on their own) ----
+
+def _xyxy(cxcywh):
+    import torch
+
+    cx, cy, w, h = torch.as_tensor(cxcywh, dtype=torch.float32).unbind(-1)
+    return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], -1)
+
+
+def example_box_index(boxes, objectness, target_xyxy) -> int:
+    """The predicted box an example uses: among boxes (cx, cy, w, h relative) with IoU >= 0.9 x the
+    best IoU to target_xyxy (relative), the one with the highest objectness."""
+    import torch
+    from torchvision.ops import box_iou
+
+    ious = box_iou(torch.tensor([target_xyxy], dtype=torch.float32), _xyxy(boxes))[0]
+    candidates = (ious >= ious.max() * MATCH_FRACTION).nonzero().flatten()
+    return int(candidates[torch.as_tensor(objectness)[candidates].argmax()])
+
+
+def class_scores(embeds, examples: list):
+    """embeds [boxes, d] (normalized), examples[c] = [n_c, d] (normalized) -> [boxes, classes]:
+    each class's score is the max cosine over its examples."""
+    import torch
+
+    return torch.stack([(embeds @ e.T).max(dim=1).values for e in examples], dim=1)
+
+
+def pos_value(examples) -> float:
+    """Median over examples of the best cosine to the class's OTHER examples (leave-one-out)."""
+    import torch
+
+    sims = examples @ examples.T
+    sims.fill_diagonal_(float("-inf"))
+    return float(median(sims.max(dim=1).values.tolist()))
+
+
+def class_threshold(pos: float, bg: float | None) -> float:
+    """Rule C: halfway between pos and bg, never above pos, never below 0. No bg value -> pos."""
+    t = pos if bg is None else min(pos, (pos + bg) / 2)
+    return max(0.0, t)
+
+
+def background_score(embeds, boxes, objectness, example_xyxy: list, examples) -> float | None:
+    """Best score for one class on a box (objectness >= 0.01) that overlaps none of the class's example
+    boxes in this image (IoU < 0.3). None when there is no such box."""
+    import torch
+    from torchvision.ops import box_iou
+
+    free = torch.as_tensor(objectness) >= MIN_OBJECTNESS
+    if example_xyxy:
+        ious = box_iou(_xyxy(boxes), torch.tensor(example_xyxy, dtype=torch.float32))
+        free &= ious.max(dim=1).values < BG_OVERLAP_IOU
+    if not bool(free.any()):
+        return None
+    return float((embeds[free] @ examples.T).max())
 
 
 class Owlv2ExampleRun:
-    def __init__(self, backend, classes: list[ClassSpec], prototypes: list, cutoffs: list[float],
-                 floors: list[float], used: dict[str, int], nms_iou: float = 0.5) -> None:
+    def __init__(self, backend, classes: list[ClassSpec], examples: list, thresholds: list[float],
+                 floors: list[float], used: dict[str, int], unusable: list[str] | None = None,
+                 skip_reasons: dict[str, str] | None = None) -> None:
         self.backend = backend
         self.classes = classes
-        self.prototypes = prototypes
-        self.cutoffs = cutoffs
-        self.floors = floors
+        self.examples = examples          # per class: [n, d] normalized example embeddings
+        self.thresholds = thresholds      # per class: rule C
+        self.floors = floors              # per class: min_score or the default floor
         self.used = used
-        self.nms_iou = nms_iou
-        self.unusable: list[str] = []
+        self.unusable = list(unusable or [])
+        self.skip_reasons = dict(skip_reasons or {})
 
     def detect(self, image: Image.Image, image_id: str) -> list[Prediction]:
         if not self.classes:
             return []
         import torch
-        from torchvision.ops import batched_nms
+        from torchvision.ops import nms
 
-        logits, boxes = self.backend.image_guided_logits(image, self.prototypes)
-        margin = logits - torch.tensor(self.cutoffs, dtype=logits.dtype)
-        scores = torch.sigmoid(margin)
-        patch, label = (scores >= torch.tensor(self.floors, dtype=scores.dtype)).nonzero(as_tuple=True)
-        if len(patch) == 0:
+        embeds, boxes, objectness = self.backend.box_features(image)
+        scores = class_scores(embeds, self.examples)                       # [boxes, classes]
+        need = torch.tensor([max(t, f) for t, f in zip(self.thresholds, self.floors)], dtype=scores.dtype)
+        ok = (scores >= need) & (objectness >= MIN_OBJECTNESS)[:, None]
+        box, label = ok.nonzero(as_tuple=True)
+        if len(box) == 0:
             return []
 
         width, height = image.size
-        size = float(max(width, height))
-        cx, cy, bw, bh = boxes[patch].unbind(-1)
-        xyxy = torch.stack([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], -1) * size
-        # margin, not score: far above the cutoff the sigmoid rounds to exactly 1.0 and order is lost.
-        kept = batched_nms(xyxy, margin[patch, label], label, self.nms_iou)   # best first
+        xyxy = _xyxy(boxes[box]) * float(max(width, height))
+        score = scores[box, label]
+        kept = nms(xyxy, score, NMS_IOU)                                    # class-agnostic, best first
 
-        dets = []
+        out = []
         for i in kept.tolist():
             x1, y1, x2, y2 = xyxy[i].tolist()
             # Clip to the real image: the padded area can produce boxes past the edge.
@@ -114,9 +173,15 @@ class Owlv2ExampleRun:
             x2, y2 = min(float(width), x2), min(float(height), y2)
             if x2 <= x1 or y2 <= y1:
                 continue
-            c = int(label[i])
-            dets.append(Detection(c, float(scores[patch[i], c]), (x1, y1, x2 - x1, y2 - y1)))
-        return top_per_class(to_predictions(dets, self.classes, self.floors, image_id, "owlv2_image"))
+            out.append(Prediction(
+                image_id=image_id,
+                category=self.classes[int(label[i])].name,
+                bbox=(x1, y1, x2 - x1, y2 - y1),
+                score=min(1.0, max(0.0, float(score[i]))),
+                source="owlv2_image",
+                mask=None,
+            ))
+        return out
 
 
 class Owlv2TextDetector:
@@ -125,7 +190,8 @@ class Owlv2TextDetector:
     def __init__(self, model_id: str | None = None, device: str = "auto",
                  nms_iou: float = 0.5, min_score: float = DEFAULT_MIN_SCORE,
                  backend=None) -> None:
-        """backend: anything with detect(image, prompts, threshold) -> list[owlv2.Detection].
+        """backend: anything with detect(image, prompts, threshold) -> list[owlv2.Detection]
+        (text mode) and box_features(image) (examples mode).
         Left as None, the real OWLv2 model is loaded (torch imported here, not at module level)."""
         self.min_score = min_score
         self.nms_iou = nms_iou
@@ -147,41 +213,42 @@ class Owlv2TextDetector:
     def prepare_examples(self, classes: list[ClassSpec],
                          examples: dict[str, list[Example]]) -> ExampleRun:
         import torch
-        from torch.nn.functional import normalize
 
-        ran, prototypes, used = [], [], {}
+        unusable, reasons, ready = [], {}, []
         for c in classes:
             items = examples.get(c.name) or []
             if not items:
+                continue                      # the worker reports these as "no examples"
+            if len(items) < MIN_EXAMPLES:
+                unusable.append(c.name)
+                reasons[c.name] = TOO_FEW_REASON
                 continue
-            embeddings = []
+            ready.append((c, items))
+
+        # One model pass per example image, shared by all classes and by bg.
+        features, sizes = {}, {}
+        for _, items in ready:
             for ex in items:
-                with Image.open(ex.path) as im:
-                    rgb = im.convert("RGB")
-                embedding, _overlap = self.backend.query_embedding(rgb, list(ex.bbox))
-                embeddings.append(normalize(embedding, dim=-1))
+                if ex.path not in features:
+                    with Image.open(ex.path) as im:
+                        rgb = im.convert("RGB")
+                    features[ex.path] = self.backend.box_features(rgb)
+                    sizes[ex.path] = float(max(rgb.size))
+
+        ran, embeddings, thresholds, used = [], [], [], {}
+        for c, items in ready:
+            rows, by_image = [], {}
+            for ex in items:
+                embeds, boxes, objectness = features[ex.path]
+                target = xywh_to_rel_xyxy(list(ex.bbox), sizes[ex.path])
+                rows.append(embeds[example_box_index(boxes, objectness, target)])
+                by_image.setdefault(ex.path, []).append(target)
+            mine = torch.stack(rows)
+            bgs = [background_score(*features[path], targets, mine) for path, targets in by_image.items()]
+            bgs = [b for b in bgs if b is not None]
             ran.append(c)
-            prototypes.append(normalize(torch.stack(embeddings).mean(0), dim=-1))
+            embeddings.append(mine)
+            thresholds.append(class_threshold(pos_value(mine), float(median(bgs)) if bgs else None))
             used[c.name] = len(items)
         floors = [floor_for(c, self.min_score) for c in ran]
-        cutoffs = self._class_cutoffs(ran, prototypes, examples)
-        return Owlv2ExampleRun(self.backend, ran, prototypes, cutoffs, floors, used, self.nms_iou)
-
-    def _class_cutoffs(self, classes: list[ClassSpec], prototypes: list,
-                       examples: dict[str, list[Example]]) -> list[float]:
-        """Per class, the median logit against its prototype of the patches query_embedding picked.
-        One model pass per example image, whatever the number of examples in it."""
-        by_image: dict[str, list[tuple[int, tuple]]] = {}
-        for c, cls in enumerate(classes):
-            for ex in examples[cls.name]:
-                by_image.setdefault(ex.path, []).append((c, ex.bbox))
-
-        found: list[list[float]] = [[] for _ in classes]
-        for path, items in by_image.items():
-            with Image.open(path) as im:
-                rgb = im.convert("RGB")
-            logits, boxes = self.backend.image_guided_logits(rgb, prototypes)
-            for c, bbox in items:
-                i, _overlap = best_box_index(boxes, xywh_to_rel_xyxy(list(bbox), max(rgb.size)))
-                found[c].append(float(logits[i, c]))
-        return [median(values) for values in found]
+        return Owlv2ExampleRun(self.backend, ran, embeddings, thresholds, floors, used, unusable, reasons)

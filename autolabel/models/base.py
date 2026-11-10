@@ -53,6 +53,7 @@ class ExampleRun(Protocol):        # one job's prototypes; built at job start, k
     classes: list[ClassSpec]       # the classes that will run, in input order
     used: dict[str, int]           # class name -> examples used (classes that run only)
     unusable: list[str]            # class names the detector rejected all examples for
+    skip_reasons: dict[str, str]   # optional: class in `unusable` -> reason for #9 `result`
 
     def detect(self, image: Image.Image, image_id: str) -> list[Prediction]: ...
 
