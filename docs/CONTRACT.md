@@ -79,7 +79,7 @@ CREATE TABLE annotations (
   mask        TEXT,                       -- COCO RLE JSON or NULL
   polygon     TEXT,                       -- JSON [[x, y], ...] normalized 0..1, or NULL (plain box)
   score       REAL,                       -- NULL for human-drawn boxes
-  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'yoloe_examples' | 'gdino' | 'pipeline' | 'human' | 'import'
+  source      TEXT NOT NULL,              -- 'owlv2' | 'owlv2_image' | 'yoloe_examples' | 'yolo_trained' | 'gdino' | 'pipeline' | 'human' | 'import'
   status      TEXT NOT NULL CHECK (status IN
                 ('auto_accepted', 'needs_review', 'accepted', 'rejected', 'edited')),
   job_id      INTEGER REFERENCES jobs(id),  -- NULL for human-drawn boxes
@@ -89,6 +89,22 @@ CREATE TABLE annotations (
 );
 CREATE INDEX idx_ann_image ON annotations(image_id);
 CREATE INDEX idx_ann_status ON annotations(status);
+
+CREATE TABLE trained_models (            -- #24 - #26; migrate() creates it if missing
+  id           INTEGER PRIMARY KEY,
+  project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL UNIQUE,     -- "eot_crane_v1"; the #9 `model` value
+  version      INTEGER NOT NULL,         -- 1, 2, ... per project, never reused
+  task         TEXT NOT NULL CHECK (task IN ('detect', 'segment')),
+  class_names  TEXT NOT NULL,            -- JSON list, model index order
+  imgsz        INTEGER,                  -- from the checkpoint, or NULL
+  file_name    TEXT NOT NULL,            -- uploaded name, e.g. "best.pt"
+  path         TEXT NOT NULL,            -- data/weights/<project_id>/<name>.pt
+  size_bytes   INTEGER NOT NULL,
+  uploaded_at  TEXT NOT NULL,
+  deleted_at   TEXT,                     -- set by #26; the row is kept
+  UNIQUE (project_id, version)
+);
 ```
 
 Status rules (the backend enforces them):
@@ -175,6 +191,7 @@ Errors always look like this, with a matching HTTP status (400, 404, 409 or 500)
 ```json
 {"error": {"code": "not_found", "message": "image 99 not found"}}
 ```
+Only `class_mismatch` (#24) adds a third key, `details`.
 
 Error codes (the UI may rely on these; `message` is for humans and may change):
 
@@ -186,11 +203,14 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 400 | `no_classes` | detect job on a project with no classes |
 | 400 | `bad_image_ids` | `image_ids` not all in this project |
 | 400 | `bad_class_id` | `class_id` not in this image's project |
+| 400 | `bad_weights` | #24: the `.pt` does not load as an ultralytics checkpoint, or its task is not `detect`/`segment` |
+| 400 | `task_mismatch` | #24: the checkpoint's task is not the `task` sent |
+| 400 | `class_mismatch` | #24: model class names differ from the project's; the error also has `details` (see #24) |
 | 404 | `not_found` | unknown id, unknown path, or image file missing on disk |
 | 405 | `method_not_allowed` | wrong HTTP method for the path |
 | 409 | `name_taken` | project name already used (#1 create, #17 rename) |
 | 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
-| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12), no `done`/`empty` images (#14, #21), Roboflow settings missing from `.env` (#21), #9 `rerun` with no examples-mode job or no `todo` image |
+| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12), no `done`/`empty` images (#14, #21), Roboflow settings missing from `.env` (#21), #9 `rerun` with no examples-mode job or no `todo` image, #23 `segment` with no polygon, #26 while a job uses the model |
 | 500 | `internal_error` | unexpected server error (details only in the server log) |
 
 | # | Method | Path | Purpose |
@@ -217,6 +237,10 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 20 | PATCH | `/images/{iid}` | set image review status |
 | 21 | POST | `/projects/{pid}/roboflow/push` | start Roboflow push job |
 | 22 | POST | `/projects/{pid}/import` | start bulk import job (zip or many image files) |
+| 23 | POST | `/projects/{pid}/train-package` | download Colab training package zip |
+| 24 | POST | `/projects/{pid}/weights` | upload trained `.pt` weights (multipart) |
+| 25 | GET | `/projects/{pid}/weights` | list the project's uploaded models |
+| 26 | DELETE | `/weights/{wid}` | delete an uploaded model |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -789,6 +813,177 @@ def plan_import(root: Path) -> ImportPlan: ...
     # only to read their size. Never touches the database.
 ```
 
+### Train on Colab (#23 - #26)
+The app never trains and Colab cannot reach the app, so the user carries files both ways:
+
+| Step | Who | What |
+|---|---|---|
+| 1 | app (#23) | download a training package zip: reviewed images + labels, `data.yaml`, `split.json`, `train.ipynb` |
+| 2 | user | open `train.ipynb` in Colab (GPU runtime), run the upload cell (picks the zip), the train cell, the download cell (saves `best.pt`) |
+| 3 | app (#24) | upload `best.pt`; the server checks it loads, its task and its class names, stores it as `<project>_v<N>` |
+| 4 | app (#9) | the stored model is a detector name for this project's detect jobs; #25 lists, #26 deletes |
+
+Security: a `.pt` file is a Python pickle, and loading it runs code inside it. Upload only weights you
+trained yourself. (No login until Phase 6.)
+
+### 23. POST /projects/{pid}/train-package
+Request (body optional):
+```json
+{"task": "segment"}
+```
+| Field | Default | Rule |
+|---|---|---|
+| `task` | `"detect"` | `detect` or `segment`; anything else, or any other field -> 400 `bad_request` |
+
+The response is an `application/zip` download named `<project>_train_<task>.zip` (project name made
+safe as in #14). Images, boxes and labels follow #14 exactly: only `review_status` `done` or `empty`
+images, only the approved statuses (`auto_accepted`, `accepted`, `edited`; not configurable here),
+an `empty` image gets an empty label file, zip file names from `export_names`. The image files are
+always in the zip.
+
+| `task` | Label lines | Extra rule |
+|---|---|---|
+| `detect` | `yolo` lines (#14) | none |
+| `segment` | `yolo-seg` lines (#14): a box without polygon becomes its 4 bbox corners, clipped; no area left -> left out | at least one exported box must have a `polygon`, else 409 `conflict` |
+
+Zip layout:
+```
+data.yaml
+split.json
+train.ipynb
+images/train/<name>    labels/train/<stem>.txt
+images/val/<name>      labels/val/<stem>.txt
+```
+`data.yaml` (the notebook unzips to `/content/dataset`, so the path is absolute and fixed):
+```yaml
+path: /content/dataset
+train: images/train
+val: images/val
+nc: 4
+names: ["person", "rb", "sb", "biax"]
+```
+`names` = project class order (#7), as in #14.
+
+Train / val split: **by sequence, never by frame**. Sequence = `autolabel.sequences.sequence_of(file_name)`,
+so every frame of one video lands in the same split.
+
+| Rule | Value |
+|---|---|
+| Target | `T = max(1, round(0.2 x N))` val images, N = exported images |
+| Order | sequences by image count ascending, then by name |
+| Pick | walk that order; a sequence goes to val when (a) val images + its images <= `T`, (b) at least one sequence stays in train, and (c) every class with >= 1 exported box keeps >= 1 box in train |
+| Nothing picked | the first sequence in the order that meets (b) and (c) goes to val alone; if none meets (c), the first that meets (b) (then `classes_missing_in_train` is not empty) |
+| One sequence only | no split possible: every image is in `images/train`, `data.yaml` has `val: images/train`, `val_is_train: true`; there is no `images/val` or `labels/val` |
+
+`split.json`:
+```json
+{"rule": "by_sequence", "val_target": 0.2, "val_is_train": false,
+ "train": {"sequences": ["biax__cam0_2026-09-29_18-48-25", "rb_load__cam0_2026-09-29_18-34-11"], "images": 40},
+ "val": {"sequences": ["rb_load__cam0_2026-09-29_18-24-11"], "images": 10},
+ "classes_missing_in_train": [], "classes_missing_in_val": ["sb"]}
+```
+Sequence lists are sorted by name. With `val_is_train: true`, `val` = `{"sequences": [], "images": 0}`.
+`classes_missing_in_*` list class names (project order) that have exported boxes but none in that split
+(with `val_is_train`, `classes_missing_in_val` is `[]`).
+
+`train.ipynb`: nbformat 4 JSON (`"nbformat": 4`), kernel `python3`, `"metadata"` has `"accelerator": "GPU"`,
+exactly **4 cells**, in this order:
+
+| # | Type | Must contain |
+|---|---|---|
+| 1 | markdown | project name, task, the split counts, "Runtime > Change runtime type > GPU", and the 3 steps below |
+| 2 | code (upload) | `!pip install -q ultralytics==8.4.199` (the version in `requirements.txt`); `from google.colab import files`; `files.upload()`; removes then fills `/content/dataset` by unzipping the uploaded zip |
+| 3 | code (train) | `YOLO("yolo11s-seg.pt")` for `segment`, `YOLO("yolo11s.pt")` for `detect`; `.train(data="/content/dataset/data.yaml", imgsz=960, epochs=100, project="/content/runs", name="<run>", exist_ok=True)` |
+| 4 | code (download) | copies `/content/runs/<run>/weights/best.pt` to `/content/<run>_best.pt` and calls `files.download("/content/<run>_best.pt")` |
+
+`<run>` = `<safe project name>_<task>`. Defaults match the earlier Colab run (`yolo11s`, imgsz 960, file
+`yolo11s_960_v2.pt`). `epochs=100` is the ultralytics default; the earlier run's epoch count is not
+recorded (GUESS). Every code cell's `outputs` is `[]` and `execution_count` is `null`.
+
+Errors (in this order): unknown pid -> 404 `not_found`; bad body or `task` -> 400 `bad_request`; no
+`done`/`empty` image -> 409 `conflict`; `segment` with no exported polygon -> 409 `conflict`; an
+exported image's file missing on disk -> 404 `not_found`. No zip is sent on an error.
+
+Route: `app/api/export.py` (same file as #14; mounted under `/api`). It loads rows and calls
+`build_train_package` (section 3, training package).
+
+### 24. POST /projects/{pid}/weights
+Upload trained weights. `multipart/form-data`:
+
+| Part | Rule |
+|---|---|
+| `file` | exactly one, file name ending `.pt` (any case), 1 byte .. **200 MB** |
+| `task` | form field, required: `detect` or `segment` = what the user trained (the package's task) |
+
+Checks, in this order (nothing is stored when one fails; the temporary file is deleted):
+
+| Check | Error |
+|---|---|
+| unknown pid | 404 `not_found` |
+| missing / extra parts, not `.pt`, empty, > 200 MB, bad `task` | 400 `bad_request` |
+| project has no classes | 400 `no_classes` |
+| `inspect_weights(path)` raises (not a loadable ultralytics checkpoint) | 400 `bad_weights` |
+| `info.task` is not `detect` or `segment` (e.g. `pose`, `classify`) | 400 `bad_weights` |
+| `info.task` != `task` | 400 `task_mismatch` |
+| model class names != project class names (as sets, exact case; or a repeated model name) | 400 `class_mismatch`, with `details` |
+
+Class names are compared **by name, never remapped**. Order may differ (detection matches by name,
+as `yolo`). `class_mismatch` is the one error with an extra key:
+```json
+{"error": {"code": "class_mismatch",
+           "message": "model classes do not match project classes: missing in model: sb; extra in model: beam",
+           "details": {"model_classes": ["person", "rb", "beam", "biax"],
+                       "project_classes": ["person", "rb", "sb", "biax"],
+                       "missing_in_model": ["sb"], "extra_in_model": ["beam"]}}}
+```
+(`missing_in_model` in project order, `extra_in_model` in model order; a repeated model name is listed
+once in `extra_in_model`.)
+
+Storage: `data/weights/<pid>/<name>.pt` (under the app data dir; `data/` is gitignored).
+
+| Field | Rule |
+|---|---|
+| `version` | 1 + the highest `version` this project ever had, deleted rows included, so a number is never reused |
+| `name` | `<safe project name>_v<version>`, e.g. `eot_crane_v1` (project name made safe as in #14, at upload time; later renames do not change it). If another project already uses that name: `<safe project name>_p<pid>_v<version>` |
+
+Response 201 is a **TrainedModel**:
+```json
+{"id": 1, "project_id": 1, "name": "eot_crane_v1", "version": 1, "task": "segment",
+ "class_names": ["person", "rb", "sb", "biax"], "imgsz": 960, "file_name": "best.pt",
+ "size_bytes": 19876543, "uploaded_at": "2026-11-11T10:00:00Z"}
+```
+`class_names` = the model's names in model index order; `imgsz` = from the checkpoint or `null`.
+Owner: backend (route, storage, checks); `inspect_weights` comes from models.
+
+### 25. GET /projects/{pid}/weights
+Response `{"weights": [TrainedModel, ...]}`: the project's uploaded models that are not deleted,
+by `version` ascending. Unknown pid -> 404 `not_found`. Owner: backend.
+
+### 26. DELETE /weights/{wid}
+No body. Response **204**. Deletes the `.pt` file, sets `deleted_at` (the row stays so the version is
+never reused and old jobs still name a real model), and calls `unregister_trained(name)`. After that
+the name is gone from #16 and #25, and #9 with it -> 400 `unknown_model`. A queued or running detect job
+whose `config.model` is this name -> 409 `conflict`, nothing changes. Unknown or already deleted
+`wid` -> 404 `not_found`. Owner: backend.
+
+### Train on Colab: changes to #9, #16, #18
+
+| Entry | Change |
+|---|---|
+| #9 | `model` may also be the `name` of a non-deleted TrainedModel **of this project** (another project's name -> 400 `unknown_model`). It has no modes, so `mode` must be absent or `null` (else `unknown_mode`). The job runs like a text job. Worker: before `run`, look up the row (deleted or missing -> the job fails, `error` "model NAME was deleted"), call `register_trained(name, path, task)`, then call `run(..., detector=name, options=config.options)` exactly as for any detector. |
+| #16 | optional query `project_id`. Given: `models` = `list_detectors()` + that project's non-deleted TrainedModel names (version order), and each of those has `modes[name] = []`. Unknown `project_id` -> 404 `not_found`. Absent: unchanged. |
+| #18 | also deletes `data/weights/<pid>/` and calls `unregister_trained` for each of the project's names. The project's `trained_models` rows (deleted ones too) are deleted with it, like its other child rows. |
+
+Who builds what (Train on Colab):
+
+| Role | Builds |
+|---|---|
+| export | `autolabel/export/train_package.py`: `build_train_package` (zip, `data.yaml`, `split.json`, split rule, labels via the #14 functions) and the notebook template; `NoPolygons`; route #23 in `app/api/export.py`. Must pass `tests/test_export_train_package.py`. |
+| models | `autolabel/models/trained.py`: `inspect_weights`, `register_trained`, `unregister_trained`, the trained detector (section 3); `get_detector` / `detector_modes` for registered names. Must pass `tests/test_models_trained.py`. |
+| backend | `trained_models` table + `migrate()`; #24, #25, #26; the #9, #16, #18 changes; worker step for trained names; `create_app(..., inspect_weights=None, register_trained=None, unregister_trained=None)` (None = the `autolabel.models` functions, imported lazily). Must pass `tests/test_api_trained_models.py`. |
+| ui | a **Train** panel: task choice (`segment` only offered when the project has a polygon), "Download training package" (#23), short Colab steps, `.pt` upload with task (#24) showing `class_mismatch` details as two lists, the model list with delete (#25, #26), model choice in the detect form from #16 `?project_id=`; the same in `?mock=1`. |
+| integrator | this contract, fixtures, the three test files above (written first; roles may add tests, not weaken these). |
+
 ---
 
 ### Examples mode: who builds what
@@ -891,6 +1086,47 @@ def drop_overlapping(predictions: list[Prediction],
                      ) -> list[Prediction]: ...
     # drops a prediction when an existing box with the same category has
     # evaluate.iou(pred.bbox, box.bbox) >= iou_threshold; keeps the order of the rest
+```
+
+Trained weights (#24 - #26; owner: models, `autolabel/models/trained.py`, re-exported from
+`autolabel.models`):
+```python
+@dataclass(frozen=True)
+class WeightsInfo:
+    task: str                      # the checkpoint's ultralytics task: "detect", "segment", "pose", ...
+    class_names: list[str]         # model names in index order
+    imgsz: int | None              # train_args imgsz (as yolo.trained_imgsz), else None
+
+def inspect_weights(path: str, model=None) -> WeightsInfo: ...
+    # loads with ultralytics (autoinstall off, CPU, never downloads); `model` = a stand-in with
+    # .task, .names (dict or list) and .ckpt / .overrides, for tests (then `path` is not opened).
+    # Any load failure -> ValueError with a one-line message. Does not judge the task.
+def register_trained(name: str, path: str, task: str, model=None) -> None: ...
+    # after this, get_detector(name) returns the trained detector (built lazily, once per name),
+    # whatever AUTOLABEL_DETECTORS says; list_detectors() does NOT include it; detector_modes(name) = [].
+    # Same name + same path again: no-op (cache kept). A different path replaces it (cache dropped).
+    # `model` = a stand-in used instead of loading `path`, for tests.
+def unregister_trained(name: str) -> None: ...   # forgets it and its cached instance; unknown name: no-op
+```
+Trained detector: the `yolo` rules (classes by name, `min_score` floors with 0.05 default, `imgsz` from
+the checkpoint, CPU, autoinstall off), `source` = `"yolo_trained"`. Task `segment`: predict with
+`retina_masks=True` and set `polygon` from each box's mask (`result.masks.data[i]`, H x W at image size,
+tensor or numpy) with `yoloe.mask_to_polygon` (same rules as
+`yoloe`: one part, or the largest if >= 90%, else `polygon` None and the model bbox); with a polygon the
+bbox is its bounding box. Task `detect`: `polygon` None. `mask` is always None.
+
+Training package (#23; owner: export, `autolabel/export/train_package.py`, re-exported from
+`autolabel.export`):
+```python
+TRAIN_TASKS = ("detect", "segment")
+
+class NoPolygons(Exception): ...    # segment asked, no exported box has a polygon (route -> 409)
+
+def build_train_package(project_name: str, task: str,
+                        images: list[dict], classes: list[dict], annotations: list[dict],
+                        image_bytes: Callable[[dict], bytes]) -> bytes: ...
+    # API JSON shapes in (as build_zip); returns the zip of #23. Raises ValueError (bad task),
+    # NothingToExport (no done/empty image), NoPolygons. Calls image_bytes only for exported images.
 ```
 
 Rules:
