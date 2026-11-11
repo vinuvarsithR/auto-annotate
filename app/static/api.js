@@ -9,11 +9,19 @@ const MOCK = new URLSearchParams(location.search).get("mock") === "1";
 const FIXTURES_URL = "/docs/fixtures/api_samples.json";
 
 class ApiError extends Error {
-  constructor(code, message, httpStatus) {
+  // details: only #24 class_mismatch sends it (model / project class lists).
+  constructor(code, message, httpStatus, details = null) {
     super(message);
     this.code = code;
     this.httpStatus = httpStatus;
+    this.details = details;
   }
+}
+
+function errorFrom(data, status, statusText) {
+  const err = (data && data.error) || {};
+  return new ApiError(err.code || "http_" + status, err.message || `${status} ${statusText}`,
+                      status, err.details || null);
 }
 
 function countStatuses(anns) {
@@ -77,19 +85,13 @@ async function http(method, path, body) {
   }
   let data = null;
   try { data = await res.json(); } catch (e) { /* empty or non-JSON body */ }
-  if (!res.ok) {
-    const err = (data && data.error) || {};
-    throw new ApiError(err.code || "http_" + res.status,
-                       err.message || res.status + " " + res.statusText, res.status);
-  }
+  if (!res.ok) throw errorFrom(data, res.status, res.statusText);
   return data;
 }
 
-// multipart POST of "files" parts with upload progress (fetch has none). onProgress(0..1).
-function sendForm(url, parts, onProgress) {
+// multipart POST with upload progress (fetch has none). onProgress(0..1).
+function sendMultipart(url, form, onProgress) {
   return new Promise((resolve, reject) => {
-    const form = new FormData();
-    for (const [f, name] of parts) form.append("files", f, name);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
     xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
@@ -98,12 +100,35 @@ function sendForm(url, parts, onProgress) {
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON body */ }
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
-      const err = (data && data.error) || {};
-      reject(new ApiError(err.code || "http_" + xhr.status,
-                          err.message || `${xhr.status} ${xhr.statusText}`, xhr.status));
+      reject(errorFrom(data, xhr.status, xhr.statusText));
     };
     xhr.send(form);
   });
+}
+
+// multipart POST of "files" parts (#4 upload, #22 import).
+function sendForm(url, parts, onProgress) {
+  const form = new FormData();
+  for (const [f, name] of parts) form.append("files", f, name);
+  return sendMultipart(url, form, onProgress);
+}
+
+// POST a JSON body to an endpoint that answers a zip (#14, #23). Returns {blob, filename}.
+async function postForZip(path, body, fallbackName) {
+  let res;
+  try {
+    res = await fetch("/api" + path, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch (e) {
+    throw new ApiError("network", "cannot reach the server: " + e.message, 0);
+  }
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* non-JSON body */ }
+    throw errorFrom(data, res.status, res.statusText);
+  }
+  const m = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+  return { blob: await res.blob(), filename: m ? m[1] : fallbackName };
 }
 
 const realApi = {
@@ -146,30 +171,28 @@ const realApi = {
 
   // ---- export (#14) and Roboflow push (#21)
   // #14 answers a zip, so this uses fetch directly. Returns {blob, filename}; errors -> ApiError.
-  async exportZip(pid, body) {
-    let res;
-    try {
-      res = await fetch(`/api/projects/${pid}/export`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    } catch (e) {
-      throw new ApiError("network", "cannot reach the server: " + e.message, 0);
-    }
-    if (!res.ok) {
-      let data = null;
-      try { data = await res.json(); } catch (e) { /* non-JSON body */ }
-      const err = (data && data.error) || {};
-      throw new ApiError(err.code || "http_" + res.status, err.message || res.status + " " + res.statusText, res.status);
-    }
-    const m = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") || "");
-    return { blob: await res.blob(), filename: m ? m[1] : `project_${pid}_${body.format}.zip` };
-  },
+  exportZip: (pid, body) => postForZip(`/projects/${pid}/export`, body, `project_${pid}_${body.format}.zip`),
   // #21: no body = the default approved statuses. Response 202 is a Job, polled with getJob.
   startPush: (pid) => http("POST", `/projects/${pid}/roboflow/push`),
+
+  // ---- Train on Colab (#23 - #26)
+  trainPackage: (pid, task) => postForZip(`/projects/${pid}/train-package`, { task }, `project_${pid}_train_${task}.zip`),
+  // #24: one .pt part + the task form field. Response 201 is a TrainedModel.
+  uploadWeights(pid, file, task, onProgress) {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("task", task);
+    return sendMultipart(`/api/projects/${pid}/weights`, form, onProgress);
+  },
+  listWeights: (pid) => http("GET", `/projects/${pid}/weights`),
+  deleteWeights: (wid) => http("DELETE", `/weights/${wid}`),
+
   // Endpoint 16: GET /api/models -> {"models": [...], "modes": {name: [...]}}, default mode first.
+  // With pid, the project's uploaded models are listed too (modes []).
   // If an older backend answers 404, fall back to the one detector that always exists.
-  async listModels() {
+  async listModels(pid = null) {
     try {
-      const d = await http("GET", "/models");
+      const d = await http("GET", pid ? `/models?project_id=${pid}` : "/models");
       return { models: d.models, modes: d.modes || {}, fallback: false };
     } catch (e) {
       if (e.httpStatus === 404) return { models: FALLBACK_MODELS.slice(), modes: {}, fallback: true };
@@ -183,6 +206,9 @@ const MOCK_MODELS = ["fake"]; // same as the backend today (contract #16)
 const MOCK_MODES = { fake: ["text", "examples"] };
 const MOCK_PREP_POLLS = 2;    // polls an examples job stays running at 0 while it "embeds"
 const EXAMPLE_CAP = 30;       // contract #9: at most 30 examples per class
+const TRAIN_TASKS = ["detect", "segment"];        // #23 / #24
+const WEIGHTS_MAX_BYTES = 200 * 1024 * 1024;     // #24: at most 200 MB
+const APPROVED = ["auto_accepted", "accepted", "edited"]; // statuses #14 / #23 export
 
 // ---------------------------------------------------------------- mock mode
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -201,6 +227,8 @@ async function loadMock() {
     classes: clone(fx["GET /api/projects/1/classes"].classes).map((c) => ({ ...c, project_id: 1 })),
     annotations: clone(fx["all_annotations"]),
     jobs: [],
+    // TrainedModel rows (+ deleted_at); the mock keeps no .pt file.
+    weights: clone((fx["GET /api/projects/1/weights"] || { weights: [] }).weights).map((w) => ({ ...w, deleted_at: null })),
     pushed: new Set(),   // image ids "sent to Roboflow" by a mock push job (no SDK call in mock mode)
   };
   const nextOf = (rows) => Math.max(0, ...rows.map((r) => r.id)) + 1;
@@ -209,7 +237,20 @@ async function loadMock() {
   mockDb.nextImageId = nextOf(mockDb.images);
   mockDb.nextClassId = nextOf(mockDb.classes);
   mockDb.nextJobId = 100;
+  mockDb.nextWeightsId = nextOf(mockDb.weights);
   return mockDb;
+}
+
+// #24 name rule: "<safe project name>"; same safe-name idea as #14 (letters, digits, - and _).
+function mockSafeName(name) { return String(name).replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "project"; }
+
+function mockLiveWeights(db, pid) {
+  return db.weights.filter((w) => w.project_id === Number(pid) && !w.deleted_at).sort((a, b) => a.version - b.version);
+}
+
+function stripWeights(w) {
+  const { deleted_at, ...out } = w;
+  return clone(out);
 }
 
 function mockClasses(db, pid) {
@@ -289,7 +330,8 @@ function mockDetectOne(db, job, imageId) {
       id: db.nextId++, image_id: imageId, class_id: c.id, class_name: c.name,
       bbox: [Math.round(img.width * (0.15 + 0.4 * k)), Math.round(img.height * 0.3),
              Math.round(img.width * 0.2), Math.round(img.height * 0.15)],
-      mask: null, polygon: null, score, source: job.config.model,
+      mask: null, polygon: null, score,
+      source: MOCK_MODELS.includes(job.config.model) ? job.config.model : "yolo_trained",
       status: c.accept_score != null && score >= c.accept_score ? "auto_accepted" : "needs_review",
       job_id: job.id, reviewer: null, created_at: t, updated_at: t,
     });
@@ -469,6 +511,7 @@ const mockApi = {
     db.images = db.images.filter((i) => i.project_id !== pid);
     db.classes = db.classes.filter((c) => c.project_id !== pid);
     db.jobs = db.jobs.filter((j) => j.project_id !== pid);
+    db.weights = db.weights.filter((w) => w.project_id !== pid);
     db.projects = db.projects.filter((p) => p.id !== pid);
     return null;
   },
@@ -558,10 +601,12 @@ const mockApi = {
       rerunOf = src.id;
       body = { model: src.config.model, mode: src.config.mode, options: src.config.options };
     }
-    if (!MOCK_MODELS.includes(body.model)) {
+    // #9: a non-deleted uploaded model of THIS project is a detector name too (no modes).
+    const trained = mockLiveWeights(db, pid).some((w) => w.name === body.model);
+    if (!MOCK_MODELS.includes(body.model) && !trained) {
       throw new ApiError("unknown_model", `unknown model "${body.model}"`, 400);
     }
-    const modes = MOCK_MODES[body.model] || [];
+    const modes = trained ? [] : MOCK_MODES[body.model] || [];
     if (body.mode != null && !modes.includes(body.mode)) {
       throw new ApiError("unknown_mode", `unknown mode "${body.mode}" for model "${body.model}"`, 400);
     }
@@ -637,7 +682,81 @@ The real server sends a zip here.
     if (job.status === "running" && !job._prep && job.done >= job.total) mockFinishJob(job);
     return stripJob(job);
   },
-  async listModels() { return { models: MOCK_MODELS.slice(), modes: clone(MOCK_MODES), fallback: false }; },
+  async listModels(pid = null) {
+    const out = { models: MOCK_MODELS.slice(), modes: clone(MOCK_MODES), fallback: false };
+    if (pid == null) return out;
+    const db = await loadMock();
+    mockProject(db, pid);
+    for (const w of mockLiveWeights(db, pid)) { out.models.push(w.name); out.modes[w.name] = []; }
+    return out;
+  },
+
+  // ---- Train on Colab in mock mode. The "zip" is a small text file (no exporter in the browser).
+  async trainPackage(pid, task) {
+    const db = await loadMock();
+    const p = mockProject(db, pid);
+    if (!TRAIN_TASKS.includes(task)) throw new ApiError("bad_request", `task must be detect or segment, got "${task}"`, 400);
+    const ready = mockReadyImages(db, pid);
+    if (!ready.length) throw new ApiError("conflict", `project ${pid} has no done or empty images to export`, 409);
+    const ids = new Set(ready.map((i) => i.id));
+    if (task === "segment" && !db.annotations.some((a) => ids.has(a.image_id) && APPROVED.includes(a.status) && a.polygon)) {
+      throw new ApiError("conflict", `project ${pid} has no exported box with a polygon`, 409);
+    }
+    const name = `${mockSafeName(p.name)}_train_${task}`;
+    const text = `Mock training package of "${p.name}": ${ready.length} image(s), task ${task}.
+The real server sends a zip with data.yaml, split.json, train.ipynb, images and labels.
+`;
+    return { blob: new Blob([text], { type: "text/plain" }), filename: `${name}_MOCK.txt` };
+  },
+  // #24 in mock mode. A browser cannot open a .pt, so the "checkpoint" is made up from the file name:
+  // the task sent and the project's classes, unless the name contains "detect" / "segment" (that
+  // task, for task_mismatch), "pose" (bad_weights) or "beam" (one class swapped, for class_mismatch).
+  async uploadWeights(pid, file, task, onProgress) {
+    const db = await loadMock();
+    const p = mockProject(db, pid);
+    pid = Number(pid);
+    if (!file || !/\.pt$/i.test(file.name)) throw new ApiError("bad_request", "file must be one .pt file", 400);
+    if (!file.size || file.size > WEIGHTS_MAX_BYTES) throw new ApiError("bad_request", "file must be 1 byte .. 200 MB", 400);
+    if (!TRAIN_TASKS.includes(task)) throw new ApiError("bad_request", `task must be detect or segment, got "${task}"`, 400);
+    const project_classes = mockClasses(db, pid).map((c) => c.name);
+    if (!project_classes.length) throw new ApiError("no_classes", "project has no classes", 400);
+    for (let k = 1; k <= 4; k++) { if (onProgress) onProgress(k / 4); await mockDelay(120); }
+    const low = file.name.toLowerCase();
+    if (low.includes("pose")) throw new ApiError("bad_weights", "the weights are a 'pose' model; only detect or segment can be used", 400);
+    const modelTask = low.includes("segment") ? "segment" : low.includes("detect") ? "detect" : task;
+    if (modelTask !== task) throw new ApiError("task_mismatch", `the weights are a '${modelTask}' model, not '${task}'`, 400);
+    const model_classes = project_classes.slice();
+    if (low.includes("beam")) model_classes[model_classes.length - 1] = "beam";
+    const missing = project_classes.filter((n) => !model_classes.includes(n));
+    const extra = model_classes.filter((n) => !project_classes.includes(n));
+    if (missing.length || extra.length) {
+      throw new ApiError("class_mismatch",
+        `model classes do not match project classes: missing in model: ${missing.join(", ")}; extra in model: ${extra.join(", ")}`,
+        400, { model_classes, project_classes, missing_in_model: missing, extra_in_model: extra });
+    }
+    const version = 1 + Math.max(0, ...db.weights.filter((w) => w.project_id === pid).map((w) => w.version));
+    let name = `${mockSafeName(p.name)}_v${version}`;
+    if (db.weights.some((w) => w.name === name)) name = `${mockSafeName(p.name)}_p${pid}_v${version}`;
+    const w = { id: db.nextWeightsId++, project_id: pid, name, version, task, class_names: model_classes,
+                imgsz: 960, file_name: file.name, size_bytes: file.size, uploaded_at: now(), deleted_at: null };
+    db.weights.push(w);
+    return stripWeights(w);
+  },
+  async listWeights(pid) {
+    const db = await loadMock();
+    mockProject(db, pid);
+    return { weights: mockLiveWeights(db, pid).map(stripWeights) };
+  },
+  async deleteWeights(wid) {
+    const db = await loadMock();
+    const w = db.weights.find((x) => x.id === Number(wid) && !x.deleted_at);
+    if (!w) mockNotFound("weights", wid);
+    if (db.jobs.some((j) => j.kind === "detect" && j.config.model === w.name && (j.status === "queued" || j.status === "running"))) {
+      throw new ApiError("conflict", `model ${w.name} is used by a queued or running job`, 409);
+    }
+    w.deleted_at = now();
+    return null;
+  },
 };
 
 window.api = MOCK ? mockApi : realApi;
