@@ -65,3 +65,19 @@ CREATE TABLE annotations (
 );
 CREATE INDEX idx_ann_image ON annotations(image_id);
 CREATE INDEX idx_ann_status ON annotations(status);
+
+CREATE TABLE trained_models (            -- #24 - #26; migrate() creates it if missing
+  id           INTEGER PRIMARY KEY,
+  project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL UNIQUE,     -- "eot_crane_v1"; the #9 `model` value
+  version      INTEGER NOT NULL,         -- 1, 2, ... per project, never reused
+  task         TEXT NOT NULL CHECK (task IN ('detect', 'segment')),
+  class_names  TEXT NOT NULL,            -- JSON list, model index order
+  imgsz        INTEGER,                  -- from the checkpoint, or NULL
+  file_name    TEXT NOT NULL,            -- uploaded name, e.g. "best.pt"
+  path         TEXT NOT NULL,            -- data/weights/<project_id>/<name>.pt
+  size_bytes   INTEGER NOT NULL,
+  uploaded_at  TEXT NOT NULL,
+  deleted_at   TEXT,                     -- set by #26; the row is kept
+  UNIQUE (project_id, version)
+);

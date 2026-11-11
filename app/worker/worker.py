@@ -19,6 +19,9 @@ Plain-English summary
   cleaned and capped (read_examples) and pipeline.prepare_examples embeds them, then `result`
   is written, then the images run as above with only the classes that have usable examples.
   Earlier model boxes of the other classes are kept. No class left -> done, nothing run.
+* Trained models (Train on Colab, #24): when config.model is a trained_models name, the row
+  is read first (deleted -> the job fails "model NAME was deleted"), then
+  register_trained(name, path, task), then run(...) as for any detector.
 * Re-run jobs (#9 `rerun`, config has `rerun_of`): just before writing an image, its
   review_status is read again; not 'todo' any more -> nothing is deleted or added (still counted).
 * Any exception -> job 'failed' with a one-line error message.
@@ -75,6 +78,11 @@ def default_load_pipeline() -> tuple[Callable, type]:
     from autolabel import pipeline
     from autolabel.models.base import ClassSpec
     return pipeline.run, ClassSpec
+
+
+def default_register_trained(name: str, path: str, task: str, model=None) -> None:
+    from autolabel.models import register_trained
+    register_trained(name, path, task, model=model)
 
 
 def default_load_importers():
@@ -166,8 +174,10 @@ def read_examples(conn: sqlite3.Connection, pid: int, example_type: type) -> dic
 class Worker:
     def __init__(self, db_path: str | Path, load_pipeline: PipelineLoader | None = None,
                  poll_seconds: float = 2.0, load_pusher: PusherLoader | None = None,
-                 load_importers: ImporterLoader | None = None):
+                 load_importers: ImporterLoader | None = None,
+                 register_trained: Callable[..., None] | None = None):
         self.db_path = db_path
+        self.register_trained = register_trained or default_register_trained
         self.load_pipeline = load_pipeline or default_load_pipeline
         self.load_pusher = load_pusher or default_load_pusher
         self.load_importers = load_importers or default_load_importers
@@ -271,6 +281,13 @@ class Worker:
         if not class_rows:
             raise ValueError(f"project {pid} has no classes")
         by_name = {r["name"]: r for r in class_rows}
+
+        # Train on Colab: an uploaded model is registered under its name before run
+        trained = conn.execute("SELECT * FROM trained_models WHERE name=?", (model,)).fetchone()
+        if trained is not None:
+            if trained["deleted_at"] is not None or trained["project_id"] != pid:
+                raise ValueError(f"model {model} was deleted")
+            self.register_trained(model, trained["path"], trained["task"])
 
         run, ClassSpec = self.load_pipeline()
         specs = [ClassSpec(name=r["name"], description=r["description"], min_score=r["min_score"])

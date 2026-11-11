@@ -21,13 +21,17 @@ _CODES = {400: "bad_request", 404: "not_found", 405: "method_not_allowed",
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str):
+    def __init__(self, status: int, code: str, message: str, details: dict | None = None):
         super().__init__(message)
         self.status, self.code, self.message = status, code, message
+        self.details = details  # only #24 class_mismatch has one
 
 
-def error_body(code: str, message: str) -> dict:
-    return {"error": {"code": code, "message": message}}
+def error_body(code: str, message: str, details: dict | None = None) -> dict:
+    body = {"code": code, "message": message}
+    if details is not None:
+        body["details"] = details
+    return {"error": body}
 
 
 def not_found(what: str, ident: int) -> ApiError:
@@ -37,7 +41,8 @@ def not_found(what: str, ident: int) -> ApiError:
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError):
-        return JSONResponse(error_body(exc.code, exc.message), status_code=exc.status)
+        return JSONResponse(error_body(exc.code, exc.message, exc.details),
+                            status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError):

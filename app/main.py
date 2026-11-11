@@ -22,7 +22,7 @@ from typing import Callable
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import annotations, classes, images, imports, jobs, models, projects
+from app.api import annotations, classes, images, imports, jobs, models, projects, weights
 from app.api.errors import install_error_handlers
 from app.db import db
 from app.worker.worker import ImporterLoader, PipelineLoader, PusherLoader, Worker
@@ -57,13 +57,35 @@ def default_detector_modes(name: str) -> list[str]:
     return list(detector_modes(name))
 
 
+# Train on Colab (#24 - #26): the models session's functions, imported only when used.
+def default_inspect_weights(path: str, model=None):
+    from autolabel.models import inspect_weights
+    return inspect_weights(path, model=model)
+
+
+def default_register_trained(name: str, path: str, task: str, model=None) -> None:
+    from autolabel.models import register_trained
+    register_trained(name, path, task, model=model)
+
+
+def default_unregister_trained(name: str) -> None:
+    try:
+        from autolabel.models import unregister_trained
+    except ImportError:  # models code not installed: nothing was ever registered
+        return
+    unregister_trained(name)
+
+
 def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                load_pipeline: PipelineLoader | None = None,
                load_pusher: PusherLoader | None = None,
                load_importers: ImporterLoader | None = None,
                list_detectors: Callable[[], list[str]] | None = None,
                detector_modes: Callable[[str], list[str]] | None = None,
-               static_dir: Path | None = STATIC_DIR) -> FastAPI:
+               static_dir: Path | None = STATIC_DIR,
+               inspect_weights: Callable | None = None,
+               register_trained: Callable | None = None,
+               unregister_trained: Callable | None = None) -> FastAPI:
     data_dir = Path(data_dir)
     db_path = data_dir / "app.db"
 
@@ -86,11 +108,15 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
     app.state.db_path = db_path
     app.state.list_detectors = list_detectors or default_list_detectors
     app.state.detector_modes = detector_modes or default_detector_modes
+    app.state.inspect_weights = inspect_weights or default_inspect_weights
+    app.state.register_trained = register_trained or default_register_trained
+    app.state.unregister_trained = unregister_trained or default_unregister_trained
     app.state.worker = Worker(db_path, load_pipeline=load_pipeline, load_pusher=load_pusher,
-                              load_importers=load_importers)
+                              load_importers=load_importers,
+                              register_trained=app.state.register_trained)
 
     install_error_handlers(app)
-    for module in (projects, images, imports, classes, jobs, annotations, models):
+    for module in (projects, images, imports, classes, jobs, annotations, models, weights):
         app.include_router(module.router, prefix="/api")
 
     # Endpoint 14 belongs to the export session; include it once it exists.

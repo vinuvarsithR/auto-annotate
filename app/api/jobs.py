@@ -112,8 +112,15 @@ def create_job(pid: int, body: JobIn, request: Request,
     if body.rerun:
         return _create_rerun(pid, body, request, conn)
 
-    _check_model(request, body.model)
-    mode = _resolve_mode(request, body.model, body.mode)
+    if db.trained_model(conn, pid, body.model) is not None:
+        # Train on Colab: this project's uploaded model; it has no modes, runs like a text job
+        if body.mode is not None:
+            raise ApiError(400, "unknown_mode",
+                           f"unknown mode {body.mode!r} for '{body.model}', available: ")
+        mode = None
+    else:
+        _check_model(request, body.model)
+        mode = _resolve_mode(request, body.model, body.mode)
     _check_classes(conn, pid)
 
     if body.image_ids is None:
