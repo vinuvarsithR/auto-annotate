@@ -434,6 +434,20 @@ table.grid .c-del:hover { color: var(--rejected); }
 .p-panel .err { color: var(--rejected); }
 .p-panel .seg { display: inline-flex; gap: 12px; }
 .p-panel .seg label, .p-panel label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
+.p-panel .seg label.disabled { opacity: 0.45; cursor: not-allowed; }
+/* Train panel (#23 - #26) */
+.p-train-panel .t-polynote { font-size: 12px; }
+.p-train-panel .t-steps { margin: 12px 0; padding-left: 20px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.p-train-panel .t-up .t-fname { font-size: 12px; }
+.p-train-panel .t-prog { margin: 8px 0 0; }
+.p-train-panel .t-head { margin: 16px 0 0; font-size: 13px; font-weight: 500; }
+.p-train-panel .t-list > .muted, .p-train-panel .t-list > .err { margin-top: 6px; font-size: 12px; }
+.p-train-panel table.t-models td { white-space: nowrap; font-size: 12px; }
+.p-train-panel table.t-models td:nth-child(2) { width: auto; }
+.p-train-panel table.t-models td:nth-child(3) { white-space: normal; width: 100%; }
+.p-train-panel .t-act { text-align: right; }
+.t-mismatch { display: flex; gap: 32px; margin-top: 6px; }
+.t-mismatch ul { margin: 2px 0 0; padding-left: 18px; color: var(--text); }
 .empty { text-align: center; padding: 40px 0; border: 1px dashed var(--line); border-radius: var(--radius); }
 
 /* ---------------------------------------------------------------- reduced motion */

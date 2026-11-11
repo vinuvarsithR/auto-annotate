@@ -1,5 +1,5 @@
 // projects.js - the Projects start page: list, create (#1), rename (#17), delete (#18), and
-// open a project in Setup or Review; export a zip (#14) and push to Roboflow (#21). #17 and #18 are requested contract changes (see
+// open a project in Setup or Review; export a zip (#14), push to Roboflow (#21) and Train on Colab (#23 - #26). #17 and #18 are requested contract changes (see
 // docs/agents/ui.md); a server without them answers 405 and the page says so.
 // Uses globals from app.js / setup.js: $, state, guard, showBanner, showScreen, loadProjects,
 // openProject, refreshProjectPicker, setup, renderStepper.
@@ -9,7 +9,8 @@ const projectsPage = {
   list: [],
   renaming: null,   // project id with the rename field open
   deleting: null,   // project id with the delete confirmation open
-  panel: null,      // {pid, kind: "export" | "push"}: the open export menu / push confirmation
+  panel: null,      // {pid, kind: "export" | "push" | "train"}: the open panel
+  train: {},        // pid -> Train panel state, see trainState()
   exportOpts: { format: "yolo", include_images: false },
   ready: {},        // pid -> {done, empty} image counts (for the push confirmation)
   pushJobs: {},     // pid -> latest roboflow_push Job, polled with #10 until done / failed
@@ -69,6 +70,7 @@ function projectRow(p) {
     <div class="p-actions">
       <button type="button" class="p-export" aria-expanded="false">Export</button>
       <button type="button" class="p-push" aria-expanded="false">Push to Roboflow</button>
+      <button type="button" class="p-train" aria-expanded="false">Train</button>
       <button type="button" class="p-setup">Setup</button>
       <button type="button" class="primary p-review">Review &rarr;</button>
     </div>`;
@@ -105,11 +107,14 @@ function projectRow(p) {
   li.querySelector(".p-push").setAttribute("aria-expanded", String(panel === "push"));
   li.querySelector(".p-export").addEventListener("click", () => togglePanel(p.id, "export"));
   li.querySelector(".p-push").addEventListener("click", () => togglePanel(p.id, "push"));
+  li.querySelector(".p-train").setAttribute("aria-expanded", String(panel === "train"));
+  li.querySelector(".p-train").addEventListener("click", () => togglePanel(p.id, "train"));
   li.querySelector(".p-setup").addEventListener("click", () => openFromList(p.id, "setup"));
   li.querySelector(".p-review").addEventListener("click", () => openFromList(p.id, "review"));
   if (projectsPage.deleting === p.id) li.appendChild(deleteConfirm(p, boxes));
   if (panel === "export") li.appendChild(exportPanel(p));
   if (panel === "push") li.appendChild(pushPanel(p));
+  if (panel === "train") li.appendChild(trainPanel(p));
   return li;
 }
 
@@ -120,6 +125,7 @@ function togglePanel(pid, kind) {
   projectsPage.renaming = null;
   projectsPage.deleting = null;
   if (!open && kind === "push") { delete projectsPage.ready[pid]; loadReadyCount(pid); }
+  if (!open && kind === "train") openTrain(pid);
   renderProjectsPage();
 }
 
@@ -289,6 +295,314 @@ async function pollPush(pid, jid, errors) {
   }
   if (pushRunning(job)) setTimeout(() => pollPush(pid, jid, 0), PUSH_POLL_MS);
   else if (job.status === "done") showBanner(`Roboflow push finished (${plural(job.total, "image")}).`, "info");
+}
+
+// ---------------------------------------------------------------- Train on Colab (#23 - #26)
+// Download a training package (#23), train in Colab, upload best.pt (#24), list / delete (#25, #26).
+// An uploaded model becomes a detector in Setup's model choice (#16 ?project_id=).
+const TRAIN_MAX_BYTES = 200 * 1024 * 1024;   // #24 limit, checked here too to fail fast
+const TRAIN_APPROVED = ["auto_accepted", "accepted", "edited"];
+const POLY_SCAN_PAGE = 200, POLY_SCAN_PARALLEL = 6;
+
+function trainState(pid) {
+  if (!projectsPage.train[pid]) {
+    projectsPage.train[pid] = {
+      task: "detect",
+      poly: null,        // null = not checked, "checking", true / false, or {error}
+      weights: null,     // null = loading, [TrainedModel], or {error}
+      file: null,        // the chosen .pt File
+      upload: null,      // fraction 0..1 while uploading
+      building: false,   // #23 request running
+      pkgMsg: null,      // {text, err}
+      upMsg: null,       // {text, err, mismatch: details}
+      confirmDel: null,  // wid with the delete confirmation open
+    };
+  }
+  return projectsPage.train[pid];
+}
+
+function trainOpen(pid) {
+  return !!projectsPage.panel && projectsPage.panel.pid === pid && projectsPage.panel.kind === "train";
+}
+
+function rerenderTrain(pid) { if (trainOpen(pid)) renderProjectsPage(); }
+
+function openTrain(pid) {
+  const st = trainState(pid);
+  st.pkgMsg = st.upMsg = null;
+  st.confirmDel = null;
+  st.poly = null;          // images may have been reviewed since the last look
+  loadWeightsList(pid);
+  checkPolygons(pid);
+}
+
+async function loadWeightsList(pid) {
+  const st = trainState(pid);
+  try { st.weights = (await api.listWeights(pid)).weights; }
+  catch (err) { console.error(err); st.weights = { error: apiMessage(err) }; }
+  rerenderTrain(pid);
+}
+
+// "segment" is only offered when an exported box has a polygon (#23 would answer 409 otherwise).
+// No endpoint gives that number, so look at the boxes of the done images (empty ones have none)
+// and stop at the first approved box with a polygon.
+async function checkPolygons(pid) {
+  const st = trainState(pid);
+  if (st.poly === "checking") return;
+  st.poly = "checking";
+  try {
+    const ids = [];
+    for (let offset = 0; ; offset += POLY_SCAN_PAGE) {
+      const page = await api.listImages(pid, { reviewStatus: "done", offset, limit: POLY_SCAN_PAGE });
+      ids.push(...page.images.map((i) => i.id));
+      if (!page.images.length || ids.length >= page.total) break;
+    }
+    let found = false, next = 0;
+    const worker = async () => {
+      while (!found && next < ids.length) {
+        const d = await api.getAnnotations(ids[next++]);
+        if (d.annotations.some((a) => a.polygon && TRAIN_APPROVED.includes(a.status))) found = true;
+      }
+    };
+    await Promise.all(Array.from({ length: POLY_SCAN_PARALLEL }, worker));
+    st.poly = found;
+  } catch (err) {
+    console.error(err);
+    st.poly = { error: apiMessage(err) };
+  }
+  if (st.poly !== true && st.task === "segment") st.task = "detect";
+  rerenderTrain(pid);
+}
+
+function fmtBytes(n) {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
+}
+
+function trainPanel(p) {
+  const st = trainState(p.id);
+  const f = document.createElement("form");
+  f.className = "p-panel p-train-panel";
+  f.innerHTML = `
+    <div class="row">
+      <span class="seg" role="radiogroup" aria-label="Task">
+        <label><input type="radio" name="task" value="detect"> Detect (boxes)</label>
+        <label><input type="radio" name="task" value="segment"> Segment (polygons)</label>
+      </span>
+      <span class="muted t-polynote"></span>
+      <span class="spacer"></span>
+      <button type="button" class="p-cancel">Close</button>
+      <button type="button" class="primary t-pkg">Download training package</button>
+    </div>
+    <p class="p-msg t-pkgmsg" role="status" hidden></p>
+    <ol class="t-steps">
+      <li>Download the training package (only images marked done or empty, with their approved boxes).</li>
+      <li>Open <code>train.ipynb</code> from the zip in Colab; Runtime &gt; Change runtime type &gt; GPU.</li>
+      <li>Run the 3 cells: upload (pick the zip), train, download (saves <code>best.pt</code>).</li>
+      <li>Upload <code>best.pt</code> below with the same task. It then shows up as a model in Setup &gt; Run detection.</li>
+    </ol>
+    <div class="row t-up">
+      <label class="field">Weights (.pt) <input type="file" accept=".pt" class="t-file"></label>
+      <span class="muted t-fname"></span>
+      <span class="spacer"></span>
+      <button type="button" class="primary t-upload">Upload weights</button>
+    </div>
+    <p class="muted p-note">A .pt file can run code when the server loads it: upload only weights you trained yourself.</p>
+    <div class="p-job t-prog" hidden><div class="bar"><div></div></div><div class="muted num-tab t-progtext"></div></div>
+    <div class="p-msg t-upmsg" role="status" hidden></div>
+    <h3 class="t-head">Uploaded models</h3>
+    <div class="t-list"></div>`;
+
+  // task choice
+  const segInput = f.querySelector('input[value="segment"]');
+  const polyOk = st.poly === true;
+  segInput.disabled = !polyOk;
+  segInput.closest("label").classList.toggle("disabled", !polyOk);
+  f.querySelector(`input[value="${st.task}"]`).checked = true;
+  f.querySelector(".t-polynote").textContent =
+    st.poly === "checking" || st.poly === null ? "Checking for polygons..." :
+    st.poly === true ? "" :
+    st.poly === false ? "Segment needs a polygon on an approved box of a done image." :
+    `Could not check for polygons: ${st.poly.error}`;
+  f.querySelectorAll("input[name=task]").forEach((r) => r.addEventListener("change", () => {
+    st.task = f.querySelector("input[name=task]:checked").value;
+  }));
+
+  const showMsg = (el, m) => {
+    el.hidden = !m;
+    if (!m) return;
+    el.classList.toggle("err", !!m.err);
+    el.classList.toggle("muted", !m.err);
+    el.textContent = m.text;
+    if (m.mismatch) el.appendChild(mismatchLists(m.mismatch));
+  };
+  showMsg(f.querySelector(".t-pkgmsg"), st.pkgMsg);
+  showMsg(f.querySelector(".t-upmsg"), st.upMsg);
+
+  // #23 download
+  const pkg = f.querySelector(".t-pkg");
+  pkg.disabled = st.building;
+  pkg.textContent = st.building ? "Building..." : "Download training package";
+  pkg.addEventListener("click", async () => {
+    if (st.building) return;
+    st.building = true;
+    st.pkgMsg = { text: "Building the training package (images included, this can take a while)..." };
+    rerenderTrain(p.id);
+    try {
+      const { blob, filename } = await api.trainPackage(p.id, st.task);
+      downloadBlob(blob, filename);
+      st.pkgMsg = { text: `Downloaded ${filename}. Next: open train.ipynb in Colab.` };
+    } catch (err) {
+      console.error(err);
+      st.pkgMsg = { text: apiMessage(err), err: true };   // 409s as the server writes them
+    }
+    st.building = false;
+    rerenderTrain(p.id);
+  });
+
+  // #24 upload
+  const fileInput = f.querySelector(".t-file");
+  f.querySelector(".t-fname").textContent = st.file ? `${st.file.name} (${fmtBytes(st.file.size)})` : "";
+  fileInput.disabled = st.upload != null;
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = "";
+    st.file = file || null;
+    st.upMsg = null;
+    if (file && !/\.pt$/i.test(file.name)) { st.upMsg = { text: `${file.name} is not a .pt file.`, err: true }; st.file = null; }
+    else if (file && !file.size) { st.upMsg = { text: `${file.name} is empty.`, err: true }; st.file = null; }
+    else if (file && file.size > TRAIN_MAX_BYTES) {
+      st.upMsg = { text: `${file.name} is ${fmtBytes(file.size)}; the limit is 200 MB.`, err: true };
+      st.file = null;
+    }
+    rerenderTrain(p.id);
+  });
+  const up = f.querySelector(".t-upload");
+  up.disabled = !st.file || st.upload != null;
+  up.textContent = st.upload != null ? "Uploading..." : "Upload weights";
+  if (st.upload != null) {
+    const box = f.querySelector(".t-prog");
+    box.hidden = false;
+    box.querySelector(".bar > div").style.width = Math.round(st.upload * 100) + "%";
+    box.querySelector(".t-progtext").textContent = st.upload < 1
+      ? `Uploading: ${Math.round(st.upload * 100)}%` : "Checking the weights on the server...";
+  }
+  up.addEventListener("click", () => uploadTrainWeights(p.id));
+
+  // #25 list, #26 delete
+  f.querySelector(".t-list").appendChild(weightsList(p.id, st));
+
+  f.querySelector(".p-cancel").addEventListener("click", () => togglePanel(p.id, "train"));
+  f.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); togglePanel(p.id, "train"); } });
+  f.addEventListener("submit", (e) => e.preventDefault());
+  return f;
+}
+
+// #24 class_mismatch details as two lists.
+function mismatchLists(d) {
+  const div = document.createElement("div");
+  div.className = "t-mismatch";
+  const list = (title, names) => {
+    const box = document.createElement("div");
+    const h = document.createElement("div");
+    h.className = "muted";
+    h.textContent = title;
+    const ul = document.createElement("ul");
+    for (const n of names.length ? names : ["(none)"]) {
+      const li = document.createElement("li");
+      li.textContent = n;
+      ul.appendChild(li);
+    }
+    box.append(h, ul);
+    return box;
+  };
+  div.append(list("Project classes missing in the model", d.missing_in_model || []),
+             list("Model classes not in the project", d.extra_in_model || []));
+  return div;
+}
+
+async function uploadTrainWeights(pid) {
+  const st = trainState(pid);
+  if (!st.file || st.upload != null) return;
+  st.upload = 0;
+  st.upMsg = null;
+  rerenderTrain(pid);
+  let last = 0;
+  try {
+    const w = await api.uploadWeights(pid, st.file, st.task, (frac) => {
+      st.upload = frac;
+      if (frac === 1 || frac - last >= 0.05) { last = frac; rerenderTrain(pid); }
+    });
+    st.file = null;
+    st.upMsg = { text: `Uploaded as model "${w.name}" (${w.task}, ${w.class_names.length} classes). ` +
+                       `Pick it in Setup > Run detection.` };
+    showBanner(`Model ${w.name} uploaded.`, "info");
+    await modelsChanged(pid);
+  } catch (err) {
+    console.error(err);
+    st.upMsg = { text: apiMessage(err), err: true,
+                 mismatch: err instanceof ApiError && err.code === "class_mismatch" ? err.details : null };
+  }
+  st.upload = null;
+  rerenderTrain(pid);
+}
+
+// The weights list changed: reload it, and Setup's model choice if this project is open there.
+async function modelsChanged(pid) {
+  await loadWeightsList(pid);
+  if (setup.project && setup.project.id === pid) await loadModels();
+}
+
+function weightsList(pid, st) {
+  const box = document.createElement("div");
+  if (st.weights === null) { box.className = "muted"; box.textContent = "Loading..."; return box; }
+  if (st.weights.error) { box.className = "err"; box.textContent = `Could not load the models: ${st.weights.error}`; return box; }
+  if (!st.weights.length) { box.className = "muted"; box.textContent = "No uploaded models yet."; return box; }
+  const t = document.createElement("table");
+  t.className = "grid t-models";
+  t.innerHTML = "<thead><tr><th>Model</th><th>Task</th><th>Classes</th><th>Image size</th><th>File</th>" +
+                "<th>Uploaded</th><th></th></tr></thead><tbody></tbody>";
+  for (const w of st.weights) {
+    const tr = document.createElement("tr");
+    const cells = [w.name, w.task, w.class_names.join(", "), w.imgsz != null ? String(w.imgsz) : "-",
+                   `${w.file_name} (${fmtBytes(w.size_bytes)})`, fmtDate(w.uploaded_at)];
+    for (const c of cells) {
+      const td = document.createElement("td");
+      td.textContent = c;
+      tr.appendChild(td);
+    }
+    const td = document.createElement("td");
+    td.className = "t-act";
+    if (st.confirmDel === w.id) {
+      td.innerHTML = `<button type="button" class="danger t-yes"></button> <button type="button" class="t-no">Cancel</button>`;
+      td.querySelector(".t-yes").textContent = `Delete ${w.name}`;
+      td.querySelector(".t-yes").addEventListener("click", () => deleteTrainWeights(pid, w));
+      td.querySelector(".t-no").addEventListener("click", () => { st.confirmDel = null; rerenderTrain(pid); });
+    } else {
+      td.innerHTML = `<button type="button" class="icon ghost t-del" aria-label="Delete" title="Delete">${ICON_TRASH}</button>`;
+      td.querySelector(".t-del").setAttribute("aria-label", `Delete ${w.name}`);
+      td.querySelector(".t-del").addEventListener("click", () => { st.confirmDel = w.id; rerenderTrain(pid); });
+    }
+    tr.appendChild(td);
+    t.tBodies[0].appendChild(tr);
+  }
+  box.appendChild(t);
+  return box;
+}
+
+async function deleteTrainWeights(pid, w) {
+  const st = trainState(pid);
+  try { await api.deleteWeights(w.id); }
+  catch (err) {
+    console.error(err);
+    st.upMsg = { text: apiMessage(err), err: true };   // 409 while a job uses the model, as-is
+    st.confirmDel = null;
+    rerenderTrain(pid);
+    return;
+  }
+  st.confirmDel = null;
+  st.upMsg = { text: `Deleted model ${w.name}.` };
+  await modelsChanged(pid);
+  rerenderTrain(pid);
 }
 
 function renameForm(p) {

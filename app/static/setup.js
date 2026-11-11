@@ -37,6 +37,7 @@ function onProjectOpened(p) {
   }
   renderProjectBox();
   updateButtons();
+  if (changed) loadModels();
   if (p) loadClasses(p.id);
   else renderClassRows([]);
   // A selected project already covers step 1: go straight to Upload.
@@ -553,15 +554,20 @@ async function saveClasses() {
 }
 
 // ------------------------------------------------------------ detection job
+// With a project open, #16 ?project_id= adds its uploaded models (#24) after the built-in detectors.
 async function loadModels() {
   const sel = $("modelSelect");
-  const data = await guard(() => api.listModels());
+  const pid = setup.project ? setup.project.id : null;
+  const keep = sel.value;
+  const data = await guard(() => api.listModels(pid));
+  if ((setup.project ? setup.project.id : null) !== pid) return; // project changed meanwhile
   sel.innerHTML = "";
   for (const m of (data ? data.models : [])) {
     const o = document.createElement("option");
     o.value = o.textContent = m;
     sel.appendChild(o);
   }
+  if (data && data.models.includes(keep)) sel.value = keep;
   const note = $("modelNote");
   note.hidden = !(data && data.fallback);
   note.textContent = "Model list not available from the server (endpoint 16 missing); showing defaults.";
