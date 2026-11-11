@@ -434,9 +434,7 @@ table.grid .c-del:hover { color: var(--rejected); }
 .p-panel .err { color: var(--rejected); }
 .p-panel .seg { display: inline-flex; gap: 12px; }
 .p-panel .seg label, .p-panel label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
-.p-panel .seg label.disabled { opacity: 0.45; cursor: not-allowed; }
 /* Train panel (#23 - #26) */
-.p-train-panel .t-polynote { font-size: 12px; }
 .p-train-panel .t-steps { margin: 12px 0; padding-left: 20px; font-size: 12px; color: var(--muted); line-height: 1.6; }
 .p-train-panel .t-up .t-fname { font-size: 12px; }
 .p-train-panel .t-prog { margin: 8px 0 0; }

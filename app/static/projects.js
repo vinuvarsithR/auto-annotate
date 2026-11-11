@@ -301,14 +301,11 @@ async function pollPush(pid, jid, errors) {
 // Download a training package (#23), train in Colab, upload best.pt (#24), list / delete (#25, #26).
 // An uploaded model becomes a detector in Setup's model choice (#16 ?project_id=).
 const TRAIN_MAX_BYTES = 200 * 1024 * 1024;   // #24 limit, checked here too to fail fast
-const TRAIN_APPROVED = ["auto_accepted", "accepted", "edited"];
-const POLY_SCAN_PAGE = 200, POLY_SCAN_PARALLEL = 6;
 
 function trainState(pid) {
   if (!projectsPage.train[pid]) {
     projectsPage.train[pid] = {
       task: "detect",
-      poly: null,        // null = not checked, "checking", true / false, or {error}
       weights: null,     // null = loading, [TrainedModel], or {error}
       file: null,        // the chosen .pt File
       upload: null,      // fraction 0..1 while uploading
@@ -331,46 +328,13 @@ function openTrain(pid) {
   const st = trainState(pid);
   st.pkgMsg = st.upMsg = null;
   st.confirmDel = null;
-  st.poly = null;          // images may have been reviewed since the last look
   loadWeightsList(pid);
-  checkPolygons(pid);
 }
 
 async function loadWeightsList(pid) {
   const st = trainState(pid);
   try { st.weights = (await api.listWeights(pid)).weights; }
   catch (err) { console.error(err); st.weights = { error: apiMessage(err) }; }
-  rerenderTrain(pid);
-}
-
-// "segment" is only offered when an exported box has a polygon (#23 would answer 409 otherwise).
-// No endpoint gives that number, so look at the boxes of the done images (empty ones have none)
-// and stop at the first approved box with a polygon.
-async function checkPolygons(pid) {
-  const st = trainState(pid);
-  if (st.poly === "checking") return;
-  st.poly = "checking";
-  try {
-    const ids = [];
-    for (let offset = 0; ; offset += POLY_SCAN_PAGE) {
-      const page = await api.listImages(pid, { reviewStatus: "done", offset, limit: POLY_SCAN_PAGE });
-      ids.push(...page.images.map((i) => i.id));
-      if (!page.images.length || ids.length >= page.total) break;
-    }
-    let found = false, next = 0;
-    const worker = async () => {
-      while (!found && next < ids.length) {
-        const d = await api.getAnnotations(ids[next++]);
-        if (d.annotations.some((a) => a.polygon && TRAIN_APPROVED.includes(a.status))) found = true;
-      }
-    };
-    await Promise.all(Array.from({ length: POLY_SCAN_PARALLEL }, worker));
-    st.poly = found;
-  } catch (err) {
-    console.error(err);
-    st.poly = { error: apiMessage(err) };
-  }
-  if (st.poly !== true && st.task === "segment") st.task = "detect";
   rerenderTrain(pid);
 }
 
@@ -388,7 +352,6 @@ function trainPanel(p) {
         <label><input type="radio" name="task" value="detect"> Detect (boxes)</label>
         <label><input type="radio" name="task" value="segment"> Segment (polygons)</label>
       </span>
-      <span class="muted t-polynote"></span>
       <span class="spacer"></span>
       <button type="button" class="p-cancel">Close</button>
       <button type="button" class="primary t-pkg">Download training package</button>
@@ -413,16 +376,8 @@ function trainPanel(p) {
     <div class="t-list"></div>`;
 
   // task choice
-  const segInput = f.querySelector('input[value="segment"]');
-  const polyOk = st.poly === true;
-  segInput.disabled = !polyOk;
-  segInput.closest("label").classList.toggle("disabled", !polyOk);
+  // Both tasks are always offered; #23 answers 409 for segment without polygons (shown as is).
   f.querySelector(`input[value="${st.task}"]`).checked = true;
-  f.querySelector(".t-polynote").textContent =
-    st.poly === "checking" || st.poly === null ? "Checking for polygons..." :
-    st.poly === true ? "" :
-    st.poly === false ? "Segment needs a polygon on an approved box of a done image." :
-    `Could not check for polygons: ${st.poly.error}`;
   f.querySelectorAll("input[name=task]").forEach((r) => r.addEventListener("change", () => {
     st.task = f.querySelector("input[name=task]:checked").value;
   }));
