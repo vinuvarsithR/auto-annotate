@@ -1101,6 +1101,132 @@
   "created_at": "2026-10-30T14:03:00Z",
   "updated_at": "2026-10-30T14:11:00Z"
  },
+ "POST /api/projects/1/train-package (request)": {
+  "task": "segment"
+ },
+ "POST /api/projects/1/train-package (zip split.json)": {
+  "rule": "by_sequence",
+  "val_target": 0.2,
+  "val_is_train": false,
+  "train": {
+   "sequences": [
+    "biax__cam0_2026-09-29_18-48-25",
+    "rb_load__cam0_2026-09-29_18-34-11"
+   ],
+   "images": 40
+  },
+  "val": {
+   "sequences": [
+    "rb_load__cam0_2026-09-29_18-24-11"
+   ],
+   "images": 10
+  },
+  "classes_missing_in_train": [],
+  "classes_missing_in_val": [
+   "sb"
+  ]
+ },
+ "POST /api/projects/1/train-package (zip data.yaml)": "path: /content/dataset\ntrain: images/train\nval: images/val\nnc: 4\nnames: [\"person\", \"rb\", \"sb\", \"biax\"]\n",
+ "error example (409 conflict, #23 segment with no polygon)": {
+  "error": {
+   "code": "conflict",
+   "message": "project 1 has no exported box with a polygon"
+  }
+ },
+ "POST /api/projects/1/weights (form)": {
+  "file": "best.pt",
+  "task": "segment"
+ },
+ "POST /api/projects/1/weights": {
+  "id": 1,
+  "project_id": 1,
+  "name": "eot_crane_v1",
+  "version": 1,
+  "task": "segment",
+  "class_names": [
+   "person",
+   "rb",
+   "sb",
+   "biax"
+  ],
+  "imgsz": 960,
+  "file_name": "best.pt",
+  "size_bytes": 19876543,
+  "uploaded_at": "2026-11-11T10:00:00Z"
+ },
+ "GET /api/projects/1/weights": {
+  "weights": [
+   {
+    "id": 1,
+    "project_id": 1,
+    "name": "eot_crane_v1",
+    "version": 1,
+    "task": "segment",
+    "class_names": [
+     "person",
+     "rb",
+     "sb",
+     "biax"
+    ],
+    "imgsz": 960,
+    "file_name": "best.pt",
+    "size_bytes": 19876543,
+    "uploaded_at": "2026-11-11T10:00:00Z"
+   }
+  ]
+ },
+ "DELETE /api/weights/1": null,
+ "GET /api/models?project_id=1": {
+  "models": [
+   "fake",
+   "eot_crane_v1"
+  ],
+  "modes": {
+   "fake": [
+    "text",
+    "examples"
+   ],
+   "eot_crane_v1": []
+  }
+ },
+ "error example (400 class_mismatch, #24)": {
+  "error": {
+   "code": "class_mismatch",
+   "message": "model classes do not match project classes: missing in model: sb; extra in model: beam",
+   "details": {
+    "model_classes": [
+     "person",
+     "rb",
+     "beam",
+     "biax"
+    ],
+    "project_classes": [
+     "person",
+     "rb",
+     "sb",
+     "biax"
+    ],
+    "missing_in_model": [
+     "sb"
+    ],
+    "extra_in_model": [
+     "beam"
+    ]
+   }
+  }
+ },
+ "error example (400 task_mismatch, #24)": {
+  "error": {
+   "code": "task_mismatch",
+   "message": "the weights are a 'detect' model, not 'segment'"
+  }
+ },
+ "error example (400 bad_weights, #24)": {
+  "error": {
+   "code": "bad_weights",
+   "message": "best.pt is not a loadable ultralytics checkpoint"
+  }
+ },
  "all_annotations": [
   {
    "id": 101,
