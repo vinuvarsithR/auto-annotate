@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-05.6";
+  window.ASSET_VERSION = "2026-11-11.1";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -136,6 +136,7 @@
         <label class="field">Model <select id="modelSelect"></select></label>
         <label class="field" id="modeField" hidden>Mode <select id="modeSelect"></select></label>
         <button id="runBtn" type="button" class="primary">Run on all images</button>
+        <button id="rerunBtn" type="button" hidden title="Runs your last examples job again, with the current examples, on images not reviewed yet (todo)">Re-run with new examples</button>
         <button id="openReviewBtn" type="button" class="primary go" hidden>Open in review &rarr;</button>
       </div>
       <div id="modelNote" class="muted" hidden></div>
