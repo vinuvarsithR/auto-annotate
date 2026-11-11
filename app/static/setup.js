@@ -593,8 +593,28 @@ async function runDetection() {
   if (!pid || !model || setup.jobId) return;
   if (setup.dirty) { showBanner("Save the class list first (it has unsaved changes)."); return; }
   const mode = $("modeSelect").value || null;
-  const job = await guard(() => api.startJob(pid, { model, mode, image_ids: null, options: {} }));
-  if (!job) return;
+  await startDetect(pid, { model, mode, image_ids: null, options: {} });
+}
+
+// #9 rerun: the server copies detector, mode and options from the project's last examples job
+// and runs it on the images still `todo`. There is no job list endpoint, so the UI cannot know
+// beforehand whether such a job exists; the server's 409 message says so plainly.
+async function rerunExamples() {
+  const pid = setup.project && setup.project.id;
+  if (!pid || setup.jobId) return;
+  await startDetect(pid, { rerun: true });
+}
+
+async function startDetect(pid, body) {
+  let job;
+  try {
+    job = await api.startJob(pid, body);
+  } catch (e) {
+    console.error(e);
+    // 409: the message is meant for people ("no images with review_status todo"), show it as is.
+    showBanner(e instanceof ApiError ? (e.httpStatus === 409 ? e.message : `${e.code}: ${e.message}`) : String(e));
+    return;
+  }
   clearJobResult();
   setup.jobId = job.id;
   $("jobBox").hidden = false;
@@ -618,7 +638,8 @@ function renderJob(job) {
   const mine = !!setup.project && job.project_id === setup.project.id;
   if (mine) { setup.lastJob = job; renderStepper(); }
   const c = job.config;
-  const head = `Job ${job.id} (${c.mode ? `${c.model}, ${c.mode}` : c.model})`;
+  const head = `Job ${job.id} (${c.mode ? `${c.model}, ${c.mode}` : c.model}` +
+    `${c.rerun_of != null ? `, re-run of job ${c.rerun_of}` : ""})`;
   const text = preparingExamples(job) ? `${head}: preparing examples...` :
     nothingRan(job) ? `${head}: done, ${NOTHING_RAN}` :
     `${head}: ${job.status}, ${job.done} / ${job.total} images` + (job.error ? ` - ${job.error}` : "");
@@ -691,6 +712,9 @@ function updateButtons() {
   $("saveClassesBtn").disabled = !hasProject;
   $("runBtn").disabled = !hasProject || !!setup.jobId || !$("modelSelect").value;
   $("runBtn").textContent = setup.jobId ? "Running..." : "Run on all images";
+  // Shown when some detector has an examples mode; the server decides if there is a job to re-run.
+  $("rerunBtn").hidden = !Object.values(setup.modes).some((m) => (m || []).includes("examples"));
+  $("rerunBtn").disabled = !hasProject || !!setup.jobId;
   renderStepper();
 }
 
@@ -758,6 +782,7 @@ $("saveClassesBtn").addEventListener("click", saveClasses);
 $("classTable").addEventListener("input", () => setDirty(true));
 $("modelSelect").addEventListener("change", renderModes);
 $("runBtn").addEventListener("click", runDetection);
+$("rerunBtn").addEventListener("click", rerunExamples);
 $("openReviewBtn").addEventListener("click", () => showScreen("review"));
 document.addEventListener("project-opened", (e) => onProjectOpened(e.detail));
 

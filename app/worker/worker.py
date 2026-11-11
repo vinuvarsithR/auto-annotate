@@ -19,6 +19,8 @@ Plain-English summary
   cleaned and capped (read_examples) and pipeline.prepare_examples embeds them, then `result`
   is written, then the images run as above with only the classes that have usable examples.
   Earlier model boxes of the other classes are kept. No class left -> done, nothing run.
+* Re-run jobs (#9 `rerun`, config has `rerun_of`): just before writing an image, its
+  review_status is read again; not 'todo' any more -> nothing is deleted or added (still counted).
 * Any exception -> job 'failed' with a one-line error message.
 * roboflow_push jobs (#21): the images with review_status done/empty and no
   roboflow_image_id yet, one at a time: push(image, boxes, class_names, batch_name),
@@ -294,6 +296,7 @@ class Worker:
         from autolabel.pipeline import drop_overlapping
 
         expected = {img_id for img_id, _ in images}
+        is_rerun = "rerun_of" in config  # #9: skip images reviewed while the job ran
         done = 0
         for image_id, preds in run(images, specs, **run_args):
             if image_id not in expected:
@@ -304,6 +307,14 @@ class Worker:
             done += 1
             t = db.now()
             with conn:
+                progress = done / total if total else 1.0
+                if is_rerun and conn.execute(
+                        "SELECT review_status FROM images WHERE id=?",
+                        (int(image_id),)).fetchone()[0] != "todo":
+                    # #9 rerun: reviewed while the job ran -> nothing deleted or added
+                    conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
+                                 (done, progress, jid))
+                    continue
                 conn.execute(
                     "DELETE FROM annotations WHERE image_id=? "
                     "AND source NOT IN ('human', 'import') "
@@ -327,7 +338,7 @@ class Worker:
                         (int(image_id), r["class_id"], *r["bbox"], r["mask"], r["polygon"],
                          r["score"], r["source"] or model, r["status"], jid, t, t))
                 conn.execute("UPDATE jobs SET done=?, progress=? WHERE id=?",
-                             (done, done / total if total else 1.0, jid))
+                             (done, progress, jid))
 
         with conn:
             conn.execute("UPDATE jobs SET status='done', progress=1.0, finished_at=? WHERE id=?",

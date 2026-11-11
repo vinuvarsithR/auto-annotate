@@ -273,6 +273,8 @@ function mockFinishJob(job) {
 function mockDetectOne(db, job, imageId) {
   const img = db.images.find((i) => i.id === imageId);
   if (!img) return;
+  // A re-run skips an image reviewed while the job ran (it still counts in done).
+  if (job.config.rerun_of != null && (img.review_status || "todo") !== "todo") return;
   const runs = (classId) => !job._ran || job._ran.includes(classId);
   db.annotations = db.annotations.filter((a) => !(a.image_id === imageId && a.source !== "human" &&
     a.source !== "import" && runs(a.class_id) &&
@@ -546,6 +548,16 @@ const mockApi = {
     const db = await loadMock();
     mockProject(db, pid);
     pid = Number(pid);
+    let rerunOf = null;
+    if (body.rerun) { // #9 rerun: copy model, mode, options from the last examples job; todo images only
+      const extra = ["model", "mode", "image_ids", "options"].filter((k) => k in body);
+      if (extra.length) throw new ApiError("bad_request", `rerun takes no other fields; got: ${extra.join(", ")}`, 400);
+      const src = db.jobs.filter((j) => j.project_id === pid && j.kind === "detect" && j.config.mode === "examples")
+                         .sort((a, b) => b.id - a.id)[0];
+      if (!src) throw new ApiError("conflict", `project ${pid} has no examples-mode job to re-run`, 409);
+      rerunOf = src.id;
+      body = { model: src.config.model, mode: src.config.mode, options: src.config.options };
+    }
     if (!MOCK_MODELS.includes(body.model)) {
       throw new ApiError("unknown_model", `unknown model "${body.model}"`, 400);
     }
@@ -557,10 +569,16 @@ const mockApi = {
     if (!db.classes.some((c) => c.project_id === pid)) {
       throw new ApiError("no_classes", "project has no classes", 400);
     }
-    const ids = body.image_ids || db.images.filter((i) => i.project_id === pid).map((i) => i.id);
+    let ids = body.image_ids || db.images.filter((i) => i.project_id === pid).map((i) => i.id);
+    const config = { model: body.model, mode, image_ids: body.image_ids ?? null, options: body.options || {} };
+    if (rerunOf != null) {
+      ids = db.images.filter((i) => i.project_id === pid && (i.review_status || "todo") === "todo")
+                     .map((i) => i.id).sort((a, b) => a - b);
+      if (!ids.length) throw new ApiError("conflict", `project ${pid} has no images with review_status todo`, 409);
+      Object.assign(config, { image_ids: ids.slice(), rerun_of: rerunOf });
+    }
     const job = { id: db.nextJobId++, project_id: pid, kind: "detect", status: "queued", progress: 0,
-                  done: 0, total: ids.length, error: null,
-                  config: { model: body.model, mode, image_ids: body.image_ids ?? null, options: body.options || {} },
+                  done: 0, total: ids.length, error: null, config,
                   result: null, created_at: now(), started_at: null, finished_at: null, _ids: ids,
                   _prep: mode === "examples" ? MOCK_PREP_POLLS : 0 };
     db.jobs.push(job);
