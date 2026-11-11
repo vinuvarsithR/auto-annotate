@@ -68,6 +68,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     | #4    | images.sha256            | hash of the file at `path` (NULL if the file is missing) |
     | #22   | jobs.result              | NULL (and the kind CHECK gains 'import': table rebuilt) |
     | polygons | annotations.polygon     | NULL (plain box) |
+    | #24   | trained_models table     | (new table, created if missing) |
     """
     migrate_jobs(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
@@ -82,6 +83,26 @@ def migrate(conn: sqlite3.Connection) -> None:
     ann_cols = {r["name"] for r in conn.execute("PRAGMA table_info(annotations)")}
     if "polygon" not in ann_cols:
         conn.execute("ALTER TABLE annotations ADD COLUMN polygon TEXT")
+    m = re.search(r"CREATE TABLE trained_models \(.*?\n\);", SCHEMA.read_text(encoding="utf-8"),
+                  re.S)
+    if m is None:
+        raise RuntimeError("schema.sql has no CREATE TABLE trained_models")
+    conn.execute(m.group(0).replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+
+
+def trained_model_dict(row: sqlite3.Row) -> dict:
+    """#24 TrainedModel."""
+    return {"id": row["id"], "project_id": row["project_id"], "name": row["name"],
+            "version": row["version"], "task": row["task"],
+            "class_names": json.loads(row["class_names"]), "imgsz": row["imgsz"],
+            "file_name": row["file_name"], "size_bytes": row["size_bytes"],
+            "uploaded_at": row["uploaded_at"]}
+
+
+def trained_model(conn: sqlite3.Connection, pid: int, name: str) -> sqlite3.Row | None:
+    """#9: the non-deleted TrainedModel called `name` of project `pid`, or None."""
+    return conn.execute("SELECT * FROM trained_models WHERE project_id=? AND name=? "
+                        "AND deleted_at IS NULL", (pid, name)).fetchone()
 
 
 def _jobs_schema_sql(table: str) -> str:

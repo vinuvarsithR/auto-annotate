@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import get_conn, require_project
 from app.api.errors import ApiError
+from app.api.weights import remove_project_weights
 from app.db import db
 
 router = APIRouter()
@@ -76,9 +77,11 @@ def delete_project(pid: int, request: Request, conn: sqlite3.Connection = Depend
         if conn.execute("SELECT 1 FROM jobs WHERE project_id=? AND status IN ('queued', 'running')",
                         (pid,)).fetchone():
             raise ApiError(409, "conflict", f"project {pid} has a running job")
+        trained = [r[0] for r in conn.execute(
+            "SELECT name FROM trained_models WHERE project_id=?", (pid,))]
         conn.execute("DELETE FROM annotations WHERE image_id IN "
                      "(SELECT id FROM images WHERE project_id=?)", (pid,))
-        for table in ("jobs", "classes", "images"):
+        for table in ("jobs", "classes", "images", "trained_models"):
             conn.execute(f"DELETE FROM {table} WHERE project_id=?", (pid,))
         conn.execute("DELETE FROM projects WHERE id=?", (pid,))
         conn.commit()
@@ -93,4 +96,5 @@ def delete_project(pid: int, request: Request, conn: sqlite3.Connection = Depend
     except OSError:
         # The rows are already gone, so report success but leave a trace for cleanup.
         log.warning("project %s deleted, but could not remove %s", pid, folder, exc_info=True)
+    remove_project_weights(request, pid, trained)  # Train on Colab: data/weights/<pid>/
     return Response(status_code=204)
