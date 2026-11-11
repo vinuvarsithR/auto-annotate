@@ -190,7 +190,7 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 405 | `method_not_allowed` | wrong HTTP method for the path |
 | 409 | `name_taken` | project name already used (#1 create, #17 rename) |
 | 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
-| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12), no `done`/`empty` images (#14, #21), Roboflow settings missing from `.env` (#21) |
+| 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12), no `done`/`empty` images (#14, #21), Roboflow settings missing from `.env` (#21), #9 `rerun` with no examples-mode job or no `todo` image |
 | 500 | `internal_error` | unexpected server error (details only in the server log) |
 
 | # | Method | Path | Purpose |
@@ -412,6 +412,48 @@ Default floor when `min_score` is NULL: 0.05, as `owlv2` and `yolo`.
 | Mask to polygon | predict with `retina_masks=True`; `cv2.findContours` with `RETR_EXTERNAL` gives the parts, and holes are dropped. A part's area is `cv2.contourArea`. **One part:** use it. **Several parts:** use the largest only if it holds **>= 90%** of the summed area of all parts; otherwise `polygon` None and the model's own bbox is kept (long beams often split, and the largest piece would shrink the box). Then simplify with `cv2.approxPolyDP`, closed, tolerance **0.001 x the image's longest side** (1.28 px at 1280); divide by width / height, round to 6 decimals |
 | Bbox | with a polygon: its bounding box, computed by the detector after simplifying (section 1 bbox rule). Without one: the model's own bbox. |
 | Bad polygon | fewer than 3 points or zero area -> `polygon` None, the model's own bbox is kept. `mask` is always None. |
+
+#### Re-run with new examples (`rerun`)
+After reviewers fix boxes, one call runs examples mode again with the same detector and settings
+as the last time, on the images nobody has reviewed yet. It is a flag on #9, not a new endpoint:
+the result is an ordinary examples-mode `detect` job (same worker path, same Job JSON, same #10
+polling), so only the request and the image choice are new.
+
+Request (nothing else may be sent):
+```json
+{"rerun": true}
+```
+
+| Rule | Value |
+|---|---|
+| `rerun` | optional boolean, default `false`. `false` or absent: #9 as above, nothing changes. Not stored in `config`. |
+| Other fields with `rerun: true` | any of `model`, `mode`, `image_ids`, `options` present in the body (even `null`) -> 400 `bad_request` |
+| Source job | the project's `detect` job with the highest `id` whose `config.mode` is `"examples"`, whatever its `status`. A re-run job is itself an examples job, so re-runs chain. None -> 409 `conflict` |
+| Copied from the source job | `config.model`, `config.mode` (`"examples"`) and `config.options`. Not `image_ids`. |
+| Checks on the copied values | as a normal #9: `unknown_model` if the detector is no longer listed, `unknown_mode` if it lost `examples`, `no_classes` |
+| Images | every image of the project with `review_status` `todo`, in id order, fixed when the job is created and stored as `config.image_ids`. `done` and `empty` images are never run. None -> 409 `conflict` |
+| `config` | `{"model", "mode", "image_ids", "options", "rerun_of"}`; `rerun_of` = the source job id. Only re-run jobs have `rerun_of`. |
+| Examples | the usual examples rules, read when the job starts: all current examples of the project (any image, any `review_status`), cap 30 per class, skipped classes and reasons (`no examples`, `needs at least 5 examples` for `owlv2`, `no usable examples`) in `result` as usual |
+| Delete before adding | the usual section 1 rule on each run image: its earlier **model** boxes still `auto_accepted` or `needs_review`, of the classes that ran, are deleted (this includes the boxes of earlier examples runs, and also of text runs), then the overlap rule. Human, imported and reviewed (`accepted`, `edited`, `rejected`) boxes are never touched. |
+| Image reviewed during the job | just before writing an image, the worker reads its `review_status` again. Not `todo` any more -> nothing is deleted or added on it; it still counts in `done`. |
+| `result` | the usual examples `result` (step 3 of the worker order). No new keys. |
+
+Check order: project 404, body 400, no source job 409, `unknown_model`, `unknown_mode`,
+`no_classes`, no `todo` image 409.
+
+Response 202 is a Job, e.g. re-running job 10 on the two `todo` images 11 and 12:
+```json
+{"id": 11, "project_id": 1, "kind": "detect", "status": "queued", "progress": 0.0,
+ "done": 0, "total": 2, "error": null,
+ "config": {"model": "yoloe", "mode": "examples", "image_ids": [11, 12], "options": {}, "rerun_of": 10},
+ "result": null, "created_at": "2026-10-30T15:10:00Z", "started_at": null, "finished_at": null}
+```
+Errors (`message` text is an example):
+```json
+{"error": {"code": "conflict", "message": "project 1 has no examples-mode job to re-run"}}
+{"error": {"code": "conflict", "message": "project 1 has no images with review_status todo"}}
+{"error": {"code": "bad_request", "message": "rerun takes no other fields; got: model"}}
+```
 
 ### 10. GET /jobs/{jid}
 Response is a Job. The UI polls it every 1–2 s until `status` is `done` or `failed`.
@@ -760,6 +802,9 @@ def plan_import(root: Path) -> ImportPlan: ...
 | ui | mode choice beside the detector (from #16; hidden when a detector has fewer than 2 modes), `mode` sent in #9, a "preparing examples" state while `running` at 0, skipped classes and example counts shown from `result`, the same in the `?mock=1` layer. |
 | export | nothing: rows with `polygon` already export. |
 | integrator | this contract, `docs/fixtures/`, `requirements.txt` comment, README weights step. |
+| backend (`rerun`) | #9 `rerun` flag: body check (`model_fields_set`), source job, copied config, `todo` image list, `rerun_of`, the two 409s; worker re-reads `review_status` before writing each image of any job whose config has `rerun_of`. Must pass `tests/test_api_rerun_examples.py` (written by the integrator; backend may add tests, not weaken these). |
+| ui (`rerun`) | a "Re-run with new examples" button, enabled once the project has an examples-mode job; sends `{"rerun": true}`, then polls like any job; shows the two 409 messages; the same in `?mock=1`. |
+| models, export (`rerun`) | nothing |
 
 ### Polygons: who builds what
 

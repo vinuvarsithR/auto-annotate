@@ -742,6 +742,51 @@
   "started_at": "2026-10-30T14:02:00Z",
   "finished_at": "2026-10-30T14:03:00Z"
  },
+ "POST /api/projects/1/jobs (rerun examples) request": {
+  "rerun": true
+ },
+ "POST /api/projects/1/jobs (rerun examples)": {
+  "id": 11,
+  "project_id": 1,
+  "kind": "detect",
+  "status": "queued",
+  "progress": 0.0,
+  "done": 0,
+  "total": 2,
+  "error": null,
+  "config": {
+   "model": "yoloe",
+   "mode": "examples",
+   "image_ids": [
+    11,
+    12
+   ],
+   "options": {},
+   "rerun_of": 10
+  },
+  "result": null,
+  "created_at": "2026-10-30T15:10:00Z",
+  "started_at": null,
+  "finished_at": null
+ },
+ "error example (409 conflict, #9 rerun with no examples-mode job)": {
+  "error": {
+   "code": "conflict",
+   "message": "project 1 has no examples-mode job to re-run"
+  }
+ },
+ "error example (409 conflict, #9 rerun with no todo images)": {
+  "error": {
+   "code": "conflict",
+   "message": "project 1 has no images with review_status todo"
+  }
+ },
+ "error example (400 bad_request, #9 rerun with other fields)": {
+  "error": {
+   "code": "bad_request",
+   "message": "rerun takes no other fields; got: model"
+  }
+ },
  "error example (404)": {
   "error": {
    "code": "not_found",
