@@ -14,11 +14,12 @@ from PIL import Image
 
 from autolabel.evaluate import Box, iou
 from autolabel.models import detector_modes, get_detector, list_detectors
+from autolabel.models.trained import is_registered
 from autolabel.models.base import ClassSpec, Example, ExampleRun, Prediction
 
 
 def _check_available(detector: str) -> None:
-    if detector not in list_detectors():
+    if detector not in list_detectors() and not is_registered(detector):  # trained: CONTRACT #9
         raise ValueError(
             f"detector {detector!r} is not available yet; choose one of {list_detectors()}"
         )

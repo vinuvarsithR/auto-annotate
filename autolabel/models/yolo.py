@@ -80,6 +80,8 @@ def disable_autoinstall() -> None:
 
 class YoloDetector:
     name = "yolo"
+    source = "yolo"                 # Prediction.source; the trained detector overrides it
+    predict_options: dict = {}      # extra predict() keyword arguments (trained segment: retina_masks)
 
     def __init__(self, weights: str | None = None, device: str = "cpu",
                  min_score: float = DEFAULT_MIN_SCORE, imgsz: int | None = None,
@@ -113,25 +115,32 @@ class YoloDetector:
             return []
         wanted = {self.index_by_name[n]: n for n in floors}   # model index -> project class name
         kwargs = dict(conf=min(floors.values()), classes=sorted(wanted),
-                      device=self.device, verbose=False, imgsz=self.imgsz)
+                      device=self.device, verbose=False, imgsz=self.imgsz, **self.predict_options)
         results = self.model.predict(image, **kwargs)
         out: list[Prediction] = []
         for r in results:
             b = r.boxes
-            for (x1, y1, x2, y2), score, cls in zip(_as_list(b.xyxy), _as_list(b.conf),
-                                                   _as_list(b.cls)):
+            for i, ((x1, y1, x2, y2), score, cls) in enumerate(zip(_as_list(b.xyxy), _as_list(b.conf),
+                                                                   _as_list(b.cls))):
                 name = wanted.get(int(cls))
                 if name is None:
                     continue
                 score = min(1.0, max(0.0, float(score)))
                 if score < floors[name]:
                     continue
+                bbox = (float(x1), float(y1), float(x2 - x1), float(y2 - y1))
+                bbox, polygon = self._shape(r, i, bbox, image)
                 out.append(Prediction(
                     image_id=image_id,
                     category=name,
-                    bbox=(float(x1), float(y1), float(x2 - x1), float(y2 - y1)),
+                    bbox=bbox,
                     score=score,
-                    source=self.name,
+                    source=self.source,
                     mask=None,
+                    polygon=polygon,
                 ))
         return out
+
+    def _shape(self, result, index: int, bbox: tuple, image: Image.Image):
+        """(bbox, polygon) for box `index` of `result`. Plain YOLO: the model box, no polygon."""
+        return bbox, None

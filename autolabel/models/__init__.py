@@ -21,6 +21,8 @@ import os
 from typing import Callable
 
 from autolabel.models.base import ClassSpec, Detector, Example, ExampleRun, Prediction
+from autolabel.models.trained import (WeightsInfo, get_trained, inspect_weights, is_registered,
+                                      register_trained, unregister_trained)
 
 
 def _make_fake(**options) -> Detector:
@@ -77,7 +79,10 @@ def get_detector(name: str, **options) -> Detector:
     """Return the detector called `name`, building it on first use.
 
     Options are only used the first time a name is requested.
+    A name registered with register_trained() wins, whatever AUTOLABEL_DETECTORS says.
     """
+    if is_registered(name):
+        return get_trained(name, **options)
     if name not in list_detectors():
         hint = f" (set {ENV_VAR}={name} to enable it)" if name in _FACTORIES else ""
         raise ValueError(f"unknown detector {name!r}; choose one of {list_detectors()}{hint}")
@@ -86,5 +91,6 @@ def get_detector(name: str, **options) -> Detector:
     return _CACHE[name]
 
 
-__all__ = ["ClassSpec", "Detector", "Example", "ExampleRun", "Prediction", "detector_modes",
-           "get_detector", "list_detectors"]
+__all__ = ["ClassSpec", "Detector", "Example", "ExampleRun", "Prediction", "WeightsInfo",
+           "detector_modes", "get_detector", "inspect_weights", "list_detectors", "register_trained",
+           "unregister_trained"]
