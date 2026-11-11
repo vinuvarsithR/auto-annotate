@@ -1,15 +1,16 @@
 """
-export.py - endpoints 14 (COCO / YOLO / YOLO-seg zip download) and 21 (start a Roboflow push job).
+export.py - endpoints 14 (COCO / YOLO / YOLO-seg zip download), 21 (start a Roboflow push job)
+and 23 (Colab training package zip).
 
-Both only load rows and call autolabel.export; the rules (which images, which boxes,
+All three only load rows and call autolabel.export; the rules (which images, which boxes,
 zip layout) live there. #21 only checks and queues the job; the worker does the uploads.
 """
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import Response
@@ -20,9 +21,13 @@ from app.api.errors import ApiError
 from app.db import db
 from autolabel.export import (
     FORMATS,
+    TRAIN_TASKS,
+    NoPolygons,
     NothingToExport,
+    build_train_package,
     build_zip,
     roboflow_settings,
+    safe_name,
     validate_statuses,
 )
 
@@ -46,8 +51,21 @@ def _statuses(statuses: list[str] | None) -> list[str]:
         raise ApiError(400, "bad_request", str(e))
 
 
-def _safe_filename(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "project"
+_safe_filename = safe_name
+
+
+def _load_rows(conn: sqlite3.Connection, pid: int):
+    """(images, classes, annotations as API JSON, image id -> file path)."""
+    image_rows = conn.execute("SELECT * FROM images WHERE project_id=? ORDER BY id",
+                              (pid,)).fetchall()
+    paths = {r["id"]: r["path"] for r in image_rows}
+    images = [db.image_dict(r) for r in image_rows]
+    classes = [db.class_dict(r) for r in conn.execute(
+        "SELECT * FROM classes WHERE project_id=? ORDER BY id", (pid,))]
+    annotations = [db.annotation_dict(r) for r in conn.execute(
+        db.ANNOTATION_SELECT + " JOIN images i ON i.id = a.image_id "
+        "WHERE i.project_id=? ORDER BY a.id", (pid,))]
+    return images, classes, annotations, paths
 
 
 @router.post("/projects/{pid}/export")
@@ -58,16 +76,7 @@ def export_project(pid: int, body: ExportIn | None = Body(default=None),
     if body.format not in FORMATS:
         raise ApiError(400, "bad_request", f"format must be one of {list(FORMATS)}")
     statuses = _statuses(body.statuses)
-
-    image_rows = conn.execute("SELECT * FROM images WHERE project_id=? ORDER BY id",
-                              (pid,)).fetchall()
-    paths = {r["id"]: r["path"] for r in image_rows}
-    images = [db.image_dict(r) for r in image_rows]
-    classes = [db.class_dict(r) for r in conn.execute(
-        "SELECT * FROM classes WHERE project_id=? ORDER BY id", (pid,))]
-    annotations = [db.annotation_dict(r) for r in conn.execute(
-        db.ANNOTATION_SELECT + " JOIN images i ON i.id = a.image_id "
-        "WHERE i.project_id=? ORDER BY a.id", (pid,))]
+    images, classes, annotations, paths = _load_rows(conn, pid)
 
     image_bytes = None
     if body.include_images:
@@ -84,6 +93,52 @@ def export_project(pid: int, body: ExportIn | None = Body(default=None),
         raise ApiError(400, "bad_request", str(e))
 
     fname = f"{_safe_filename(project['name'])}_{body.format}.zip"
+    return Response(blob, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+class _FileMissing(Exception):
+    pass
+
+
+@router.post("/projects/{pid}/train-package")
+def train_package(pid: int, body: Any = Body(default=None),
+                  conn: sqlite3.Connection = Depends(get_conn)):
+    """#23: the Colab training package zip. The body is checked here (not by pydantic) so an
+    unknown project answers 404 before a bad body answers 400, as the contract orders them."""
+    project = require_project(conn, pid)
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise ApiError(400, "bad_request", "body must be a JSON object")
+    extra = sorted(set(body) - {"task"})
+    if extra:
+        raise ApiError(400, "bad_request", f"unknown field(s): {', '.join(extra)}")
+    task = body.get("task", "detect")
+    if task not in TRAIN_TASKS:
+        raise ApiError(400, "bad_request", f"task must be one of {list(TRAIN_TASKS)}")
+
+    images, classes, annotations, paths = _load_rows(conn, pid)
+
+    def image_bytes(im: dict) -> bytes:
+        path = Path(paths[im["id"]])
+        if not path.is_file():
+            raise _FileMissing(im["id"])
+        return path.read_bytes()
+
+    try:
+        blob = build_train_package(project["name"], task, images, classes, annotations,
+                                   image_bytes)
+    except NothingToExport:
+        raise ApiError(409, "conflict", f"project {pid} has no done or empty images to export")
+    except NoPolygons:
+        raise ApiError(409, "conflict", f"project {pid} has no exported box with a polygon")
+    except _FileMissing as e:
+        raise ApiError(404, "not_found", f"file of image {e.args[0]} missing on disk")
+    except ValueError as e:
+        raise ApiError(400, "bad_request", str(e))
+
+    fname = f"{safe_name(project['name'])}_train_{task}.zip"
     return Response(blob, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
