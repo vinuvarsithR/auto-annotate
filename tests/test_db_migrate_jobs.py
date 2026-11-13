@@ -95,8 +95,11 @@ def test_rebuild_on_copy_keeps_every_row(old_and_copy):
 
     assert _dump(original) == before  # the original was never touched
     assert "'import'" not in _jobs_sql(original)
-    for t in ("projects", "images", "classes", "annotations"):
+    for t in ("images", "classes", "annotations"):
         assert after[t] == before[t], t
+    # #30 added two project columns; old rows get NULL (= the defaults)
+    assert after["projects"] == [{**p, "load_classes": None, "hook_radius": None}
+                                 for p in before["projects"]]
     assert [j["id"] for j in after["jobs"]] == list(JOB_IDS)
     for old, new in zip(before["jobs"], after["jobs"]):
         assert new == {**old, "result": None}

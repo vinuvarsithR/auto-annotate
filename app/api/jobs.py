@@ -27,9 +27,23 @@ class JobIn(BaseModel):
     image_ids: list[int] | None = None
     options: dict = Field(default_factory=dict)
     rerun: bool = False  # #9 "Re-run with new examples"; never stored in config
+    masks: Any = None  # OWLv2 + SAM 2: "sam2" | "none", owlv2 examples only; stored only if sent
 
 
-RERUN_OTHER_FIELDS = ("model", "mode", "image_ids", "options")
+RERUN_OTHER_FIELDS = ("model", "mode", "image_ids", "options", "masks")
+MASKS_VALUES = ("sam2", "none")
+
+
+def _check_masks(body: JobIn, model: str, mode: str | None) -> None:
+    """#9 `masks`: checked after unknown_mode, before no_classes."""
+    if "masks" not in body.model_fields_set:
+        return
+    if body.masks not in MASKS_VALUES:
+        raise ApiError(400, "bad_request",
+                       f"masks must be one of {', '.join(MASKS_VALUES)}, got {body.masks!r}")
+    if model != "owlv2" or mode != "examples":
+        raise ApiError(400, "bad_request", "masks is only allowed with model owlv2 in "
+                       f"examples mode (got model '{model}', mode {mode!r})")
 
 
 def _rerun_source(conn: sqlite3.Connection, pid: int) -> tuple[int, dict]:
@@ -91,6 +105,8 @@ def _create_rerun(pid: int, body: JobIn, request: Request, conn: sqlite3.Connect
         raise ApiError(409, "conflict", f"project {pid} has no images with review_status todo")
     config = {"model": model, "mode": mode, "image_ids": image_ids,
               "options": source.get("options") or {}, "rerun_of": source_id}
+    if "masks" in source:
+        config["masks"] = source["masks"]
     return _insert_job(request, conn, pid, len(image_ids), config)
 
 
@@ -121,6 +137,7 @@ def create_job(pid: int, body: JobIn, request: Request,
     else:
         _check_model(request, body.model)
         mode = _resolve_mode(request, body.model, body.mode)
+    _check_masks(body, body.model, mode)
     _check_classes(conn, pid)
 
     if body.image_ids is None:
@@ -140,7 +157,9 @@ def create_job(pid: int, body: JobIn, request: Request,
                            f"images not in project {pid}: {missing[:20]}")
         total = len(ids)
 
-    config = {**body.model_dump(exclude={"rerun"}), "mode": mode}
+    config = {**body.model_dump(exclude={"rerun", "masks"}), "mode": mode}
+    if "masks" in body.model_fields_set:
+        config["masks"] = body.masks
     return _insert_job(request, conn, pid, total, config)
 
 

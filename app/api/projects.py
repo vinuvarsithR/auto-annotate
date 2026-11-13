@@ -81,7 +81,7 @@ def delete_project(pid: int, request: Request, conn: sqlite3.Connection = Depend
             "SELECT name FROM trained_models WHERE project_id=?", (pid,))]
         conn.execute("DELETE FROM annotations WHERE image_id IN "
                      "(SELECT id FROM images WHERE project_id=?)", (pid,))
-        for table in ("jobs", "classes", "images", "trained_models"):
+        for table in ("jobs", "classes", "hook_points", "images", "trained_models"):
             conn.execute(f"DELETE FROM {table} WHERE project_id=?", (pid,))
         conn.execute("DELETE FROM projects WHERE id=?", (pid,))
         conn.commit()
