@@ -1093,7 +1093,8 @@ project setting (#30), default `["rb", "sb", "biax"]`; names that are not projec
 | Prompt | the box (after steps 1-2), pixels, one call per image for all its boxes, `multimask_output=True` (3 masks + 3 scores per box), masks at image size. The spike's call path is `predictor.set_image` + `predictor.inference_features(..., bboxes=..., multimask_output=True)` (`steps.py`, VERIFIED on 8.4.199); models may use any call that gives the same masks. |
 | Pick | among the box's masks that are non-empty and have **>= 90%** of their pixels inside the box grown by **5 px** on each side: the one with the highest SAM score. None qualifies -> the mask with the highest inside fraction. |
 | Opening | `cv2.morphologyEx(MORPH_OPEN)` with a **5 x 5** `MORPH_ELLIPSE` kernel. If that empties the mask, keep the mask from before the opening. |
-| Clip | pixels outside the box (`floor(x0)..ceil(x1)`, `floor(y0)..ceil(y1)`, inclusive) are cleared |
+| Closing | then `cv2.morphologyEx(MORPH_CLOSE)` with a **25 x 25** `MORPH_ELLIPSE` kernel, so pieces of one object closer than about 25 px join before step 4 picks the largest part. One constant `CLOSE_PX = 25` in `autolabel/models/sam.py`; `0` = off (the step is skipped). Added 2026-11-13 by the user; not measured in the spike (GUESS that it helps split beams). |
+| Clip | after the closing: pixels outside the box (`floor(x0)..ceil(x1)`, `floor(y0)..ceil(y1)`, inclusive) are cleared |
 
 **Step 4, mask -> polygon: single largest part** (`largest_polygon`). `cv2.findContours(RETR_EXTERNAL)`
 gives the parts (holes dropped); the part with the largest `cv2.contourArea` is used, **always** (no 90%
@@ -1216,7 +1217,8 @@ def get_segmenter() -> Segmenter: ...      # SAM 2.1 tiny, cached per process; m
                                            # FileNotFoundError with a one-line message
 class FakeSegmenter:                       # tests: k = 1, the filled ellipse inscribed in the box, score 0.9
     ...
-def clean_mask(masks, scores, bbox: tuple, open_px: int = 5) -> np.ndarray: ...   # step 3 pick/open/clip
+def clean_mask(masks, scores, bbox: tuple, open_px: int = 5,
+               close_px: int = CLOSE_PX) -> np.ndarray: ...   # step 3 pick/open/close/clip; close_px 0 = no closing
 def largest_polygon(mask: np.ndarray, width: int, height: int) -> list | None: ...  # step 4; None = keep the box, polygon None
 def add_polygons(image: Image.Image, preds: list[Prediction], segmenter: Segmenter) -> list[Prediction]: ...
 
@@ -1233,7 +1235,7 @@ The worker passes `post` only for `owlv2` examples jobs; then the usual delete +
 
 | Role | Builds | Tests (must pass) |
 |---|---|---|
-| models | `PostProcess` in `base.py`; `autolabel/models/postprocess.py`; `autolabel/models/sam.py` (`get_segmenter`, `FakeSegmenter`, `clean_mask`, `largest_polygon`, `add_polygons`); `pipeline.run(post=, segmenter=)` | `tests/test_models_postprocess.py`: every case in `docs/fixtures/owl_sam/cases.json` `merge` and `hook_filter`. `tests/test_models_sam.py` with `FakeSegmenter` and numpy masks only (no weights): multimask pick (inside rule + fallback), opening, opening that empties, clip, two-part mask -> largest part + bbox, empty mask -> box kept with `polygon` None and the same bbox, missing weights -> `FileNotFoundError`. `tests/test_pipeline_*.py`: `run(post=...)` with `fake` + `FakeSegmenter`, order of the steps. |
+| models | `PostProcess` in `base.py`; `autolabel/models/postprocess.py`; `autolabel/models/sam.py` (`get_segmenter`, `FakeSegmenter`, `clean_mask`, `largest_polygon`, `add_polygons`); `pipeline.run(post=, segmenter=)` | `tests/test_models_postprocess.py`: every case in `docs/fixtures/owl_sam/cases.json` `merge` and `hook_filter`. `tests/test_models_sam.py` with `FakeSegmenter` and numpy masks only (no weights): multimask pick (inside rule + fallback), opening, opening that empties, closing joins two parts 20 px apart into one, `close_px=0` leaves them as two, closing never adds pixels outside the box, clip, two-part mask -> largest part + bbox, empty mask -> box kept with `polygon` None and the same bbox, missing weights -> `FileNotFoundError`. `tests/test_pipeline_*.py`: `run(post=...)` with `fake` + `FakeSegmenter`, order of the steps. |
 | backend | `hook_points` table, the two `projects` columns, `migrate()`; #27 - #30; #9 `masks` (checks, `config.masks`, `rerun` copy); worker: read settings + points at job start, build `PostProcess` (hooks by image id via `sequence_of`), pass it for `owlv2` examples jobs, `result.masks` + `result.hook` (warnings). Tests use the existing fake pipeline, no SAM. | `tests/test_api_hook.py` (#27 - #30 incl. errors, keys = fixtures), `tests/test_worker_*.py`: `cases.json` `hook_warnings`, `PostProcess` passed only for `owlv2` examples, `masks` 400s, `rerun` copies `masks` |
 | ui | examples mode with `owlv2`: a "SAM 2 masks" toggle (sends `masks`); on the review page, a "Set hook point" action: click on the image -> #28 with image-pixel coords, draws the point and the radius circle, "Clear" -> #29; shows `result.hook.warnings` after a job; `?mock=1` from the fixtures | manual check |
 | export | nothing: rows have one polygon ring, as today | - |
