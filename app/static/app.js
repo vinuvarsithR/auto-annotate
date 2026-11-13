@@ -57,6 +57,7 @@ const canvas = new BoxCanvas($("canvas"), {
   onPolygonDrawn: (polygon) => finishPolygon(polygon),
   onPolygonChanged: (ann, polygon, label) => changePolygon(ann, polygon, label),
   onVertexClicked: (ann, index) => deleteVertex(ann, index),
+  onHookClick: (x, y) => setHookPoint(x, y),
   onView: (zoom, scale) => renderZoom(zoom, scale),
   onRender: () => positionPopup(),
 });
@@ -130,7 +131,10 @@ function showScreen(name) {
   // The project picker and review progress belong to Setup / Review; Projects lists them all.
   $("projectField").hidden = name === "projects";
   $("progress").style.visibility = name === "review" ? "visible" : "hidden";
-  if (name !== "review") { canvas.setTempDraw(false); canvas.setHideAll(false); canvas.cancelPolygon(); closeAdjust(); }
+  if (name !== "review") {
+    canvas.setTempDraw(false); canvas.setHideAll(false); canvas.cancelPolygon(); closeAdjust();
+    if (hook.setting) setHookMode(false);
+  }
   document.dispatchEvent(new CustomEvent("screen-shown", { detail: name }));
 }
 
@@ -183,6 +187,7 @@ async function openProject(pid) {
   state.offset = 0;
   await refreshProgress();
   await loadImages(0);
+  await loadHook();
   // Lets setup.js follow the project picker and refresh its own panels.
   document.dispatchEvent(new CustomEvent("project-opened", { detail: state.project }));
 }
@@ -200,6 +205,8 @@ function clearReview() {
   canvas.setImage(null);
   resetHistory(null);
   select(null);
+  hook.data = null; hook.error = null; hook.pid = null;
+  if (hook.setting) setHookMode(false); else renderHook();
   $("progressFill").style.width = "0%";
 }
 
@@ -282,6 +289,173 @@ function setLabelsOpen(on) {
   lsSet("review.labels", on ? "1" : "0");
 }
 
+// ------------------------------------------------------------ hook points (#27 - #30)
+// One hook point per video (= sequenceOf(file_name), as the server keys it). OWLv2 examples jobs
+// drop load boxes (rb, sb, biax by default) farther than the radius from it. Set = the next click
+// on the image is the point (#28); Clear = #29; load classes + radius = #30.
+const hook = { pid: null, data: null, error: null, setting: false, busy: false };
+
+// The image on screen (state.image only changes once its boxes have loaded).
+function shownImage() { return state.images[state.imageIndex] || null; }
+function currentSequence() { const img = shownImage(); return img ? sequenceOf(img.file_name) : null; }
+function hookPointOf(seq) {
+  return (hook.data && seq && hook.data.points.find((p) => p.sequence === seq)) || null;
+}
+
+async function loadHook() {
+  const pid = state.projectId;
+  if (pid == null) { hook.data = null; hook.error = null; renderHook(); return; }
+  let data = null, error = null;
+  try { data = await api.getHook(pid); }
+  catch (e) {
+    // No banner: a server without #27 would show it on every project open.
+    console.error(e);
+    error = e instanceof ApiError && e.httpStatus === 404 && e.code !== "not_found"
+      ? "This server has no hook point endpoints (#27) yet." : `Hook points not loaded: ${e.message}`;
+  }
+  if (pid !== state.projectId) return;
+  const otherProject = hook.pid !== pid;
+  hook.pid = pid;
+  hook.data = data;
+  hook.error = error;
+  renderHook(otherProject);
+}
+
+// freshSettings: also redraw the open "Load classes + radius" form (else it keeps unsaved edits).
+function renderHook(freshSettings = false) {
+  const d = hook.data;
+  $("hookNote").hidden = !hook.error;
+  $("hookNote").textContent = hook.error || "";
+  $("hookBody").hidden = !d;
+  $("hookCount").textContent = d ? `${d.sequences.filter((s) => s.has_point).length} / ${d.sequences.length}` : "";
+  if (!d) { if (hook.setting) setHookMode(false); canvas.setHook(null, HOOK_DEFAULT_RADIUS); return; }
+  const seq = currentSequence();
+  const pt = hookPointOf(seq);
+  canvas.setHook(pt ? { x: pt.x, y: pt.y, r: d.radius } : null, d.radius);
+
+  const now = $("hookNow");
+  now.innerHTML = "";
+  if (!seq) now.textContent = "Open an image to set its video's hook point.";
+  else {
+    const s = document.createElement("span");
+    s.className = "seq";
+    s.textContent = seq;
+    now.append("This video: ", s, document.createElement("br"),
+      hook.setting ? "Click the hook on the image (Esc cancels)."
+        : pt ? `Point at ${fmtPx(pt.x)}, ${fmtPx(pt.y)} px.` : "No point: load boxes are not filtered.");
+  }
+  $("hookSetBtn").disabled = !seq || hook.busy;
+  $("hookSetBtn").setAttribute("aria-pressed", String(hook.setting));
+  $("hookSetBtn").textContent = hook.setting ? "Cancel" : pt ? "Move" : "Set";
+  $("hookClearBtn").disabled = !pt || hook.busy || hook.setting;
+
+  const list = $("hookList");
+  list.innerHTML = "";
+  for (const s of d.sequences) {
+    const li = document.createElement("li");
+    li.className = (s.has_point ? "" : "none") + (s.sequence === seq ? " cur" : "");
+    li.innerHTML = '<span class="mk" aria-hidden="true"></span><span class="nm"></span><span class="ct"></span>';
+    li.querySelector(".mk").textContent = s.has_point ? "✓" : "–";
+    li.querySelector(".nm").textContent = s.sequence;
+    li.title = `${s.sequence}: ${s.images} image(s), ${s.has_point ? "hook point set" : "no hook point"}` +
+      (s.sequence === seq ? " (the open image's video)" : "");
+    li.querySelector(".ct").textContent = String(s.images);
+    if (s.has_point) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Clear";
+      b.disabled = hook.busy;
+      b.setAttribute("aria-label", `Clear the hook point of ${s.sequence}`);
+      b.addEventListener("click", () => clearHookPoint(s.sequence));
+      li.appendChild(b);
+    }
+    list.appendChild(li);
+  }
+  // A point whose video has no images left is only in `points`; it can still be cleared.
+  for (const p of d.points.filter((q) => !d.sequences.some((s) => s.sequence === q.sequence))) {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="mk" aria-hidden="true">✓</span><span class="nm"></span><span class="ct">0</span><button type="button">Clear</button>';
+    li.querySelector(".nm").textContent = p.sequence;
+    li.title = `${p.sequence}: no images left, hook point set`;
+    li.querySelector("button").addEventListener("click", () => clearHookPoint(p.sequence));
+    list.appendChild(li);
+  }
+
+  if (!$("hookSettings").open || freshSettings) renderHookSettings();
+}
+
+// Load class checkboxes + radius from the server's values. Not redrawn while open (keeps edits).
+function renderHookSettings() {
+  const d = hook.data;
+  const box = $("hookLoad");
+  box.innerHTML = "";
+  for (const c of state.classes) {
+    const l = document.createElement("label");
+    l.className = "check";
+    l.innerHTML = '<input type="checkbox"> <span></span>';
+    l.querySelector("input").value = c.name;
+    l.querySelector("input").checked = d.load_classes.includes(c.name);
+    l.querySelector("span").textContent = c.name;
+    box.appendChild(l);
+  }
+  if (!state.classes.length) box.textContent = "No classes.";
+  $("hookRadius").value = String(d.radius);
+  $("hookResetBtn").disabled = d.load_classes_default && d.radius_default;
+}
+
+function fmtPx(v) { return String(Math.round(v * 10) / 10); }
+
+function setHookMode(on) {
+  if (on && !shownImage()) return;
+  hook.setting = on;
+  if (on && state.tool !== "drag") setTool("drag");
+  if (on) { canvas.cancelPolygon(); select(null); }
+  canvas.setHookMode(on);
+  renderHook();
+}
+
+async function setHookPoint(x, y) {
+  const img = shownImage(), pid = state.projectId;
+  if (!img || hook.busy) return;
+  const r1 = (v) => Math.round(v * 10) / 10;
+  hook.busy = true;
+  const pt = await guard(() => api.putHookPoint(pid, { image_id: img.id, x: r1(x), y: r1(y) }));
+  hook.busy = false;
+  setHookMode(false);
+  if (pt) showBanner(`Hook point set for ${pt.sequence}.`, "info");
+  await loadHook();
+}
+
+async function clearHookPoint(seq) {
+  if (hook.busy) return;
+  hook.busy = true;
+  renderHook();
+  const ok = await guard(async () => { await api.deleteHookPoint(state.projectId, seq); return true; });
+  hook.busy = false;
+  if (ok) showBanner(`Hook point cleared for ${seq}.`, "info");
+  await loadHook();
+}
+
+async function saveHookSettings(reset) {
+  const pid = state.projectId;
+  let body;
+  if (reset) body = { load_classes: null, radius: null };
+  else {
+    const radius = Number($("hookRadius").value);
+    if (!$("hookRadius").value.trim() || !Number.isFinite(radius) || radius <= 0) {
+      showBanner("Radius must be a number above 0 (pixels).");
+      return;
+    }
+    body = { load_classes: Array.from($("hookLoad").querySelectorAll("input:checked")).map((i) => i.value), radius };
+  }
+  const data = await guard(() => api.patchHook(pid, body));
+  if (!data || pid !== state.projectId) return;
+  hook.data = data;
+  renderHook(true);
+  showBanner(reset ? "Hook settings back to the defaults." :
+    data.load_classes.length ? "Hook settings saved." : "Hook settings saved: no load class, so the hook filter is off.", "info");
+}
+
 // ------------------------------------------------------------ image strip
 async function loadImages(offset, selectIndex = 0) {
   const status = $("statusFilter").value || null;
@@ -322,6 +496,7 @@ async function loadImages(offset, selectIndex = 0) {
     renderRepeat();
     renderImageList();
     select(null);
+    if (hook.setting) setHookMode(false); else renderHook();
   }
 }
 
@@ -399,6 +574,7 @@ async function openImage(i) {
   resetHistory(img.id);
   state.anns = [];
   state.pending = null;
+  if (hook.setting) setHookMode(false); else renderHook(); // this image's video and hook point
   syncCanvas();
   state.loadingImage = true;
   select(null);
@@ -1050,6 +1226,7 @@ async function runHistory(dir) {
 // Drag: click selects, drag moves / resizes, Ctrl+drag draws. Box: every drag draws a box.
 // Polygon: every click adds a point.
 function setTool(tool) {
+  if (tool !== "drag" && hook.setting) setHookMode(false);
   state.tool = tool;
   syncDrawColor();
   canvas.setDrawMode(tool === "box");
@@ -1183,6 +1360,11 @@ $("labelsBtn").addEventListener("click", () => setLabelsOpen($("labelsPanel").hi
 $("toolDrag").addEventListener("click", () => setTool("drag"));
 $("toolBox").addEventListener("click", () => setTool("box"));
 $("toolPolygon").addEventListener("click", () => setTool("polygon"));
+$("hookSetBtn").addEventListener("click", () => setHookMode(!hook.setting));
+$("hookClearBtn").addEventListener("click", () => { const s = currentSequence(); if (s) clearHookPoint(s); });
+$("hookSaveBtn").addEventListener("click", () => saveHookSettings(false));
+$("hookResetBtn").addEventListener("click", () => saveHookSettings(true));
+$("hookSettings").addEventListener("toggle", () => { if ($("hookSettings").open && hook.data) renderHookSettings(); });
 $("undoBtn").addEventListener("click", () => runHistory("undo"));
 $("redoBtn").addEventListener("click", () => runHistory("redo"));
 $("repeatBtn").addEventListener("click", repeatPrevious);
@@ -1275,7 +1457,8 @@ document.addEventListener("keydown", (e) => {
   else if (k === "0") canvas.resetView();
   else if (k === "1") canvas.zoomToActual();
   else if (k === "Escape") {
-    if (!$("adjustPop").hidden) closeAdjust();
+    if (hook.setting) setHookMode(false);
+    else if (!$("adjustPop").hidden) closeAdjust();
     else if (canvas.cancelDraw()) { /* dropped the box being dragged out */ }
     else if (popupOpen()) cancelPopup();
     else if (state.tool !== "drag") setTool("drag");
@@ -1301,6 +1484,7 @@ window.addEventListener("blur", () => { canvas.setTempDraw(false); canvas.setHid
   setLabelsOpen(lsGet("review.labels") !== "0");
   setStripOpen(lsGet("review.strip") !== "0");
   setTool("drag");
+  renderHook();
   renderHistory();
   renderZoom(1, 1);
   showScreen("projects"); // the start page

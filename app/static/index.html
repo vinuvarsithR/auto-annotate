@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-11.3";
+  window.ASSET_VERSION = "2026-11-13.1";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -135,6 +135,8 @@
       <div class="row run-row">
         <label class="field">Model <select id="modelSelect"></select></label>
         <label class="field" id="modeField" hidden>Mode <select id="modeSelect"></select></label>
+        <label class="check" id="masksField" hidden title="SAM 2 draws an outline (polygon) around each box. Slower: about 2 s more per image on CPU.">
+          <input id="masksCheck" type="checkbox"> Outlines (SAM 2)</label>
         <button id="runBtn" type="button" class="primary">Run on all images</button>
         <button id="rerunBtn" type="button" hidden title="Runs your last examples job again, with the current examples, on images not reviewed yet (todo)">Re-run with new examples</button>
         <button id="openReviewBtn" type="button" class="primary go" hidden>Open in review &rarr;</button>
@@ -167,6 +169,35 @@
     <ul id="labelList" class="label-list" aria-label="Classes on this image"></ul>
     <h3 id="unusedHead" class="lp-sub">Unused classes</h3>
     <ul id="unusedList" class="label-list unused" aria-label="Classes with no box on this image"></ul>
+
+    <!-- hook points (#27 - #30): one per video; OWLv2 examples jobs keep load boxes near it -->
+    <section id="hookSection" class="hook" aria-labelledby="hookHead">
+      <h3 id="hookHead" class="lp-sub">Hook points <span id="hookCount" class="num-tab"></span></h3>
+      <p id="hookNote" class="muted hook-note" hidden></p>
+      <div id="hookBody">
+        <div class="hook-now">
+          <div id="hookNow" class="hook-line"></div>
+          <div class="row hook-btns">
+            <button id="hookSetBtn" type="button" aria-pressed="false" title="Then click the hook on the image (Esc cancels)">Set</button>
+            <button id="hookClearBtn" type="button">Clear</button>
+          </div>
+        </div>
+        <details id="hookVideos">
+          <summary>All videos</summary>
+          <ul id="hookList" class="hook-list"></ul>
+        </details>
+        <details id="hookSettings">
+          <summary>Load classes + radius</summary>
+          <div id="hookLoad" class="hook-load" role="group" aria-label="Load classes"></div>
+          <label class="field hook-radius">Radius <input id="hookRadius" type="number" min="1" step="1" size="5"> px</label>
+          <div class="row hook-btns">
+            <button id="hookSaveBtn" type="button" class="primary">Save</button>
+            <button id="hookResetBtn" type="button" title="Back to rb, sb, biax and 130 px">Defaults</button>
+          </div>
+        </details>
+      </div>
+    </section>
+
     <label class="check lp-foot"><input id="showRejected" type="checkbox" checked> Show rejected boxes</label>
   </aside>
 
@@ -300,6 +331,7 @@
     <div><dt>Drag a polygon point</dt><dd>Move that point (polygon selected)</dd></div>
     <div><dt>Click a polygon point</dt><dd>Delete that point (a polygon keeps at least 3; polygon selected)</dd></div>
     <div><dt>Click a polygon edge</dt><dd>Add a point there; keep the button down to drag it (polygon selected)</dd></div>
+    <div><dt>Hook points: Set, then click</dt><dd>Set the hook point of this image's video (Labels panel; <kbd>Esc</kbd> cancels)</dd></div>
     <div><dt><kbd>P</kbd></dt><dd>Repeat previous: copy the kept boxes of the image you had open before</dd></div>
     <div><dt><kbd>Ctrl</kbd>+<kbd>Z</kbd></dt><dd>Undo (this image)</dd></div>
     <div><dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd></dt><dd>Redo</dd></div>

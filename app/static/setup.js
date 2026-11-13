@@ -591,7 +591,12 @@ function renderModes() {
   }
   if (modes.includes(keep)) sel.value = keep;
   $("modeField").hidden = modes.length < 2;
+  renderMasks();
 }
+
+// #9 masks: only owlv2 in examples mode takes it (any other model / mode answers 400).
+function masksAllowed() { return $("modelSelect").value === "owlv2" && $("modeSelect").value === "examples"; }
+function renderMasks() { $("masksField").hidden = !masksAllowed(); }
 
 async function runDetection() {
   const pid = setup.project && setup.project.id;
@@ -599,7 +604,9 @@ async function runDetection() {
   if (!pid || !model || setup.jobId) return;
   if (setup.dirty) { showBanner("Save the class list first (it has unsaved changes)."); return; }
   const mode = $("modeSelect").value || null;
-  await startDetect(pid, { model, mode, image_ids: null, options: {} });
+  const body = { model, mode, image_ids: null, options: {} };
+  if (masksAllowed()) body.masks = $("masksCheck").checked ? "sam2" : "none";
+  await startDetect(pid, body);
 }
 
 // #9 rerun: the server copies detector, mode and options from the project's last examples job
@@ -668,6 +675,28 @@ function renderExamplesResult(r) {
   if (skipped.length) {
     box.appendChild(numTable(["Skipped class", "Why"], skipped.map((s) => [s.class_name, s.reason])));
   }
+  if (r.masks) box.appendChild(para(r.masks === "sam2" ? "Outlines: SAM 2 (polygons)." : "Outlines: off (boxes only)."));
+  const h = r.hook;
+  if (!h) return;
+  const withPoint = Object.keys(h.points || {}).length;
+  box.appendChild(para(h.load_classes.length
+    ? `Hook filter: load classes ${h.load_classes.join(", ")}, radius ${h.radius} px, ` +
+      `${withPoint} video(s) with a hook point.`
+    : "Hook filter: off (no load classes)."));
+  const warn = h.warnings || [];
+  if (warn.length) {
+    const p = para(`${warn.length} video(s) have no hook point, so their load boxes were not filtered. ` +
+      "Set one on the Review page (Labels panel, Hook points), then re-run.");
+    p.className = "warn";
+    box.appendChild(p);
+    box.appendChild(numTable(["Video without hook point", "Images"], warn.map((w) => [w.sequence, w.images])));
+  }
+}
+
+function para(text) {
+  const p = document.createElement("p");
+  p.textContent = text;
+  return p;
 }
 
 function clearJobResult() {
@@ -787,6 +816,7 @@ $("addClassBtn").addEventListener("click", () => { addClassRow().querySelector("
 $("saveClassesBtn").addEventListener("click", saveClasses);
 $("classTable").addEventListener("input", () => setDirty(true));
 $("modelSelect").addEventListener("change", renderModes);
+$("modeSelect").addEventListener("change", renderMasks);
 $("runBtn").addEventListener("click", runDetection);
 $("rerunBtn").addEventListener("click", rerunExamples);
 $("openReviewBtn").addEventListener("click", () => showScreen("review"));
