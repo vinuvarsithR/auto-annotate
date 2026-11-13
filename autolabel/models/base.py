@@ -51,6 +51,15 @@ class Example:
                                    # status, cap ignored, as (x, y, w, h) px clipped, area > 0 (owlv2 bg)
 
 
+@dataclass(frozen=True)
+class PostProcess:                 # worker -> pipeline.run, one per job (OWLv2 + SAM 2 steps 1-4)
+    load_classes: tuple[str, ...] = ("rb", "sb", "biax")
+    radius: float = 130.0
+    hooks: dict = field(default_factory=dict, hash=False, compare=False)
+                                   # image_id (str, as passed to run) -> (x, y) px; missing = no hook filter
+    masks: str = "none"            # "sam2" | "none"
+
+
 class ExampleRun(Protocol):        # one job's prototypes; built at job start, kept in memory
     classes: list[ClassSpec]       # the classes that will run, in input order
     used: dict[str, int]           # class name -> examples used (classes that run only)

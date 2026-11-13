@@ -136,3 +136,13 @@ Real check on the spike's 40 frames (VERIFIED, CPU, thresholds tuned on those fr
 ## Open questions
 - Should `get_detector` key its cache on `(name, options)` instead of `name` only? With real models, two jobs with
   different options (e.g. a different checkpoint) would currently share the first instance.
+
+## 2026-11-13: OWLv2 + SAM 2 polygons (#9 masks, steps 1-4)
+Built: `PostProcess` (base.py), `autolabel/models/postprocess.py` (merge_contained, hook_filter),
+`autolabel/models/sam.py` (Segmenter, Sam2Segmenter, get_segmenter, FakeSegmenter, clean_mask, largest_polygon,
+add_polygons), `pipeline.run(post=, segmenter=)`. Tests: test_models_postprocess.py (all owl_sam fixture cases),
+test_models_sam.py, test_pipeline_post.py (no weights).
+Read-only check (D:\autoannotate\spikes\owl_sam_check, real OWLv2 + SAM 2.1 tiny, 40 spike test frames, VERIFIED):
+with one-load rule box F1 0.72 / mask F1 0.74; without it 0.71 / 0.72 (= spike v2 largest-part result).
+The rule only changes biax (0.40 -> 0.53 mask F1, no true positive lost). 7.6 s/img CPU (OWLv2 5.4 + SAM 1.8),
+peak RAM 1.94 GB in one process.
