@@ -1,0 +1,1504 @@
+{
+ "_note": "Claude connector tool list (docs/CONTRACT.md 'Claude connector'). Names, order, descriptions and input_schema are exact: MCP tools/list and the chat's tools come from this. 'kind' and 'risky' are contract metadata, not sent. The chat drops the 'confirm' property from every schema. Example outputs use the api_samples.json data. Exact: ok, error.code, needs_confirmation.details and .arguments, and data keys; error.message and needs_confirmation.effect are examples. A write example with 'user' was made by that user (reviewer 'claude:<user>'). An example with 'state' needs that extra state added to the test DB first; examples without it run on the api_samples.json data (project 1, images 10-12, boxes 101-108, jobs 5-12).",
+ "tools": [
+  {
+   "name": "list_projects",
+   "kind": "read",
+   "risky": "never",
+   "description": "List all projects with box counts by status.",
+   "input_schema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "project_summary",
+   "kind": "read",
+   "risky": "never",
+   "description": "One project: image counts by review status, box counts by class and status, the latest job.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "list_images",
+   "kind": "read",
+   "risky": "never",
+   "description": "List a project's images (id order). status = images having at least one box with that status.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "auto_accepted",
+       "needs_review",
+       "accepted",
+       "rejected",
+       "edited"
+      ]
+     },
+     "review_status": {
+      "type": "string",
+      "enum": [
+       "todo",
+       "done",
+       "empty"
+      ]
+     },
+     "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+     },
+     "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "default": 50
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "get_annotations",
+   "kind": "read",
+   "risky": "never",
+   "description": "The image and its boxes (bbox [x, y, w, h] px, polygon normalized 0..1 or null).",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "image_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "auto_accepted",
+       "needs_review",
+       "accepted",
+       "rejected",
+       "edited"
+      ]
+     }
+    },
+    "required": [
+     "image_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "list_classes",
+   "kind": "read",
+   "risky": "never",
+   "description": "The project's classes in project order (the YOLO export order).",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "get_job",
+   "kind": "read",
+   "risky": "never",
+   "description": "A job's status, progress and result.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "job_id": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "job_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "list_models",
+   "kind": "read",
+   "risky": "never",
+   "description": "Detector names and their modes usable for run_detection in this project.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "get_hook",
+   "kind": "read",
+   "risky": "never",
+   "description": "Hook-filter settings and the hook point of each video (sequence) of the project.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "add_class",
+   "kind": "write",
+   "risky": "never",
+   "description": "Add one class at the end of the project's class list.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+     },
+     "description": {
+      "type": "string",
+      "maxLength": 500
+     },
+     "min_score": {
+      "type": [
+       "number",
+       "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+     },
+     "accept_score": {
+      "type": [
+       "number",
+       "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+     }
+    },
+    "required": [
+     "project_id",
+     "name"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "run_detection",
+   "kind": "write",
+   "risky": "more than 50 images",
+   "description": "Start a detect job (#9). image_ids omitted = all images of the project. Needs confirm=true when it would run on more than 50 images.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "model": {
+      "type": "string",
+      "minLength": 1
+     },
+     "mode": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "image_ids": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "minItems": 1,
+      "maxItems": 10000
+     },
+     "masks": {
+      "type": "string",
+      "enum": [
+       "sam2",
+       "none"
+      ]
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "project_id",
+     "model"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "rerun_examples",
+   "kind": "write",
+   "risky": "more than 50 images",
+   "description": "Re-run the last examples-mode job on every image still in review_status todo (#9 rerun). Needs confirm=true when that is more than 50 images.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "set_annotation_status",
+   "kind": "write",
+   "risky": "more than 10 boxes",
+   "description": "Approve (status accepted) or reject (status rejected) boxes. All or nothing. Needs confirm=true for more than 10 boxes.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "annotation_ids": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "minItems": 1,
+      "maxItems": 500,
+      "uniqueItems": true
+     },
+     "action": {
+      "type": "string",
+      "enum": [
+       "approve",
+       "reject"
+      ]
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "annotation_ids",
+     "action"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "update_annotation",
+   "kind": "write",
+   "risky": "never",
+   "description": "Change one box (#13 rules): bbox px, polygon (normalized; null removes it), class by name, or status. Send at least one field.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "annotation_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "bbox": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 4,
+      "maxItems": 4
+     },
+     "polygon": {
+      "type": [
+       "array",
+       "null"
+      ],
+      "minItems": 3,
+      "items": {
+       "type": "array",
+       "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       },
+       "minItems": 2,
+       "maxItems": 2
+      }
+     },
+     "class_name": {
+      "type": "string",
+      "minLength": 1
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "auto_accepted",
+       "needs_review",
+       "accepted",
+       "rejected",
+       "edited"
+      ]
+     }
+    },
+    "required": [
+     "annotation_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "delete_annotation",
+   "kind": "write",
+   "risky": "always",
+   "description": "Permanently delete one box (#19). Prefer set_annotation_status reject for model boxes, so they still count for precision. Always needs confirm=true.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "annotation_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "annotation_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "set_hook_point",
+   "kind": "write",
+   "risky": "never",
+   "description": "Set the hook point (x, y image pixels) of the video (sequence) that image_id belongs to (#28).",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "image_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "x": {
+      "type": "number"
+     },
+     "y": {
+      "type": "number"
+     }
+    },
+    "required": [
+     "image_id",
+     "x",
+     "y"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "make_train_package",
+   "kind": "write",
+   "risky": "never",
+   "description": "Build the Colab training package zip (#23) and return a download link for the human.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "task": {
+      "type": "string",
+      "enum": [
+       "detect",
+       "segment"
+      ],
+      "default": "detect"
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "push_to_roboflow",
+   "kind": "write",
+   "risky": "always",
+   "description": "Start a Roboflow push job (#21) for done/empty images not pushed yet. Always needs confirm=true.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "statuses": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+       "type": "string",
+       "enum": [
+        "auto_accepted",
+        "needs_review",
+        "accepted",
+        "edited"
+       ]
+      }
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "project_id"
+    ],
+    "additionalProperties": false
+   }
+  }
+ ],
+ "examples": {
+  "list_projects": [
+   {
+    "input": {},
+    "output": {
+     "ok": true,
+     "data": {
+      "projects": [
+       {
+        "id": 1,
+        "name": "eot_crane",
+        "created_at": "2026-10-30T14:00:00Z",
+        "counts": {
+         "images": 3,
+         "auto_accepted": 2,
+         "needs_review": 2,
+         "accepted": 2,
+         "rejected": 1,
+         "edited": 1
+        }
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "project_summary": [
+   {
+    "input": {
+     "project_id": 1
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "project": {
+       "id": 1,
+       "name": "eot_crane",
+       "created_at": "2026-10-30T14:00:00Z",
+       "counts": {
+        "images": 3,
+        "auto_accepted": 2,
+        "needs_review": 2,
+        "accepted": 2,
+        "rejected": 1,
+        "edited": 1
+       }
+      },
+      "images_by_review_status": {
+       "todo": 2,
+       "done": 1,
+       "empty": 0
+      },
+      "boxes_by_class": {
+       "person": {
+        "auto_accepted": 2,
+        "needs_review": 0,
+        "accepted": 1,
+        "rejected": 1,
+        "edited": 0
+       },
+       "rb": {
+        "auto_accepted": 0,
+        "needs_review": 1,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 0
+       },
+       "sb": {
+        "auto_accepted": 0,
+        "needs_review": 1,
+        "accepted": 1,
+        "rejected": 0,
+        "edited": 0
+       },
+       "biax": {
+        "auto_accepted": 0,
+        "needs_review": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "edited": 1
+       }
+      },
+      "latest_job": {
+       "id": 12,
+       "project_id": 1,
+       "kind": "detect",
+       "status": "done",
+       "progress": 1.0,
+       "done": 3,
+       "total": 3,
+       "error": null,
+       "config": {
+        "model": "owlv2",
+        "mode": "examples",
+        "image_ids": null,
+        "options": {},
+        "masks": "sam2"
+       },
+       "result": {
+        "mode": "examples",
+        "examples_by_class": {
+         "person": 30,
+         "rb": 12,
+         "biax": 6
+        },
+        "skipped_classes": [
+         {
+          "class_name": "sb",
+          "reason": "needs at least 5 examples"
+         }
+        ],
+        "masks": "sam2",
+        "hook": {
+         "load_classes": [
+          "rb",
+          "sb",
+          "biax"
+         ],
+         "radius": 130.0,
+         "points": {
+          "rb_load__cam0_2026-09-29_18-34-11": [
+           616.0,
+           347.0
+          ]
+         },
+         "warnings": [
+          {
+           "sequence": "biax__cam0_2026-09-29_18-48-25",
+           "images": 1,
+           "reason": "no hook point"
+          },
+          {
+           "sequence": "sb_evener__cam0_2026-09-29_18-57-19",
+           "images": 1,
+           "reason": "no hook point"
+          }
+         ]
+        }
+       },
+       "created_at": "2026-11-13T10:05:00Z",
+       "started_at": "2026-11-13T10:05:00Z",
+       "finished_at": "2026-11-13T10:07:00Z"
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 99
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "not_found",
+      "message": "project 99 not found"
+     }
+    }
+   }
+  ],
+  "list_images": [
+   {
+    "input": {
+     "project_id": 1,
+     "status": "needs_review"
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "images": [
+       {
+        "id": 10,
+        "project_id": 1,
+        "file_name": "rb_load__cam0_2026-09-29_18-34-11_00049.jpg",
+        "width": 1280,
+        "height": 720,
+        "url": "/api/images/10/file",
+        "uploaded_at": "2026-10-30T14:01:00Z",
+        "review_status": "todo",
+        "counts": {
+         "auto_accepted": 1,
+         "needs_review": 1,
+         "accepted": 0,
+         "rejected": 1,
+         "edited": 0
+        }
+       },
+       {
+        "id": 12,
+        "project_id": 1,
+        "file_name": "sb_evener__cam0_2026-09-29_18-57-19_00003.jpg",
+        "width": 1280,
+        "height": 720,
+        "url": "/api/images/12/file",
+        "uploaded_at": "2026-10-30T14:01:00Z",
+        "review_status": "todo",
+        "counts": {
+         "auto_accepted": 1,
+         "needs_review": 1,
+         "accepted": 0,
+         "rejected": 0,
+         "edited": 0
+        }
+       }
+      ],
+      "total": 2,
+      "offset": 0,
+      "limit": 50
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "limit": 500
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_request",
+      "message": "limit: must be <= 200"
+     }
+    }
+   }
+  ],
+  "get_annotations": [
+   {
+    "input": {
+     "image_id": 10
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "image": {
+       "id": 10,
+       "project_id": 1,
+       "file_name": "rb_load__cam0_2026-09-29_18-34-11_00049.jpg",
+       "width": 1280,
+       "height": 720,
+       "url": "/api/images/10/file",
+       "uploaded_at": "2026-10-30T14:01:00Z",
+       "review_status": "todo",
+       "counts": {
+        "auto_accepted": 1,
+        "needs_review": 1,
+        "accepted": 0,
+        "rejected": 1,
+        "edited": 0
+       }
+      },
+      "annotations": [
+       {
+        "id": 101,
+        "image_id": 10,
+        "class_id": 1,
+        "class_name": "person",
+        "bbox": [
+         402.0,
+         515.0,
+         48.0,
+         52.0
+        ],
+        "mask": null,
+        "polygon": null,
+        "score": 0.71,
+        "source": "owlv2",
+        "status": "auto_accepted",
+        "job_id": 5,
+        "reviewer": null,
+        "created_at": "2026-10-30T14:03:00Z",
+        "updated_at": "2026-10-30T14:03:00Z"
+       },
+       {
+        "id": 102,
+        "image_id": 10,
+        "class_id": 2,
+        "class_name": "rb",
+        "bbox": [
+         610.0,
+         120.0,
+         95.0,
+         410.0
+        ],
+        "mask": null,
+        "polygon": null,
+        "score": 0.33,
+        "source": "owlv2_image",
+        "status": "needs_review",
+        "job_id": 5,
+        "reviewer": null,
+        "created_at": "2026-10-30T14:03:00Z",
+        "updated_at": "2026-10-30T14:03:00Z"
+       },
+       {
+        "id": 103,
+        "image_id": 10,
+        "class_id": 1,
+        "class_name": "person",
+        "bbox": [
+         880.0,
+         600.0,
+         44.0,
+         47.0
+        ],
+        "mask": null,
+        "polygon": null,
+        "score": 0.12,
+        "source": "owlv2",
+        "status": "rejected",
+        "job_id": 5,
+        "reviewer": "dhyan",
+        "created_at": "2026-10-30T14:03:00Z",
+        "updated_at": "2026-10-30T14:06:00Z"
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "list_classes": [
+   {
+    "input": {
+     "project_id": 1
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "classes": [
+       {
+        "id": 1,
+        "name": "person",
+        "description": "a worker wearing a hard hat, seen from above",
+        "min_score": 0.05,
+        "accept_score": 0.5
+       },
+       {
+        "id": 2,
+        "name": "rb",
+        "description": "a long narrow beige slab hanging from crane cables",
+        "min_score": 0.05,
+        "accept_score": null
+       },
+       {
+        "id": 3,
+        "name": "sb",
+        "description": "a long thin yellow steel lifting beam",
+        "min_score": 0.05,
+        "accept_score": null
+       },
+       {
+        "id": 4,
+        "name": "biax",
+        "description": "a short yellow crossbar hanging from crane cables",
+        "min_score": 0.05,
+        "accept_score": null
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "get_job": [
+   {
+    "input": {
+     "job_id": 5
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 5,
+      "project_id": 1,
+      "kind": "detect",
+      "status": "done",
+      "progress": 1.0,
+      "done": 3,
+      "total": 3,
+      "error": null,
+      "config": {
+       "model": "pipeline",
+       "mode": null,
+       "image_ids": null,
+       "options": {}
+      },
+      "result": null,
+      "created_at": "2026-10-30T14:02:00Z",
+      "started_at": "2026-10-30T14:02:00Z",
+      "finished_at": "2026-10-30T14:03:00Z"
+     }
+    }
+   }
+  ],
+  "list_models": [
+   {
+    "input": {
+     "project_id": 1
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "models": [
+       "fake",
+       "eot_crane_v1"
+      ],
+      "modes": {
+       "fake": [
+        "text",
+        "examples"
+       ],
+       "eot_crane_v1": []
+      }
+     }
+    }
+   }
+  ],
+  "get_hook": [
+   {
+    "input": {
+     "project_id": 1
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "load_classes": [
+       "rb",
+       "sb",
+       "biax"
+      ],
+      "load_classes_default": true,
+      "radius": 130.0,
+      "radius_default": true,
+      "points": [
+       {
+        "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+        "x": 616.0,
+        "y": 347.0,
+        "image_id": 10,
+        "updated_at": "2026-11-13T10:00:00Z"
+       }
+      ],
+      "sequences": [
+       {
+        "sequence": "biax__cam0_2026-09-29_18-48-25",
+        "images": 1,
+        "has_point": false
+       },
+       {
+        "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+        "images": 1,
+        "has_point": true
+       },
+       {
+        "sequence": "sb_evener__cam0_2026-09-29_18-57-19",
+        "images": 1,
+        "has_point": false
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "add_class": [
+   {
+    "input": {
+     "project_id": 1,
+     "name": "hook",
+     "description": "the crane hook block seen from above"
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "class": {
+       "id": 5,
+       "name": "hook",
+       "description": "the crane hook block seen from above",
+       "min_score": null,
+       "accept_score": null
+      },
+      "classes": [
+       {
+        "id": 1,
+        "name": "person",
+        "description": "a worker wearing a hard hat, seen from above",
+        "min_score": 0.05,
+        "accept_score": 0.5
+       },
+       {
+        "id": 2,
+        "name": "rb",
+        "description": "a long narrow beige slab hanging from crane cables",
+        "min_score": 0.05,
+        "accept_score": null
+       },
+       {
+        "id": 3,
+        "name": "sb",
+        "description": "a long thin yellow steel lifting beam",
+        "min_score": 0.05,
+        "accept_score": null
+       },
+       {
+        "id": 4,
+        "name": "biax",
+        "description": "a short yellow crossbar hanging from crane cables",
+        "min_score": 0.05,
+        "accept_score": null
+       },
+       {
+        "id": 5,
+        "name": "hook",
+        "description": "the crane hook block seen from above",
+        "min_score": null,
+        "accept_score": null
+       }
+      ]
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "name": "rb"
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_request",
+      "message": "class 'rb' already exists in project 1"
+     }
+    }
+   }
+  ],
+  "run_detection": [
+   {
+    "input": {
+     "project_id": 1,
+     "model": "owlv2",
+     "mode": "examples",
+     "image_ids": [
+      10,
+      12
+     ],
+     "masks": "sam2"
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 13,
+      "project_id": 1,
+      "kind": "detect",
+      "status": "queued",
+      "progress": 0.0,
+      "done": 0,
+      "total": 2,
+      "error": null,
+      "config": {
+       "model": "owlv2",
+       "mode": "examples",
+       "image_ids": [
+        10,
+        12
+       ],
+       "options": {},
+       "masks": "sam2"
+      },
+      "result": null,
+      "created_at": "2026-11-13T11:00:00Z",
+      "started_at": null,
+      "finished_at": null
+     }
+    },
+    "state": "detectors fake and owlv2 are listed; owlv2 modes [text, examples]"
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "model": "owlv2",
+     "mode": "examples"
+    },
+    "state": "project 1 has 312 images",
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "run_detection",
+      "effect": "Start a detect job with owlv2 (mode examples, masks none) on 312 images. Earlier unreviewed model boxes of the classes that run are replaced on those images.",
+      "details": {
+       "images": 312,
+       "model": "owlv2",
+       "mode": "examples",
+       "masks": "none"
+      },
+      "arguments": {
+       "project_id": 1,
+       "model": "owlv2",
+       "mode": "examples"
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "model": "nope"
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "unknown_model",
+      "message": "model 'nope' is not available"
+     }
+    }
+   }
+  ],
+  "rerun_examples": [
+   {
+    "input": {
+     "project_id": 1
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 11,
+      "project_id": 1,
+      "kind": "detect",
+      "status": "queued",
+      "progress": 0.0,
+      "done": 0,
+      "total": 2,
+      "error": null,
+      "config": {
+       "model": "yoloe",
+       "mode": "examples",
+       "image_ids": [
+        11,
+        12
+       ],
+       "options": {},
+       "rerun_of": 10
+      },
+      "result": null,
+      "created_at": "2026-10-30T15:10:00Z",
+      "started_at": null,
+      "finished_at": null
+     }
+    },
+    "state": "detector yoloe is listed with modes [examples]; job 10 (yoloe, examples) exists"
+   }
+  ],
+  "set_annotation_status": [
+   {
+    "input": {
+     "annotation_ids": [
+      101,
+      102
+     ],
+     "action": "approve"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": true,
+     "data": {
+      "annotations": [
+       {
+        "id": 101,
+        "image_id": 10,
+        "class_id": 1,
+        "class_name": "person",
+        "bbox": [
+         402.0,
+         515.0,
+         48.0,
+         52.0
+        ],
+        "mask": null,
+        "polygon": null,
+        "score": 0.71,
+        "source": "owlv2",
+        "status": "accepted",
+        "job_id": 5,
+        "reviewer": "claude:dhyan",
+        "created_at": "2026-10-30T14:03:00Z",
+        "updated_at": "2026-11-13T11:05:00Z"
+       },
+       {
+        "id": 102,
+        "image_id": 10,
+        "class_id": 2,
+        "class_name": "rb",
+        "bbox": [
+         610.0,
+         120.0,
+         95.0,
+         410.0
+        ],
+        "mask": null,
+        "polygon": null,
+        "score": 0.33,
+        "source": "owlv2_image",
+        "status": "accepted",
+        "job_id": 5,
+        "reviewer": "claude:dhyan",
+        "created_at": "2026-10-30T14:03:00Z",
+        "updated_at": "2026-11-13T11:05:00Z"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "input": {
+     "annotation_ids": [
+      201,
+      202,
+      203,
+      204,
+      205,
+      206,
+      207,
+      208,
+      209,
+      210,
+      211,
+      212
+     ],
+     "action": "approve"
+    },
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "set_annotation_status",
+      "effect": "Approve 12 boxes (set status accepted).",
+      "details": {
+       "boxes": 12,
+       "action": "approve",
+       "by_class": {
+        "person": 12
+       }
+      },
+      "arguments": {
+       "annotation_ids": [
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208,
+        209,
+        210,
+        211,
+        212
+       ],
+       "action": "approve"
+      }
+     }
+    },
+    "state": "boxes 201-212 exist: class person, status needs_review, on image 12"
+   },
+   {
+    "input": {
+     "annotation_ids": [
+      101,
+      999
+     ],
+     "action": "reject"
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "not_found",
+      "message": "annotation 999 not found"
+     }
+    }
+   }
+  ],
+  "update_annotation": [
+   {
+    "input": {
+     "annotation_id": 108,
+     "class_name": "biax"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 108,
+      "image_id": 12,
+      "class_id": 4,
+      "class_name": "biax",
+      "bbox": [
+       250.0,
+       280.0,
+       760.0,
+       60.0
+      ],
+      "mask": null,
+      "polygon": null,
+      "score": 0.21,
+      "source": "pipeline",
+      "status": "edited",
+      "job_id": 5,
+      "reviewer": "claude:dhyan",
+      "created_at": "2026-10-30T14:03:00Z",
+      "updated_at": "2026-11-13T11:06:00Z"
+     }
+    }
+   },
+   {
+    "input": {
+     "annotation_id": 108
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_request",
+      "message": "send at least one of bbox, polygon, class_name, status"
+     }
+    }
+   }
+  ],
+  "delete_annotation": [
+   {
+    "input": {
+     "annotation_id": 106
+    },
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "delete_annotation",
+      "effect": "Permanently delete box 106 (person, source human, status accepted) on image 11. This cannot be undone.",
+      "details": {
+       "annotation_id": 106,
+       "image_id": 11,
+       "class_name": "person",
+       "source": "human",
+       "status": "accepted"
+      },
+      "arguments": {
+       "annotation_id": 106
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "annotation_id": 106,
+     "confirm": true
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "deleted": 106
+     }
+    }
+   }
+  ],
+  "set_hook_point": [
+   {
+    "input": {
+     "image_id": 10,
+     "x": 616,
+     "y": 347
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+      "x": 616.0,
+      "y": 347.0,
+      "image_id": 10,
+      "updated_at": "2026-11-13T10:00:00Z"
+     }
+    }
+   },
+   {
+    "input": {
+     "image_id": 10,
+     "x": 2000,
+     "y": 347
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_request",
+      "message": "x must be in 0..1280 and y in 0..720"
+     }
+    }
+   }
+  ],
+  "make_train_package": [
+   {
+    "input": {
+     "project_id": 1,
+     "task": "segment"
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "download_url": "/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
+      "file_name": "eot_crane_train_segment.zip",
+      "size_bytes": 48211234,
+      "expires_at": "2026-11-14T11:08:00Z",
+      "split": {
+       "rule": "by_sequence",
+       "val_target": 0.2,
+       "val_is_train": false,
+       "train": {
+        "sequences": [
+         "biax__cam0_2026-09-29_18-48-25",
+         "rb_load__cam0_2026-09-29_18-34-11"
+        ],
+        "images": 40
+       },
+       "val": {
+        "sequences": [
+         "rb_load__cam0_2026-09-29_18-24-11"
+        ],
+        "images": 10
+       },
+       "classes_missing_in_train": [],
+       "classes_missing_in_val": [
+        "sb"
+       ]
+      }
+     }
+    }
+   }
+  ],
+  "push_to_roboflow": [
+   {
+    "input": {
+     "project_id": 1
+    },
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "push_to_roboflow",
+      "effect": "Upload 1 image (review_status done or empty, not pushed yet) and their boxes with status auto_accepted, accepted, edited to the Roboflow project set in the server's .env.",
+      "details": {
+       "images": 1,
+       "statuses": [
+        "auto_accepted",
+        "accepted",
+        "edited"
+       ]
+      },
+      "arguments": {
+       "project_id": 1
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "confirm": true
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 14,
+      "project_id": 1,
+      "kind": "roboflow_push",
+      "status": "queued",
+      "progress": 0.0,
+      "done": 0,
+      "total": 1,
+      "error": null,
+      "config": {
+       "statuses": [
+        "auto_accepted",
+        "accepted",
+        "edited"
+       ]
+      },
+      "result": null,
+      "created_at": "2026-11-13T11:10:00Z",
+      "started_at": null,
+      "finished_at": null
+     }
+    }
+   }
+  ]
+ }
+}

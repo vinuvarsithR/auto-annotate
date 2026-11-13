@@ -19,8 +19,8 @@ setup and layout. This file holds the working rules, current state and next step
    | Role | Owns |
    |---|---|
    | integrator | docs/CONTRACT.md, CLAUDE.md, requirements.txt, docs/fixtures/, merges |
-   | backend | app/api/, app/db/, app/worker/, app/main.py + their tests |
-   | ui | app/static/ |
+   | backend | app/api/, app/db/, app/worker/, app/main.py, app/assistant/ + their tests |
+   | ui | app/static/ (incl. the Claude sidebar) |
    | models | autolabel/models/, autolabel/pipeline.py, one examples-mode method in autolabel/owlv2.py (CONTRACT, Examples mode) |
    | export | autolabel/export/, autolabel/importers/, app/api/export.py + their tests |
 3. **Scope:** build only what docs/CONTRACT.md says. No extra features: propose them and wait for OK.
@@ -33,7 +33,8 @@ setup and layout. This file holds the working rules, current state and next step
    (`git merge --no-edit YOUR_BRANCH`, pytest, `git push --all`).
 6. **App:** run it on a free port, not 8000 or 8001: `uvicorn app.main:app --port YOUR_PORT`.
 7. **Roboflow:** the key lives only in `.env` as ROBOFLOW_API_KEY; never print, log or commit
-   it. Use the Python SDK, not the Roboflow connector.
+   it. Use the Python SDK, not the Roboflow connector. Same for ANTHROPIC_API_KEY and AUTOLABEL_MCP_TOKEN:
+   `.env` only, never printed, logged, committed or sent to the browser; tests use fake values.
 8. **Placeholders** in commands look like `YOUR_VERSION`, never `<N>` (bash reads `<` as a redirect).
 9. **Report** in at most 5 lines + commit hash. Say VERIFIED vs GUESS (model names, versions,
    VRAM, accuracy).
@@ -82,7 +83,11 @@ Next:
 - 2026-11-13 contract "OWLv2 + SAM 2 polygons" (#27-#30, #9 `masks`, fixtures docs/fixtures/owl_sam/):
   models = merge/hook filter/SAM/polygon, backend = hook points + `masks` + result.hook, ui = hook click + toggle.
   Polygon = single largest part (export/push/import/UI handle one ring only). SAM weights: AUTOLABEL_SAM_WEIGHTS
-  (D:\autoannotate\weights\sam2.1_t.pt on this machine).
+  (D:\autoannotate\weights\sam2.1_t.pt on this machine). Merged on main 2026-11-13 (0912977).
+- 2026-11-13 contract "Claude connector" (#31-#36, docs/fixtures/assistant/): one tool layer (17 tools) in
+  app/assistant/ (backend) for an MCP server at /mcp/ (teammates' own Claude) and a sidebar chat (server's
+  ANTHROPIC_API_KEY, model AUTOLABEL_CLAUDE_MODEL default claude-sonnet-5-5). ui = sidebar. Installed in .venv:
+  mcp 2.3.0 (2.x API: no FastMCP), anthropic 2.8.0. Secrets: ANTHROPIC_API_KEY, AUTOLABEL_MCP_TOKEN (.env only).
 
 ## Phase 1 state
 

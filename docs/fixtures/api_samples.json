@@ -1451,6 +1451,118 @@
   "started_at": "2026-11-13T10:05:00Z",
   "finished_at": "2026-11-13T10:07:00Z"
  },
+ "GET /api/assistant/status": {
+  "chat_available": true,
+  "model": "claude-sonnet-5-5",
+  "max_tool_calls": 10,
+  "mcp": {
+   "path": "/mcp/",
+   "token_required": true
+  }
+ },
+ "GET /api/assistant/status (no key)": {
+  "chat_available": false,
+  "model": "claude-sonnet-5-5",
+  "max_tool_calls": 10,
+  "mcp": {
+   "path": "/mcp/",
+   "token_required": false
+  }
+ },
+ "POST /api/assistant/chat (request)": {
+  "session_id": null,
+  "project_id": 1,
+  "user": "dhyan",
+  "message": "Delete box 106."
+ },
+ "POST /api/assistant/chat": {
+  "session_id": "8f0c1d6a-2b4e-4c4f-9a51-3f7d2e9b6c10",
+  "reply": "Press Confirm to delete box 106.",
+  "tool_calls": [
+   {
+    "tool": "delete_annotation",
+    "arguments": {
+     "annotation_id": 106
+    },
+    "outcome": "needs_confirmation"
+   }
+  ],
+  "pending": [
+   {
+    "confirm_id": "c1b2",
+    "tool": "delete_annotation",
+    "effect": "Permanently delete box 106 (person, source human, status accepted) on image 11. This cannot be undone.",
+    "arguments": {
+     "annotation_id": 106
+    }
+   }
+  ],
+  "stopped": "end_turn",
+  "usage": {
+   "input_tokens": 2700,
+   "output_tokens": 45
+  }
+ },
+ "POST /api/assistant/chat/confirm (request)": {
+  "session_id": "8f0c1d6a-2b4e-4c4f-9a51-3f7d2e9b6c10",
+  "confirm_id": "c1b2",
+  "decision": "confirm",
+  "user": "dhyan"
+ },
+ "POST /api/assistant/chat/confirm": {
+  "confirm_id": "c1b2",
+  "tool": "delete_annotation",
+  "decision": "confirm",
+  "result": {
+   "ok": true,
+   "data": {
+    "deleted": 106
+   }
+  }
+ },
+ "DELETE /api/assistant/chat/8f0c1d6a-2b4e-4c4f-9a51-3f7d2e9b6c10": null,
+ "error example (503 assistant_unavailable, #32 no key)": {
+  "error": {
+   "code": "assistant_unavailable",
+   "message": "Claude chat is off: ANTHROPIC_API_KEY is not set in the server's .env"
+  }
+ },
+ "error example (502 assistant_error, #32 Claude API error)": {
+  "error": {
+   "code": "assistant_error",
+   "message": "Claude API error 429: rate limited"
+  }
+ },
+ "error example (404 not_found, #32 unknown session)": {
+  "error": {
+   "code": "not_found",
+   "message": "conversation 8f0c1d6a-2b4e-4c4f-9a51-3f7d2e9b6c10 not found (the server keeps chats in memory; a restart clears them)"
+  }
+ },
+ "error example (409 conflict, #33 confirm expired)": {
+  "error": {
+   "code": "conflict",
+   "message": "confirmation c1b2 is no longer valid"
+  }
+ },
+ "error example (400 bad_request, #32 no user name)": {
+  "error": {
+   "code": "bad_request",
+   "message": "user: set your name first (1-40 letters, digits, space . _ -)"
+  }
+ },
+ "error example (401 unauthorized, /mcp/ bad token)": {
+  "error": {
+   "code": "unauthorized",
+   "message": "missing or wrong bearer token"
+  }
+ },
+ "error example (403 forbidden, /mcp/ no token set, not loopback)": {
+  "error": {
+   "code": "forbidden",
+   "message": "MCP is local-only: set AUTOLABEL_MCP_TOKEN in .env to allow LAN clients"
+  }
+ },
  "all_annotations": [
   {
    "id": 101,

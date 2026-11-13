@@ -115,6 +115,18 @@ CREATE TABLE hook_points (               -- #27 - #30 (OWLv2 + SAM 2); migrate()
   updated_at   TEXT NOT NULL,
   PRIMARY KEY (project_id, sequence)
 );
+CREATE TABLE assistant_actions (         -- Claude connector audit log; migrate() creates it if missing
+  id          INTEGER PRIMARY KEY,
+  created_at  TEXT NOT NULL,
+  channel     TEXT NOT NULL CHECK (channel IN ('mcp', 'chat')),
+  actor       TEXT NOT NULL,             -- "claude:<name>", e.g. "claude:dhyan"
+  project_id  INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+  tool        TEXT NOT NULL,             -- e.g. "delete_annotation"
+  arguments   TEXT NOT NULL,             -- JSON input as received (chat: without "confirm")
+  outcome     TEXT NOT NULL CHECK (outcome IN ('ok', 'error', 'needs_confirmation')),
+  confirmed   INTEGER NOT NULL DEFAULT 0, -- 1 = ran with confirm=true (MCP) or the chat Confirm button
+  summary     TEXT                       -- JSON: error code, or the ids it created/changed (never full data)
+);
 -- projects gets two columns (migrate() adds them if missing; not part of the Project JSON):
 --   load_classes TEXT   -- JSON list of class names, NULL = default ["rb", "sb", "biax"]
 --   hook_radius  REAL   -- px, NULL = default 130
@@ -201,7 +213,8 @@ Export / push rules (#14 and #21):
 The base path is `/api`, all bodies are JSON, and the server is FastAPI on `http://localhost:8000`.
 The UI is served at `/` from `app/static/`.
 
-Errors always look like this, with a matching HTTP status (400, 404, 409 or 500):
+Errors always look like this, with a matching HTTP status (400, 404, 409 or 500; the Claude
+connector also uses 401, 403, 502 and 503):
 ```json
 {"error": {"code": "not_found", "message": "image 99 not found"}}
 ```
@@ -226,6 +239,10 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 409 | `class_in_use` | PUT classes would delete a class that still has annotations |
 | 409 | `conflict` | any other 409, e.g. deleting a project with a queued/running job (#18), `empty` on an image with boxes (#20), a new box on an `empty` image (#12), no `done`/`empty` images (#14, #21), Roboflow settings missing from `.env` (#21), #9 `rerun` with no examples-mode job or no `todo` image, #23 `segment` with no polygon, #26 while a job uses the model |
 | 500 | `internal_error` | unexpected server error (details only in the server log) |
+| 401 | `unauthorized` | `/mcp/`: `AUTOLABEL_MCP_TOKEN` is set and the bearer token is missing or wrong |
+| 403 | `forbidden` | `/mcp/`: no token set and the client is not on this machine (loopback) |
+| 502 | `assistant_error` | #32: the Claude API returned an error or could not be reached (message scrubbed of the key) |
+| 503 | `assistant_unavailable` | #32 / #33: `ANTHROPIC_API_KEY` is not set |
 
 | # | Method | Path | Purpose |
 |---|---|---|---|
@@ -259,6 +276,12 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 28 | PUT | `/projects/{pid}/hook/points` | set the hook point of one video (by a clicked image) |
 | 29 | DELETE | `/projects/{pid}/hook/points/{sequence}` | clear the hook point of one video |
 | 30 | PATCH | `/projects/{pid}/hook` | change load classes / radius |
+| 31 | GET | `/assistant/status` | is the sidebar chat available; MCP settings (no secrets) |
+| 32 | POST | `/assistant/chat` | one chat message -> Claude tool-use loop -> reply |
+| 33 | POST | `/assistant/chat/confirm` | confirm or cancel a risky action Claude proposed |
+| 34 | DELETE | `/assistant/chat/{session_id}` | forget one conversation |
+| 35 | GET | `/assistant/downloads/{token}` | a file a tool made (training package zip) |
+| 36 | POST | `/mcp/` (not under `/api`) | MCP server, Streamable HTTP |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -1216,6 +1239,210 @@ The worker passes `post` only for `owlv2` examples jobs; then the usual delete +
 | export | nothing: rows have one polygon ring, as today | - |
 | integrator | this section, `docs/fixtures/owl_sam/cases.json`, fixtures #27 - #30 + job 12 in `api_samples.json` | full `pytest` at merge |
 
+### Claude connector (#31 - #36)
+Approved 2026-11-13. Two front-ends over **one** Python tool layer:
+
+| Front-end | Who pays | How |
+|---|---|---|
+| **MCP server** (#36) | each teammate's own Claude subscription | their Claude Code or Claude Desktop connects to `/mcp/` on the app |
+| **Sidebar chat** (#31 - #34) | the server's `ANTHROPIC_API_KEY` | the browser posts a message; the server runs the Claude tool-use loop |
+
+Package versions (VERIFIED 2026-11-13: installed into the shared `.venv` on Windows, Python 3.14.0, no other
+package changed): `mcp==2.3.0`, `anthropic==2.8.0`. Both need Python >= 3.10, and their `httpx2` needs >= 3.11.
+mcp 2.x is not 1.x: there is no `FastMCP` (`mcp.server.fastmcp` raises); use `mcp.server.lowlevel.Server`.
+
+#### Tool layer (`app/assistant/tools.py`)
+The tool list is **exactly** `docs/fixtures/assistant/tools.json` `tools`: 17 tools, in that order, with those
+names, descriptions and `input_schema`s (JSON Schema, `additionalProperties: false`). 8 read tools
+(`list_projects`, `project_summary`, `list_images`, `get_annotations`, `list_classes`, `get_job`, `list_models`,
+`get_hook`) and 9 write tools (`add_class`, `run_detection`, `rerun_examples`, `set_annotation_status`,
+`update_annotation`, `delete_annotation`, `set_hook_point`, `make_train_package`, `push_to_roboflow`).
+
+| Rule | Value |
+|---|---|
+| No HTTP self-calls | tools call the same Python code as the routes (route functions, `app/db/`, `autolabel.export`) with a DB connection and the app's `state`. Backend may move route bodies into plain functions both use; `app/api/export.py` stays export's (import it, don't edit it). |
+| Same rules as the API | every tool applies the checks, defaults, status rules and error codes of the entry it maps to (table below). A failing check is an `error` result, never an exception out of the tool layer. |
+| Input check | first, against the tool's `input_schema` (e.g. `jsonschema`, installed with `mcp`); a mismatch -> `bad_request` |
+| Result envelope | always exactly one of: `{"ok": true, "data": ...}`, `{"ok": false, "error": {"code", "message"}}`, `{"ok": false, "needs_confirmation": {"tool", "effect", "details", "arguments"}}` |
+| `data` | the JSON of the mapped API response (same keys), except the new shapes in the table |
+| Order | input check -> the entry's own checks (404/400/409) -> risky without `confirm` -> `needs_confirmation` -> run. So a call that would fail returns the error, never a confirmation. |
+| Size | a tool result sent to Claude is at most 50,000 characters; a longer one -> `error` `bad_request` "result too large; use offset/limit" (list tools page with `offset`/`limit`) |
+
+| Tool | Maps to | `data` |
+|---|---|---|
+| `list_projects` | #2 | #2 response |
+| `project_summary` | #3 + counts | `{"project": Project (#3), "images_by_review_status": {"todo", "done", "empty"}, "boxes_by_class": {class name: {each of the 5 statuses: n}}, "latest_job": Job or null}`; classes in project order, every class listed (zeros too); `latest_job` = the project's job with the highest id |
+| `list_images` | #5 (`limit` max 200 here) | #5 response |
+| `get_annotations` | #11 | #11 response |
+| `list_classes` | #7 | #7 response |
+| `get_job` | #10 | Job |
+| `list_models` | #16 with `project_id` | #16 response |
+| `get_hook` | #27 | HookSettings |
+| `add_class` | #8 (append, keeps every other class as is) | `{"class": Class, "classes": [Class, ...]}`. A name already in the project -> `bad_request`. `description` default = the name. |
+| `run_detection` | #9 (`options` = `{}`; not `rerun`) | Job |
+| `rerun_examples` | #9 `{"rerun": true}` | Job |
+| `set_annotation_status` | #13 per box, `approve` = `accepted`, `reject` = `rejected` | `{"annotations": [Annotation, ...]}` in input order. All or nothing in one transaction: any unknown id -> `not_found`, nothing changes. |
+| `update_annotation` | #13; `class_name` -> that project's `class_id` (unknown -> `bad_class_id`) | Annotation. No field besides `annotation_id` -> `bad_request`. |
+| `delete_annotation` | #19 | `{"deleted": id}` |
+| `set_hook_point` | #28 (body `{"image_id", "x", "y"}`; project = the image's) | the point |
+| `make_train_package` | #23 | `{"download_url", "file_name", "size_bytes", "expires_at", "split"}`: the zip is saved as `data/assistant/downloads/<token>.zip` (token = `secrets.token_urlsafe(16)`), served by #35 for **24 h**; `split` = the zip's `split.json` |
+| `push_to_roboflow` | #21 | Job |
+
+**Risky tools.** Without `confirm: true` they do nothing and return `needs_confirmation`:
+
+| Tool | Risky when | `details` |
+|---|---|---|
+| `delete_annotation` | always | `{"annotation_id", "image_id", "class_name", "source", "status"}` |
+| `push_to_roboflow` | always | `{"images", "statuses"}`: `images` = the #21 `total` it would get |
+| `run_detection` | it would run on **> 50** images (`image_ids` count, or every project image when omitted) | `{"images", "model", "mode", "masks"}` (resolved mode; `masks` `"none"` when absent) |
+| `rerun_examples` | the `todo` images it would run are **> 50** | `{"images", "model", "mode", "masks"}` from the source job |
+| `set_annotation_status` | more than **10** boxes, approve **or** reject | `{"boxes", "action", "by_class": {class name: n}}` |
+
+`effect` is one or two plain sentences for the human (example texts in the fixtures; wording may change).
+`arguments` = the input without `confirm`. The thresholds are fixed values, not options. Other tools never
+need confirmation.
+
+**Who did it.** Every write tool call (any outcome) inserts one `assistant_actions` row (section 1). Tools
+that set `annotations.reviewer` (`set_annotation_status`, `update_annotation`) set it to `"claude:<name>"`.
+
+| Front-end | `<name>` comes from |
+|---|---|
+| MCP | the `X-Autolabel-User` header the teammate puts in their MCP config (stdio launcher: `AUTOLABEL_USER`) |
+| chat | `user` in the #32 / #33 body = the UI's existing reviewer name field |
+
+Name rule: 1-40 characters of letters, digits, space, `.`, `_`, `-`, trimmed. MCP with no or a bad name: read
+tools work, write tools return `error` `bad_request` "set X-Autolabel-User ...". The name is self-declared
+(there is no login until Phase 6): it records who said they did it, it does not prove it.
+
+#### MCP server (#36, `app/assistant/mcp_server.py`)
+
+| Rule | Value |
+|---|---|
+| Server | `mcp.server.lowlevel.Server("autolabel", on_list_tools=..., on_call_tool=...)`; tools/list returns the tool list above with `confirm` kept and `annotations`: read tools `read_only_hint: true`; `delete_annotation`, `push_to_roboflow` `destructive_hint: true`; other writes `read_only_hint: false, destructive_hint: false` |
+| Transport | Streamable HTTP, `stateless_http=True`, `json_response=True`; `server.streamable_http_app(streamable_http_path="/")` mounted at `/mcp` on the FastAPI app, so the URL is **`http://HOST:PORT/mcp/`** (with the slash). Not under `/api`. |
+| Lifespan | `create_app` builds a **new** `Server` per app and runs `server.session_manager.run()` inside the app's lifespan (a session manager runs only once; tests create many apps) |
+| Call result | `CallToolResult(content=[TextContent(json of the envelope)], structured_content=envelope, is_error=("error" in envelope))`; `needs_confirmation` is not an error |
+| Token | `AUTOLABEL_MCP_TOKEN` in `.env`. **Set:** every `/mcp/` request needs `Authorization: Bearer <token>` (compared with `hmac.compare_digest`), else 401 `unauthorized`; DNS-rebinding protection off (LAN host names vary). **Empty or unset:** only loopback clients (`127.0.0.1`, `::1`), else 403 `forbidden`; the SDK's DNS-rebinding protection on with `allowed_hosts` `127.0.0.1:*`, `localhost:*`, `[::1]:*`. The check is ASGI middleware on `/mcp` only; `/api` is unchanged. |
+| Confirm | MCP has no button: Claude shows the `needs_confirmation` result, asks the teammate, and calls again with `confirm: true`. Claude Code also asks before each tool call unless the teammate allowed it. |
+
+VERIFIED 2026-11-13 with a probe (mcp 2.3.0, uvicorn): a lowlevel `Server` mounted this way at `/mcp`
+on FastAPI lists and calls a tool over HTTP; the handler reads `X-Autolabel-User` and `Authorization` from
+`ctx.request.headers`; a middleware 401 works; `mcp.Client(server)` lists and calls in-process
+(`ctx.request` is `None` there).
+
+**Stdio launcher** (`app/assistant/mcp_stdio.py`, for Claude Desktop): one standalone file that imports only
+`mcp`, `httpx2` and the standard library (teammates copy just this file). It is an MCP server on stdio that
+forwards `tools/list` and `tools/call` to `--url` (Streamable HTTP, `httpx2.AsyncClient` with headers
+`Authorization: Bearer $AUTOLABEL_MCP_TOKEN` when set and `X-Autolabel-User: $AUTOLABEL_USER`) and returns the
+upstream results unchanged. Upstream unreachable -> the tool call returns `is_error` with a one-line message.
+Needs Python >= 3.11 and `pip install mcp==2.3.0`.
+
+Connect steps (Windows; replace `HOST` = the app machine's LAN IP or `localhost`, `YOUR_TOKEN`, `YOUR_NAME`):
+
+| Client | Steps | Status |
+|---|---|---|
+| Claude Code, same machine as the app | `claude mcp add --transport http autolabel http://localhost:8000/mcp/ -H "X-Autolabel-User: YOUR_NAME"` | command syntax VERIFIED (`claude mcp add --help`, Claude Code 2.1.323); connecting end to end GUESS until tested |
+| Claude Code, other machine | `claude mcp add --transport http -s user autolabel http://HOST:8000/mcp/ -H "Authorization: Bearer YOUR_TOKEN" -H "X-Autolabel-User: YOUR_NAME"` (`-s user` = every project). Check with `/mcp` inside Claude Code. The app must listen on the LAN: `uvicorn app.main:app --host 0.0.0.0 --port 8000`. | syntax VERIFIED; end to end GUESS |
+| Claude Desktop | 1. Install Python 3.11+ and `pip install mcp==2.3.0`. 2. Copy `app/assistant/mcp_stdio.py` to e.g. `C:\autolabel\mcp_stdio.py`. 3. Settings > Developer > Edit Config opens `claude_desktop_config.json` (usually `%APPDATA%\Claude\`); add the block below. 4. Quit Claude Desktop fully (tray icon > Quit) and start it again. | GUESS (no Claude Desktop here) |
+
+```json
+{"mcpServers": {"autolabel": {
+  "command": "C:\\Python313\\python.exe",
+  "args": ["C:\\autolabel\\mcp_stdio.py", "--url", "http://HOST:8000/mcp/"],
+  "env": {"AUTOLABEL_MCP_TOKEN": "YOUR_TOKEN", "AUTOLABEL_USER": "YOUR_NAME"}}}}
+```
+Claude Desktop's own "custom connector" (remote URL) is not used: it connects from Anthropic's cloud, which
+cannot reach a LAN address (GUESS).
+
+**Risk of the shared token** (README must say this):
+
+| Risk | Why |
+|---|---|
+| Anyone with the token can do everything the tools do | one token for the whole team; it includes delete and Roboflow push (both still need `confirm`) |
+| The token and all data travel in clear text | plain HTTP on the LAN; anyone who can sniff the network can copy the token |
+| Names can be faked | `X-Autolabel-User` is whatever the client sends |
+| The REST API itself has no login | `/api` is open on the LAN anyway once `--host 0.0.0.0` is used; the token only guards `/mcp/` |
+| Rotate | change `AUTOLABEL_MCP_TOKEN` in `.env`, restart the app, send teammates the new value |
+| Default | no token -> MCP works only on the app's own machine |
+
+#### Sidebar chat (#31 - #34, `app/assistant/chat.py`)
+
+Settings (`.env`, read at startup after `load_dotenv(REPO_ROOT / ".env", override=False)`):
+
+| Name | Default | Rule |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | none | The **only** credential. Passed as `anthropic.Anthropic(api_key=...)`, so a profile or `ANTHROPIC_AUTH_TOKEN` is never used. Empty -> chat off (503). Never logged, never in a response, error, `assistant_actions` row, job or the browser. Errors are scrubbed (the key's text replaced by `[redacted]`) before logging or returning. `.env.example` has `ANTHROPIC_API_KEY=` (empty). |
+| `AUTOLABEL_CLAUDE_MODEL` | `claude-sonnet-5-5` | any model id |
+| `AUTOLABEL_CLAUDE_EFFORT` | `low` | `output_config.effort`; `low` = the Sonnet 5.5 starting point for chat |
+| `AUTOLABEL_CLAUDE_MAX_TOOL_CALLS` | `10` | tool calls per user message |
+| `AUTOLABEL_CLAUDE_MAX_TOKENS` | `16000` | `max_tokens` per request (non-streaming) |
+
+The loop (manual loop over `messages.create`, not the beta tool runner: exact tool-call cap, server-held
+confirmations, and a fake client in tests):
+
+| Step | Rule |
+|---|---|
+| Request | `client.beta.messages.create(model, max_tokens, system=SYSTEM, tools=CHAT_TOOLS, messages=history, output_config={"effort": EFFORT}, cache_control={"type": "ephemeral"}, betas=["server-side-fallback-2026-07-01"], fallbacks="default")`. `fallbacks` + `betas` only when the model is `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-opus-5`, `claude-fable-5-1` or `claude-fable-5-2`; other models: `client.messages.create` with the same rest. No `thinking` (adaptive by default), no `tool_choice` (forced choice is a 400 on Sonnet 5.5), no streaming. (`fallbacks="default"` VERIFIED accepted by `anthropic` 2.8.0's types.) |
+| Fixed prefix | `SYSTEM` is a constant string and `CHAT_TOOLS` the full tool list in fixture order with `confirm` removed from every schema, identical on every request of every session (cache + preserved thinking). Nothing per-request goes in `system`. `SYSTEM` says: you work on this auto-annotation app through the tools; boxes are `[x, y, w, h]` px; in this chat a risky action is confirmed only by the user's Confirm button, so on `needs_confirmation` tell the user what will happen and to press Confirm, and never say it is done. |
+| User turn | `"[project <id> \"<name>\"; user <name>]\n<message>"` |
+| History | append-only. Append each response's **full** `content` (thinking blocks unchanged), then one user message with every `tool_result` of that turn. |
+| Tool calls | run in order. A `confirm` key Claude sends is dropped: in the chat only the button confirms. A `needs_confirmation` result becomes a `pending` item (server-held: tool + arguments + `confirm_id`) and Claude gets the envelope as its tool result. |
+| Cap | after `MAX_TOOL_CALLS` tool calls in this message, every further `tool_use` gets `tool_result` `is_error: true`, "tool call limit reached for this message", outcome `not_run`, and Claude is not called again: `stopped` = `tool_limit` |
+| `stop_reason` | `end_turn` -> done. `tool_use` -> run tools, call again. `max_tokens` -> stop (`stopped` `max_tokens`; a dangling `tool_use` gets an error `tool_result`). `refusal` -> reply "Claude declined this request.", the user turn is removed from history, `stopped` `refusal`. `pause_turn` -> append, call again (counts as a request). |
+| `reply` | the `text` blocks of the **last** response, joined with a blank line; `""` if none |
+| Pending | valid until used once, or until the next #32 message in that session, or #34 |
+| Memory | conversations live in a dict in the app process: **lost on restart**. At most 200 sessions (oldest dropped) and 40 user messages per session (then 409 `conflict` "start a new chat"). One request at a time per session (a second at the same time -> 409 `conflict`). |
+
+#### 31. GET /assistant/status
+`{"chat_available": true, "model": "claude-sonnet-5-5", "max_tool_calls": 10, "mcp": {"path": "/mcp/", "token_required": true}}`.
+Never contains a key or token. The UI calls it to show or hide the chat.
+
+#### 32. POST /assistant/chat
+```json
+{"session_id": null, "project_id": 1, "user": "dhyan", "message": "Delete box 106."}
+```
+`session_id` null or absent = start a new conversation. Response 200:
+```json
+{"session_id": "8f0c1d6a-...", "reply": "Press Confirm to delete box 106.",
+ "tool_calls": [{"tool": "delete_annotation", "arguments": {"annotation_id": 106}, "outcome": "needs_confirmation"}],
+ "pending": [{"confirm_id": "c1b2", "tool": "delete_annotation", "effect": "Permanently delete box 106 ...",
+              "arguments": {"annotation_id": 106}}],
+ "stopped": "end_turn", "usage": {"input_tokens": 2700, "output_tokens": 45}}
+```
+`outcome`: `ok`, `error`, `needs_confirmation`, `not_run`. `stopped`: `end_turn`, `tool_limit`, `max_tokens`,
+`refusal`. `usage` = summed over this message's requests. Errors, in order: no key -> 503
+`assistant_unavailable`; bad body (`message` 1-4000 chars, `user` name rule, extra fields) -> 400
+`bad_request`; unknown `project_id` -> 404; unknown `session_id` -> 404 (message says chats are kept in
+memory); busy or too long -> 409; Claude API error -> 502 `assistant_error` "Claude API error <status>: <scrubbed
+message>" (connection error: "Claude API unreachable"). Tool errors are not HTTP errors: they go to Claude.
+
+#### 33. POST /assistant/chat/confirm
+`{"session_id", "confirm_id", "decision": "confirm" | "cancel", "user"}`. `confirm` runs the pending tool with
+`confirm: true` and exactly the stored arguments (the browser never sends arguments); `cancel` runs nothing.
+Response 200 `{"confirm_id", "tool", "decision", "result"}` (`result` = the envelope, `null` for cancel).
+Either way a user-turn text note is appended to the history, e.g.
+`[dhyan pressed Confirm: delete_annotation {"annotation_id": 106} -> ok]` (cancel: `pressed Cancel ...`), so
+Claude knows on the next message; Claude is not called here. The `assistant_actions` row has `confirmed` 1.
+Errors: no key -> 503; bad body -> 400; unknown session -> 404; unknown or already used or expired
+`confirm_id` -> 409 `conflict`.
+
+#### 34. DELETE /assistant/chat/{session_id}
+204; forgets the history and pending items. Unknown -> 404.
+
+#### 35. GET /assistant/downloads/{token}
+The zip from `make_train_package`, `application/zip`, `Content-Disposition` with its `file_name`. Unknown,
+expired (> 24 h) -> 404. Files older than 24 h are deleted at startup and on each new package.
+
+#### Who builds what (Claude connector)
+
+| Role | Builds | Tests (must pass; no network, no real key) |
+|---|---|---|
+| backend | `app/assistant/` (`tools.py`, `mcp_server.py`, `mcp_stdio.py`, `chat.py`, routes #31 - #35 in `app/assistant/routes.py`), `/mcp` mount + token middleware + lifespan in `app/main.py`, `assistant_actions` in `schema.sql` + `migrate()`, `create_app(..., anthropic_client=None)` (None = built from the key; tests pass a fake with `.messages.create` and `.beta.messages.create`) | `tests/test_assistant_tools.py`: every `tools.json` example against a test DB built from the fixture data (ok/error code/details/arguments/data keys), all-or-nothing approve, `assistant_actions` rows + `claude:<name>` reviewer, no-name MCP write refused. `tests/test_assistant_mcp.py`: `mcp.Client(server)` in-process: tools/list equals `tools.json` (names, order, descriptions, schemas) with `annotations` by the Server rule above, one `call_tool` (`project_summary`) returns the envelope as `structured_content`; HTTP: token 401 / loopback 403 rules. `tests/test_assistant_chat.py`: every `chat_fake.json` scenario with the fake client. `tests/test_assistant_secrets.py`: with `ANTHROPIC_API_KEY=sk-ant-test-LEAKME` and `AUTOLABEL_MCP_TOKEN` set, run status, chat (ok, API error, tool error), confirm, MCP calls; neither secret appears in any response body or header, `caplog` text, `assistant_actions` row or `jobs` row. `tests/test_assistant_stdio.py`: the launcher forwards list/call to a fake upstream session and sends both headers. |
+| ui | sidebar on the review page: hidden behind a button; uses #31 (off -> "Claude chat is off: the server has no ANTHROPIC_API_KEY"); needs the reviewer name (asks for it if empty); shows `reply`, a collapsed tool-call list, one Confirm / Cancel pair per `pending` item (#33), "New chat" (#34); reloads the current image and counts after any write `ok`; a 404 session -> "The conversation was lost (server restart)" and a new one; `make_train_package` links open `download_url`; `?mock=1` from `api_samples.json` | manual check |
+| export | nothing | - |
+| models | nothing | - |
+| integrator | this section; `docs/fixtures/assistant/` (`tools.json`, `chat_fake.json`); the #31 - #36 samples in `api_samples.json`; `requirements.txt` pins; `.env.example`; README connect steps + token risk | full `pytest` at merge |
+
 ## 3. Detector interface (Python)
 
 The models session owns `autolabel/models/` and `autolabel/pipeline.py`. The types below go in
@@ -1354,11 +1581,11 @@ Rules:
 
 | Owner | Owns (creates and edits) | Tests |
 |---|---|---|
-| backend | `app/api/` (except `export.py`), `app/db/`, `app/worker/`, `app/main.py` | `tests/test_api_*.py`, `tests/test_db_*.py`, `tests/test_worker_*.py` |
+| backend | `app/api/` (except `export.py`), `app/db/`, `app/worker/`, `app/main.py`, `app/assistant/` | `tests/test_api_*.py`, `tests/test_db_*.py`, `tests/test_worker_*.py`, `tests/test_assistant_*.py` |
 | models | `autolabel/models/`, `autolabel/pipeline.py` | `tests/test_models_*.py`, `tests/test_pipeline_*.py` |
-| ui | `app/static/` | (manual check against fixtures) |
+| ui | `app/static/` (incl. the Claude sidebar) | (manual check against fixtures) |
 | export | `autolabel/export/`, `autolabel/importers/`, `app/api/export.py` | `tests/test_export_*.py`, `tests/test_importers_*.py` |
-| integrator | `CLAUDE.md`, `requirements.txt`, `pyproject.toml`, `README.md`, `docs/CONTRACT.md`, `docs/fixtures/` | merges, runs full `pytest` |
+| integrator | `CLAUDE.md`, `requirements.txt`, `pyproject.toml`, `README.md`, `.env.example`, `docs/CONTRACT.md`, `docs/fixtures/` | merges, runs full `pytest` |
 
 Rules:
 - **Don't edit files you don't own.** If you need a change somewhere else, write it in your notes.
@@ -1373,7 +1600,7 @@ Rules:
   `to_yolo(...) -> dict[str, str]` (file name -> file text). `app/api/export.py` only loads rows and
   calls them.
 - No session runs anything on the GPU while the paused YOLO training (pid 3863) is holding it.
-- The `.env` key is never printed, logged or committed.
+- The `.env` keys (`ROBOFLOW_API_KEY`, `ANTHROPIC_API_KEY`, `AUTOLABEL_MCP_TOKEN`) are never printed, logged or committed.
 
 ---
 

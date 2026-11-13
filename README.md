@@ -150,6 +150,51 @@ cp .env.example .env      # Windows: copy .env.example .env
 Open `.env` and paste your Roboflow API key. `.env` is in `.gitignore`, so it
 never gets committed. Never paste the key into code, chat, or a commit.
 
+Optional, for the Claude connector (next section): `ANTHROPIC_API_KEY` turns on the sidebar
+chat, and `AUTOLABEL_MCP_TOKEN` lets teammates on the LAN connect their own Claude.
+
+---
+
+## Claude connector
+
+Two ways to drive the app with Claude. Both use the same tools (list, review, run detection,
+push, ...). Risky actions (delete a box, push to Roboflow, detection on more than 50 images,
+approve or reject more than 10 boxes) always ask first. Every write is logged as `claude:<your name>`.
+
+| Way | Who pays | Setup |
+|---|---|---|
+| Sidebar chat in the app | the server's `ANTHROPIC_API_KEY` | put the key in `.env`, restart the app |
+| Your own Claude Code / Claude Desktop (MCP) | your own Claude subscription | steps below |
+
+Chats in the sidebar live in the server's memory and are lost when the app restarts.
+
+**MCP on the app machine (no token needed).** In a terminal:
+```
+claude mcp add --transport http autolabel http://localhost:8000/mcp/ -H "X-Autolabel-User: YOUR_NAME"
+```
+**From another machine on the LAN.** On the app machine: set `AUTOLABEL_MCP_TOKEN` in `.env` and start
+the app with `uvicorn app.main:app --host 0.0.0.0 --port 8000`. On your machine:
+```
+claude mcp add --transport http -s user autolabel http://HOST:8000/mcp/ -H "Authorization: Bearer YOUR_TOKEN" -H "X-Autolabel-User: YOUR_NAME"
+```
+Type `/mcp` in Claude Code to check it is connected. (Command syntax checked with Claude Code 2.1.323.)
+
+**Claude Desktop (Windows, not tested yet).** Install Python 3.11+ and `pip install mcp==2.3.0`, copy
+`app/assistant/mcp_stdio.py` to e.g. `C:\autolabel\`, open Settings > Developer > Edit Config and add:
+```json
+{"mcpServers": {"autolabel": {
+  "command": "C:\\Python313\\python.exe",
+  "args": ["C:\\autolabel\\mcp_stdio.py", "--url", "http://HOST:8000/mcp/"],
+  "env": {"AUTOLABEL_MCP_TOKEN": "YOUR_TOKEN", "AUTOLABEL_USER": "YOUR_NAME"}}}}
+```
+Then quit Claude Desktop fully (tray icon > Quit) and start it again.
+
+**Risk of the shared token.** There is no login yet. Anyone who has the token can use every tool,
+including delete and Roboflow push (these still ask for confirmation). The app speaks plain HTTP, so
+someone sniffing the LAN can copy the token. Names are whatever each client sends. The rest of the
+app (`/api`, the web UI) has no protection at all once it listens on `0.0.0.0`. To rotate: change
+`AUTOLABEL_MCP_TOKEN`, restart, send the new value. Without a token, MCP only works on the app machine.
+
 ---
 
 ## Repo layout

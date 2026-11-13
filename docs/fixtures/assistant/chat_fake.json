@@ -1,0 +1,360 @@
+{
+ "_note": "Scripted FAKE Anthropic responses for tests of POST /api/assistant/chat (#32) and confirm (#33). Each 'model_turns' item is what fake client.(beta.)messages.create returns, in order. Content blocks use the API shapes (type text / tool_use / thinking). 'expect_response' is the endpoint's JSON (keys exact; values exact except session_id, confirm_id and usage). 'expect_requests' checks the kwargs the fake received.",
+ "scenarios": [
+  {
+   "name": "read tool then answer",
+   "request": {
+    "project_id": 1,
+    "user": "dhyan",
+    "message": "How many boxes still need review?"
+   },
+   "model_turns": [
+    {
+     "stop_reason": "tool_use",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "",
+       "signature": "sig-1"
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "project_summary",
+       "input": {
+        "project_id": 1
+       }
+      }
+     ],
+     "usage": {
+      "input_tokens": 1200,
+      "output_tokens": 40
+     }
+    },
+    {
+     "stop_reason": "end_turn",
+     "content": [
+      {
+       "type": "text",
+       "text": "2 boxes need review: 1 rb and 1 sb."
+      }
+     ],
+     "usage": {
+      "input_tokens": 1500,
+      "output_tokens": 20
+     }
+    }
+   ],
+   "expect_requests": {
+    "count": 2,
+    "model": "claude-sonnet-5-5",
+    "max_tokens": 16000,
+    "output_config": {
+     "effort": "low"
+    },
+    "betas": [
+     "server-side-fallback-2026-07-01"
+    ],
+    "fallbacks": "default",
+    "tool_names": [
+     "list_projects",
+     "project_summary",
+     "list_images",
+     "get_annotations",
+     "list_classes",
+     "get_job",
+     "list_models",
+     "get_hook",
+     "add_class",
+     "run_detection",
+     "rerun_examples",
+     "set_annotation_status",
+     "update_annotation",
+     "delete_annotation",
+     "set_hook_point",
+     "make_train_package",
+     "push_to_roboflow"
+    ],
+    "no_confirm_property": true,
+    "second_request_ends_with": [
+     {
+      "role": "assistant",
+      "content_types": [
+       "thinking",
+       "tool_use"
+      ]
+     },
+     {
+      "role": "user",
+      "content_types": [
+       "tool_result"
+      ]
+     }
+    ],
+    "first_user_message_starts_with": "[project 1 \"eot_crane\"; user dhyan]\n"
+   },
+   "expect_response": {
+    "session_id": "s-1",
+    "reply": "2 boxes need review: 1 rb and 1 sb.",
+    "tool_calls": [
+     {
+      "tool": "project_summary",
+      "arguments": {
+       "project_id": 1
+      },
+      "outcome": "ok"
+     }
+    ],
+    "pending": [],
+    "stopped": "end_turn",
+    "usage": {
+     "input_tokens": 2700,
+     "output_tokens": 60
+    }
+   }
+  },
+  {
+   "name": "risky tool becomes a confirm button; confirm runs it",
+   "request": {
+    "project_id": 1,
+    "user": "dhyan",
+    "message": "Delete box 106."
+   },
+   "model_turns": [
+    {
+     "stop_reason": "tool_use",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "delete_annotation",
+       "input": {
+        "annotation_id": 106,
+        "confirm": true
+       }
+      }
+     ],
+     "usage": {
+      "input_tokens": 1300,
+      "output_tokens": 30
+     }
+    },
+    {
+     "stop_reason": "end_turn",
+     "content": [
+      {
+       "type": "text",
+       "text": "Press Confirm to delete box 106."
+      }
+     ],
+     "usage": {
+      "input_tokens": 1400,
+      "output_tokens": 15
+     }
+    }
+   ],
+   "expect_response": {
+    "session_id": "s-2",
+    "reply": "Press Confirm to delete box 106.",
+    "tool_calls": [
+     {
+      "tool": "delete_annotation",
+      "arguments": {
+       "annotation_id": 106
+      },
+      "outcome": "needs_confirmation"
+     }
+    ],
+    "pending": [
+     {
+      "confirm_id": "c-1",
+      "tool": "delete_annotation",
+      "effect": "Permanently delete box 106 (person, source human, status accepted) on image 11. This cannot be undone.",
+      "arguments": {
+       "annotation_id": 106
+      }
+     }
+    ],
+    "stopped": "end_turn",
+    "usage": {
+     "input_tokens": 2700,
+     "output_tokens": 45
+    }
+   },
+   "note": "The 'confirm': true Claude sent is dropped: in the chat only the button confirms. Box 106 still exists.",
+   "confirm_request": {
+    "session_id": "s-2",
+    "confirm_id": "c-1",
+    "decision": "confirm",
+    "user": "dhyan"
+   },
+   "expect_confirm_response": {
+    "confirm_id": "c-1",
+    "tool": "delete_annotation",
+    "decision": "confirm",
+    "result": {
+     "ok": true,
+     "data": {
+      "deleted": 106
+     }
+    }
+   },
+   "expect_history_note": "[dhyan pressed Confirm: delete_annotation {\"annotation_id\": 106} -> ok]"
+  },
+  {
+   "name": "tool-call cap",
+   "env": {
+    "AUTOLABEL_CLAUDE_MAX_TOOL_CALLS": "2"
+   },
+   "request": {
+    "project_id": 1,
+    "user": "dhyan",
+    "message": "Look at every image."
+   },
+   "model_turns": [
+    {
+     "stop_reason": "tool_use",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "t1",
+       "name": "get_annotations",
+       "input": {
+        "image_id": 10
+       }
+      },
+      {
+       "type": "tool_use",
+       "id": "t2",
+       "name": "get_annotations",
+       "input": {
+        "image_id": 11
+       }
+      },
+      {
+       "type": "tool_use",
+       "id": "t3",
+       "name": "get_annotations",
+       "input": {
+        "image_id": 12
+       }
+      }
+     ],
+     "usage": {
+      "input_tokens": 1000,
+      "output_tokens": 50
+     }
+    }
+   ],
+   "expect_requests": {
+    "count": 1
+   },
+   "expect_response": {
+    "session_id": "s-3",
+    "reply": "",
+    "tool_calls": [
+     {
+      "tool": "get_annotations",
+      "arguments": {
+       "image_id": 10
+      },
+      "outcome": "ok"
+     },
+     {
+      "tool": "get_annotations",
+      "arguments": {
+       "image_id": 11
+      },
+      "outcome": "ok"
+     },
+     {
+      "tool": "get_annotations",
+      "arguments": {
+       "image_id": 12
+      },
+      "outcome": "not_run"
+     }
+    ],
+    "pending": [],
+    "stopped": "tool_limit",
+    "usage": {
+     "input_tokens": 1000,
+     "output_tokens": 50
+    }
+   },
+   "note": "t3 still gets a tool_result (is_error true, 'tool call limit reached for this message') so the stored history stays valid; Claude is not called again for this message."
+  },
+  {
+   "name": "refusal",
+   "request": {
+    "project_id": 1,
+    "user": "dhyan",
+    "message": "..."
+   },
+   "model_turns": [
+    {
+     "stop_reason": "refusal",
+     "content": [],
+     "usage": {
+      "input_tokens": 900,
+      "output_tokens": 0
+     }
+    }
+   ],
+   "expect_response": {
+    "session_id": "s-4",
+    "reply": "Claude declined this request.",
+    "tool_calls": [],
+    "pending": [],
+    "stopped": "refusal",
+    "usage": {
+     "input_tokens": 900,
+     "output_tokens": 0
+    }
+   },
+   "note": "The user turn is removed from the stored history, so the next message starts clean."
+  },
+  {
+   "name": "API error with the key in its text",
+   "request": {
+    "project_id": 1,
+    "user": "dhyan",
+    "message": "hi"
+   },
+   "fake_raises": {
+    "type": "APIStatusError",
+    "status_code": 401,
+    "message": "invalid x-api-key sk-ant-test-LEAKME"
+   },
+   "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-test-LEAKME"
+   },
+   "expect_status": 502,
+   "expect_response": {
+    "error": {
+     "code": "assistant_error",
+     "message": "Claude API error 401: invalid x-api-key [redacted]"
+    }
+   },
+   "must_not_contain_anywhere": "sk-ant-test-LEAKME"
+  },
+  {
+   "name": "no key",
+   "env": {
+    "ANTHROPIC_API_KEY": ""
+   },
+   "request": {
+    "project_id": 1,
+    "user": "dhyan",
+    "message": "hi"
+   },
+   "expect_status": 503,
+   "expect_response": {
+    "error": {
+     "code": "assistant_unavailable",
+     "message": "Claude chat is off: ANTHROPIC_API_KEY is not set in the server's .env"
+    }
+   }
+  }
+ ]
+}

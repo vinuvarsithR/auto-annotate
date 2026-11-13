@@ -27,5 +27,10 @@ uvicorn>=0.54.0           # runs the server: uvicorn app.main:app --port 8000
 python-multipart>=0.0.32  # multipart image upload
 httpx>=0.28.1             # FastAPI TestClient in tests
 
+# Claude connector (app/assistant/): MCP server + sidebar chat. VERIFIED installed 2026-11-13 on Python 3.14.0
+# (Windows); no other package changed. mcp 2.x API (no FastMCP). Their httpx2 needs Python >= 3.11.
+mcp==2.3.0
+anthropic==2.8.0
+
 # Testing
 pytest>=8.0
