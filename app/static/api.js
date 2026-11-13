@@ -70,6 +70,21 @@ function scalePolygon(poly, from, to, w, h) {
                                roundNorm((to[1] + (y * h - from[1]) * ky) / h)]);
 }
 
+// ---- video of an image: a copy of autolabel/sequences.py sequence_of() (keep the two the same).
+// The server keys hook points by it (#27 - #29); the review page uses it to find the open image's video.
+// "rb_load__cam0_2026-09-29_18-24-11_00568_jpg.rf.ab12.jpg" -> "rb_load__cam0_2026-09-29_18-24-11".
+function sequenceOf(fileName) {
+  let stem = String(fileName).split("/").pop();
+  if (stem.includes(".")) stem = stem.slice(0, stem.lastIndexOf("."));  // real extension
+  stem = stem.replace(/\.rf\.[0-9a-fA-F]+$/, "").replace(/_(jpe?g|png|bmp|webp)$/i, "");
+  const m = /^(.+)_t?(\d+)$/.exec(stem);
+  return m ? m[1] : stem;
+}
+
+// OWLv2 + SAM 2 defaults (#27 / #30, used when the setting is NULL).
+const HOOK_DEFAULT_LOAD = ["rb", "sb", "biax"];
+const HOOK_DEFAULT_RADIUS = 130;
+
 // ---------------------------------------------------------------- real mode
 async function http(method, path, body) {
   const opts = { method, headers: {} };
@@ -187,6 +202,12 @@ const realApi = {
   listWeights: (pid) => http("GET", `/projects/${pid}/weights`),
   deleteWeights: (wid) => http("DELETE", `/weights/${wid}`),
 
+  // ---- hook points (#27 - #30, OWLv2 + SAM 2)
+  getHook: (pid) => http("GET", `/projects/${pid}/hook`),
+  putHookPoint: (pid, body) => http("PUT", `/projects/${pid}/hook/points`, body),   // {image_id, x, y}
+  deleteHookPoint: (pid, seq) => http("DELETE", `/projects/${pid}/hook/points/${encodeURIComponent(seq)}`),
+  patchHook: (pid, body) => http("PATCH", `/projects/${pid}/hook`, body),           // {load_classes?, radius?}
+
   // Endpoint 16: GET /api/models -> {"models": [...], "modes": {name: [...]}}, default mode first.
   // With pid, the project's uploaded models are listed too (modes []).
   // If an older backend answers 404, fall back to the one detector that always exists.
@@ -202,8 +223,11 @@ const realApi = {
 };
 
 const FALLBACK_MODELS = ["fake"];
-const MOCK_MODELS = ["fake"]; // same as the backend today (contract #16)
-const MOCK_MODES = { fake: ["text", "examples"] };
+// fake as in contract #16; owlv2 so the "Outlines (SAM 2)" toggle and job result.hook can be tried.
+// The mock owlv2 finds the same boxes as fake, then applies the hook rule and SAM-like outlines.
+const MOCK_MODELS = ["fake", "owlv2"];
+const MOCK_MODES = { fake: ["text", "examples"], owlv2: ["text", "examples"] };
+const MASKS = ["sam2", "none"];   // #9 masks values
 const MOCK_PREP_POLLS = 2;    // polls an examples job stays running at 0 while it "embeds"
 const EXAMPLE_CAP = 30;       // contract #9: at most 30 examples per class
 const TRAIN_TASKS = ["detect", "segment"];        // #23 / #24
@@ -230,7 +254,14 @@ async function loadMock() {
     // TrainedModel rows (+ deleted_at); the mock keeps no .pt file.
     weights: clone((fx["GET /api/projects/1/weights"] || { weights: [] }).weights).map((w) => ({ ...w, deleted_at: null })),
     pushed: new Set(),   // image ids "sent to Roboflow" by a mock push job (no SDK call in mock mode)
+    // #27 - #30 per project id: {load_classes: null | [...], radius: null | number, points: [Point]}
+    hooks: {},
   };
+  const h = fx["GET /api/projects/1/hook"];
+  if (h) {
+    mockDb.hooks[1] = { load_classes: h.load_classes_default ? null : clone(h.load_classes),
+                        radius: h.radius_default ? null : h.radius, points: clone(h.points) };
+  }
   const nextOf = (rows) => Math.max(0, ...rows.map((r) => r.id)) + 1;
   mockDb.nextId = nextOf(mockDb.annotations);
   mockDb.nextProjectId = nextOf(mockDb.projects);
@@ -300,6 +331,77 @@ function mockPrepareExamples(db, job) {
     }
   }
   job.result = { mode: "examples", examples_by_class, skipped_classes };
+  if (job.config.model === "owlv2") mockHookResult(db, job);
+}
+
+// ---- hook points (#27 - #30) in mock mode
+function mockHookRow(db, pid) {
+  pid = Number(pid);
+  if (!db.hooks[pid]) db.hooks[pid] = { load_classes: null, radius: null, points: [] };
+  return db.hooks[pid];
+}
+
+function mockHookSettings(db, pid) {
+  const h = mockHookRow(db, pid);
+  const counts = {};
+  for (const img of db.images.filter((i) => i.project_id === Number(pid))) {
+    const s = sequenceOf(img.file_name);
+    counts[s] = (counts[s] || 0) + 1;
+  }
+  const has = new Set(h.points.map((p) => p.sequence));
+  return {
+    load_classes: clone(h.load_classes ?? HOOK_DEFAULT_LOAD), load_classes_default: h.load_classes == null,
+    radius: h.radius ?? HOOK_DEFAULT_RADIUS, radius_default: h.radius == null,
+    points: clone(h.points).sort((a, b) => (a.sequence < b.sequence ? -1 : a.sequence > b.sequence ? 1 : 0)),
+    sequences: Object.keys(counts).sort().map((s) => ({ sequence: s, images: counts[s], has_point: has.has(s) })),
+  };
+}
+
+// #9 result.masks + result.hook of an owlv2 examples job. Settings and points are read once, here
+// (the mock's "job start"), and kept on the job for mockDetectOne.
+function mockHookResult(db, job) {
+  const s = mockHookSettings(db, job.project_id);
+  const names = new Set(db.classes.filter((c) => c.project_id === job.project_id).map((c) => c.name));
+  const load = s.load_classes.filter((n) => names.has(n));
+  const loadIds = db.classes.filter((c) => c.project_id === job.project_id && load.includes(c.name) &&
+                                           job._ran.includes(c.id)).map((c) => c.id);
+  const bySeq = {};
+  for (const id of job._ids) {
+    const img = db.images.find((i) => i.id === id);
+    if (img) (bySeq[sequenceOf(img.file_name)] ||= []).push(id);
+  }
+  const points = {}, warnings = [];
+  for (const seq of Object.keys(bySeq).sort()) {
+    const p = s.points.find((q) => q.sequence === seq);
+    if (p) points[seq] = [p.x, p.y];
+    else if (loadIds.length) warnings.push({ sequence: seq, images: bySeq[seq].length, reason: "no hook point" });
+  }
+  job._hook = { loadIds, radius: s.radius, points };
+  job.result.masks = job.config.masks || "none";
+  job.result.hook = { load_classes: s.load_classes, radius: s.radius, points, warnings };
+}
+
+// Step 2 of the OWLv2 + SAM 2 section: load boxes farther than radius from the hook are dropped,
+// then only the best-scoring load box is kept. No hook point for the video: nothing filtered.
+function mockHookFilter(job, img, boxes) {
+  const hk = job._hook;
+  const pt = hk && hk.points[sequenceOf(img.file_name)];
+  if (!pt || !hk.loadIds.length) return boxes;
+  const isLoad = (b) => hk.loadIds.includes(b.class_id);
+  const near = (b) => Math.hypot(b.bbox[0] + b.bbox[2] / 2 - pt[0], b.bbox[1] + b.bbox[3] / 2 - pt[1]) <= hk.radius;
+  let best = null;
+  for (const b of boxes) if (isLoad(b) && near(b) && (!best || b.score > best.score)) best = b;
+  return boxes.filter((b) => !isLoad(b) || b === best);
+}
+
+// Steps 3-4 stand-in (like FakeSegmenter): the ellipse inscribed in the box, as a 16-point polygon.
+function mockEllipse(bbox, w, h) {
+  const [x, y, bw, bh] = bbox, pts = [];
+  for (let k = 0; k < 16; k++) {
+    const t = (k / 16) * 2 * Math.PI;
+    pts.push([roundNorm((x + bw / 2 + (bw / 2) * Math.cos(t)) / w), roundNorm((y + bh / 2 + (bh / 2) * Math.sin(t)) / h)]);
+  }
+  return pts;
 }
 
 function mockFinishJob(job) {
@@ -323,23 +425,35 @@ function mockDetectOne(db, job, imageId) {
   const classes = db.classes.filter((c) => c.project_id === job.project_id && runs(c.id)).slice(0, 2);
   const scores = [0.9, 0.3];
   const t = now();
+  const owlExamples = job.config.model === "owlv2" && job.config.mode === "examples";
+  const source = owlExamples ? "owlv2_image" : MOCK_MODELS.includes(job.config.model) ? job.config.model : "yolo_trained";
+  let boxes = [];
   classes.forEach((c, k) => {
     const score = scores[k];
     if (c.min_score != null && score < c.min_score) return;
-    db.annotations.push({
-      id: db.nextId++, image_id: imageId, class_id: c.id, class_name: c.name,
+    boxes.push({
+      id: null, image_id: imageId, class_id: c.id, class_name: c.name,
       bbox: [Math.round(img.width * (0.15 + 0.4 * k)), Math.round(img.height * 0.3),
              Math.round(img.width * 0.2), Math.round(img.height * 0.15)],
-      mask: null, polygon: null, score,
-      source: MOCK_MODELS.includes(job.config.model) ? job.config.model : "yolo_trained",
+      mask: null, polygon: null, score, source,
       status: c.accept_score != null && score >= c.accept_score ? "auto_accepted" : "needs_review",
       job_id: job.id, reviewer: null, created_at: t, updated_at: t,
     });
   });
+  if (owlExamples) {
+    boxes = mockHookFilter(job, img, boxes);
+    if (job.config.masks === "sam2") {
+      for (const b of boxes) {
+        b.polygon = mockEllipse(b.bbox, img.width, img.height);
+        b.bbox = polygonBbox(b.polygon, img.width, img.height); // section 1: bbox = polygon's bbox
+      }
+    }
+  }
+  for (const b of boxes) { b.id = db.nextId++; db.annotations.push(b); }
 }
 
 function stripJob(job) {
-  const { _ids, _ran, _prep, ...out } = job;
+  const { _ids, _ran, _prep, _hook, ...out } = job;
   return clone(out);
 }
 
@@ -512,6 +626,7 @@ const mockApi = {
     db.classes = db.classes.filter((c) => c.project_id !== pid);
     db.jobs = db.jobs.filter((j) => j.project_id !== pid);
     db.weights = db.weights.filter((w) => w.project_id !== pid);
+    delete db.hooks[pid];
     db.projects = db.projects.filter((p) => p.id !== pid);
     return null;
   },
@@ -593,13 +708,14 @@ const mockApi = {
     pid = Number(pid);
     let rerunOf = null;
     if (body.rerun) { // #9 rerun: copy model, mode, options from the last examples job; todo images only
-      const extra = ["model", "mode", "image_ids", "options"].filter((k) => k in body);
+      const extra = ["model", "mode", "image_ids", "options", "masks"].filter((k) => k in body);
       if (extra.length) throw new ApiError("bad_request", `rerun takes no other fields; got: ${extra.join(", ")}`, 400);
       const src = db.jobs.filter((j) => j.project_id === pid && j.kind === "detect" && j.config.mode === "examples")
                          .sort((a, b) => b.id - a.id)[0];
       if (!src) throw new ApiError("conflict", `project ${pid} has no examples-mode job to re-run`, 409);
       rerunOf = src.id;
       body = { model: src.config.model, mode: src.config.mode, options: src.config.options };
+      if ("masks" in src.config) body.masks = src.config.masks; // rerun copies config.masks too
     }
     // #9: a non-deleted uploaded model of THIS project is a detector name too (no modes).
     const trained = mockLiveWeights(db, pid).some((w) => w.name === body.model);
@@ -611,11 +727,18 @@ const mockApi = {
       throw new ApiError("unknown_mode", `unknown mode "${body.mode}" for model "${body.model}"`, 400);
     }
     const mode = body.mode ?? modes[0] ?? null;
+    if ("masks" in body) { // #9 masks: after unknown_mode, before no_classes
+      if (!MASKS.includes(body.masks)) throw new ApiError("bad_request", `masks must be "sam2" or "none", got ${JSON.stringify(body.masks)}`, 400);
+      if (body.model !== "owlv2" || mode !== "examples") {
+        throw new ApiError("bad_request", "masks is only for model owlv2 in mode examples", 400);
+      }
+    }
     if (!db.classes.some((c) => c.project_id === pid)) {
       throw new ApiError("no_classes", "project has no classes", 400);
     }
     let ids = body.image_ids || db.images.filter((i) => i.project_id === pid).map((i) => i.id);
     const config = { model: body.model, mode, image_ids: body.image_ids ?? null, options: body.options || {} };
+    if ("masks" in body) config.masks = body.masks; // stored only when sent
     if (rerunOf != null) {
       ids = db.images.filter((i) => i.project_id === pid && (i.review_status || "todo") === "todo")
                      .map((i) => i.id).sort((a, b) => a - b);
@@ -747,6 +870,60 @@ The real server sends a zip with data.yaml, split.json, train.ipynb, images and 
     mockProject(db, pid);
     return { weights: mockLiveWeights(db, pid).map(stripWeights) };
   },
+  // ---- hook points (#27 - #30); errors in the contract's order
+  async getHook(pid) {
+    const db = await loadMock();
+    mockProject(db, pid);
+    return mockHookSettings(db, pid);
+  },
+  async putHookPoint(pid, body) {
+    const db = await loadMock();
+    mockProject(db, pid);
+    const keys = Object.keys(body || {}).sort().join(",");
+    const num = (v) => typeof v === "number" && Number.isFinite(v);
+    if (keys !== "image_id,x,y" || !Number.isInteger(body.image_id) || !num(body.x) || !num(body.y)) {
+      throw new ApiError("bad_request", "body must be {image_id, x, y} with finite numbers", 400);
+    }
+    const img = db.images.find((i) => i.id === body.image_id && i.project_id === Number(pid));
+    if (!img) throw new ApiError("bad_image_ids", `image ${body.image_id} is not in project ${pid}`, 400);
+    if (body.x < 0 || body.x > img.width || body.y < 0 || body.y > img.height) {
+      throw new ApiError("bad_request", `x must be in 0..${img.width} and y in 0..${img.height}`, 400);
+    }
+    const h = mockHookRow(db, pid);
+    const point = { sequence: sequenceOf(img.file_name), x: body.x, y: body.y, image_id: img.id, updated_at: now() };
+    h.points = h.points.filter((p) => p.sequence !== point.sequence).concat([point]);
+    return clone(point);
+  },
+  async deleteHookPoint(pid, seq) {
+    const db = await loadMock();
+    mockProject(db, pid);
+    const h = mockHookRow(db, pid);
+    if (!h.points.some((p) => p.sequence === seq)) {
+      throw new ApiError("not_found", `no hook point for sequence ${seq}`, 404);
+    }
+    h.points = h.points.filter((p) => p.sequence !== seq);
+    return null;
+  },
+  async patchHook(pid, body) {
+    const db = await loadMock();
+    mockProject(db, pid);
+    body = body || {};
+    const extra = Object.keys(body).filter((k) => k !== "load_classes" && k !== "radius");
+    if (extra.length) throw new ApiError("bad_request", `unknown field(s): ${extra.join(", ")}`, 400);
+    const names = mockClasses(db, pid).map((c) => c.name);
+    const lc = body.load_classes;
+    if (lc != null && (!Array.isArray(lc) || lc.some((n) => !names.includes(n)) || new Set(lc).size !== lc.length)) {
+      throw new ApiError("bad_request", "load_classes must be distinct class names of the project", 400);
+    }
+    const r = body.radius;
+    if (r != null && !(typeof r === "number" && Number.isFinite(r) && r > 0)) {
+      throw new ApiError("bad_request", "radius must be a finite number > 0", 400);
+    }
+    const h = mockHookRow(db, pid);
+    if ("load_classes" in body) h.load_classes = lc == null ? null : lc.slice();
+    if ("radius" in body) h.radius = r == null ? null : r;
+    return mockHookSettings(db, pid);
+  },
   async deleteWeights(wid) {
     const db = await loadMock();
     const w = db.weights.find((x) => x.id === Number(wid) && !x.deleted_at);
@@ -761,6 +938,7 @@ The real server sends a zip with data.yaml, split.json, train.ipynb, images and 
 
 window.api = MOCK ? mockApi : realApi;
 window.ApiError = ApiError;
+window.sequenceOf = sequenceOf;
 window.STATUSES = STATUSES;
 window.countStatuses = countStatuses;
 window.roundNorm = roundNorm;

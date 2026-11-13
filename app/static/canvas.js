@@ -15,7 +15,8 @@ const ZOOM_MAX = 8;    // 800% of "fit"
 const ZOOM_GLIDE_MS = 60; // time constant of the wheel zoom glide
 const CANVAS_COLORS = { base: "#1A2026", panel: "#222A31", line: "#2E3840", text: "#DCE3E8", muted: "#8996A0",
             accept: "143,184,168" };
-const LABEL_FONT = '500 12px "IBM Plex Sans", system-ui, sans-serif';
+const HOOK_COLOR = "#F4F6F8"; // hook point + radius circle: near white, unlike every class colour
+const LABEL_FONT ='500 12px "IBM Plex Sans", system-ui, sans-serif';
 
 function classColor(name) {
   if (CLASS_COLORS[name]) return CLASS_COLORS[name];
@@ -54,6 +55,10 @@ class BoxCanvas {
     this.hideAll = false;     // H held: no boxes at all
     this.hiddenClasses = new Set(); // class ids switched off in the legend
     this.imgFilter = "none";  // display-only brightness / contrast
+    this.hook = null;         // {x, y, r} image px: hook point + radius of this image's video (#27)
+    this.hookMode = false;    // "Set hook point": the next click on the image calls cb.onHookClick(x, y)
+    this.hookCursor = null;   // [x, y] image px under the mouse while hookMode (radius preview)
+    this.hookRadius = 130;
     this.drag = null;
     // View: zoom 1 = whole image fitted; pan = screen px offset from the centred position.
     this.zoom = 1; this.panX = 0; this.panY = 0;
@@ -162,6 +167,13 @@ class BoxCanvas {
     this.render();
   }
   setDrawColor(color) { this.drawColor = color; }
+  setHook(hook, radius) { this.hook = hook; this.hookRadius = radius; this.render(); }
+  setHookMode(on) {
+    this.hookMode = on;
+    this.hookCursor = null;
+    if (!this.drag) this.cv.style.cursor = on || this.drawing() ? "crosshair" : "default";
+    this.render();
+  }
   // Ctrl held: the cursor becomes a crosshair and a drag draws a box (no button press needed).
   setTempDraw(on) {
     if (this.tempDraw === on) return;
@@ -403,6 +415,11 @@ class BoxCanvas {
     if (e.button === 1) { e.preventDefault(); this.startPan(e); return; } // middle button pans
     if (e.button !== 0) return;
     const [px, py] = this.toImage(e);
+    if (this.hookMode) { // a click outside the image does nothing (the server wants 0..width, 0..height)
+      e.preventDefault();
+      if (px >= 0 && py >= 0 && px <= this.imgW && py <= this.imgH) this.cb.onHookClick(px, py);
+      return;
+    }
     if (this.polyMode) { // no default: a close opens the popup, and the click must not take its focus
       e.preventDefault();
       this.draftClick(px, py);
@@ -473,6 +490,10 @@ class BoxCanvas {
   }
 
   onMove(e) {
+    if (this.hookMode && !this.drag) { // preview only while the mouse is over the canvas
+      const c = e.target === this.cv ? this.toImage(e) : null;
+      if (c || this.hookCursor) { this.hookCursor = c; this.render(); }
+    }
     if (this.polyDraft && !this.drag) {
       const [px, py] = this.toImage(e);
       this.polyDraft.cursor = [clamp(px, 0, this.imgW), clamp(py, 0, this.imgH)];
@@ -542,7 +563,7 @@ class BoxCanvas {
       this.cv.style.cursor = "pointer"; // a click closes the shape
       return;
     }
-    if (this.drawing()) { this.cv.style.cursor = "crosshair"; return; }
+    if (this.drawing() || this.hookMode) { this.cv.style.cursor = "crosshair"; return; }
     const sel = this.selected();
     let cur = "default";
     if (sel && sel.status !== "rejected" && this.visible().includes(sel)) {
@@ -585,6 +606,9 @@ class BoxCanvas {
     this.drawFrame(this.img, this.imgW, this.imgH, this.scale, this.ox, this.oy);
     ctx.globalAlpha = 1;
     this.shown = true;
+    // Hook point under the boxes; while setting it, a faint preview follows the mouse.
+    if (this.hook && !this.hideAll) this.drawHook(this.hook.x, this.hook.y, this.hook.r, ft);
+    if (this.hookMode && this.hookCursor) this.drawHook(this.hookCursor[0], this.hookCursor[1], this.hookRadius, 0.5);
 
     const anns = this.visible();
     const selId = this.selectedId;
@@ -620,6 +644,29 @@ class BoxCanvas {
       ctx.setLineDash([]);
     }
     if (this.polyDraft) this.drawDraft();
+  }
+
+  // Hook point (cross) and the radius it keeps load boxes in (dashed circle), dark-edged for any image.
+  drawHook(hx, hy, r, alpha) {
+    const ctx = this.ctx;
+    const [x, y] = this.toScreen(hx, hy);
+    const rs = r * this.scale, arm = 9;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    for (const [width, color] of [[3.5, CANVAS_COLORS.base], [1.5, HOOK_COLOR]]) {
+      ctx.lineWidth = width;
+      ctx.strokeStyle = color;
+      ctx.setLineDash([7, 5]);
+      ctx.beginPath();
+      ctx.arc(x, y, rs, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(x - arm, y); ctx.lineTo(x + arm, y);
+      ctx.moveTo(x, y - arm); ctx.lineTo(x, y + arm);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   // The polygon being drawn: its points, plus a dashed line to the cursor and back to the start.
