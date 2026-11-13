@@ -1038,7 +1038,7 @@ detection, four steps run in this order, per image:
 | 1 | containment merge | every `owlv2` examples job | box F1 0.52 -> 0.55 |
 | 2 | hook filter + one load per image | every `owlv2` examples job, on images whose video has a hook point | 0.55 -> 0.73 (63 load boxes dropped, 0 true positives lost) |
 | 3 | SAM 2.1 tiny mask from the box | `masks: "sam2"` | mask F1 0.72 -> 0.73 |
-| 4 | mask -> one polygon, no box fallback | `masks: "sam2"` | see step 4 (largest part: test mask F1 0.72) |
+| 4 | mask -> one polygon (box kept without polygon when none) | `masks: "sam2"` | see step 4 (largest part: test mask F1 0.72) |
 
 Text mode, other detectors and other modes are unchanged. Speed (spike v1, Windows CPU, VERIFIED): OWLv2
 4.59 s/img + SAM 2.1 tiny 1.96 s/img.
@@ -1077,8 +1077,9 @@ gives the parts (holes dropped); the part with the largest `cv2.contourArea` is 
 rule, unlike `yoloe`). Simplify as `yoloe` (`approxPolyDP`, closed, tolerance 0.001 x the image's longest
 side), divide by width / height, round to 6 decimals. Then `polygon` = that ring and `bbox` = its bounding
 box (section 1 rule), `score`, `category` and `source` (`owlv2_image`) unchanged, `mask` None.
-**No box fallback:** an empty mask, or a polygon with fewer than 3 points or zero area -> the box is
-dropped (not stored).
+**No usable polygon:** an empty mask, or a polygon with fewer than 3 points or zero area -> the box is
+**kept** as a plain box: `polygon` None, `bbox` = the box after steps 1-2, `score`, `category`, `source` unchanged
+(decided 2026-11-13; the spike dropped it instead, which never happened on its test frames).
 
 Why one part and not multi-part (spike chose multi-part):
 
@@ -1193,7 +1194,7 @@ def get_segmenter() -> Segmenter: ...      # SAM 2.1 tiny, cached per process; m
 class FakeSegmenter:                       # tests: k = 1, the filled ellipse inscribed in the box, score 0.9
     ...
 def clean_mask(masks, scores, bbox: tuple, open_px: int = 5) -> np.ndarray: ...   # step 3 pick/open/clip
-def largest_polygon(mask: np.ndarray, width: int, height: int) -> list | None: ...  # step 4; None = drop
+def largest_polygon(mask: np.ndarray, width: int, height: int) -> list | None: ...  # step 4; None = keep the box, polygon None
 def add_polygons(image: Image.Image, preds: list[Prediction], segmenter: Segmenter) -> list[Prediction]: ...
 
 # autolabel/pipeline.py: run() gets two keyword arguments
@@ -1209,7 +1210,7 @@ The worker passes `post` only for `owlv2` examples jobs; then the usual delete +
 
 | Role | Builds | Tests (must pass) |
 |---|---|---|
-| models | `PostProcess` in `base.py`; `autolabel/models/postprocess.py`; `autolabel/models/sam.py` (`get_segmenter`, `FakeSegmenter`, `clean_mask`, `largest_polygon`, `add_polygons`); `pipeline.run(post=, segmenter=)` | `tests/test_models_postprocess.py`: every case in `docs/fixtures/owl_sam/cases.json` `merge` and `hook_filter`. `tests/test_models_sam.py` with `FakeSegmenter` and numpy masks only (no weights): multimask pick (inside rule + fallback), opening, opening that empties, clip, two-part mask -> largest part + bbox, empty mask -> box dropped, missing weights -> `FileNotFoundError`. `tests/test_pipeline_*.py`: `run(post=...)` with `fake` + `FakeSegmenter`, order of the steps. |
+| models | `PostProcess` in `base.py`; `autolabel/models/postprocess.py`; `autolabel/models/sam.py` (`get_segmenter`, `FakeSegmenter`, `clean_mask`, `largest_polygon`, `add_polygons`); `pipeline.run(post=, segmenter=)` | `tests/test_models_postprocess.py`: every case in `docs/fixtures/owl_sam/cases.json` `merge` and `hook_filter`. `tests/test_models_sam.py` with `FakeSegmenter` and numpy masks only (no weights): multimask pick (inside rule + fallback), opening, opening that empties, clip, two-part mask -> largest part + bbox, empty mask -> box kept with `polygon` None and the same bbox, missing weights -> `FileNotFoundError`. `tests/test_pipeline_*.py`: `run(post=...)` with `fake` + `FakeSegmenter`, order of the steps. |
 | backend | `hook_points` table, the two `projects` columns, `migrate()`; #27 - #30; #9 `masks` (checks, `config.masks`, `rerun` copy); worker: read settings + points at job start, build `PostProcess` (hooks by image id via `sequence_of`), pass it for `owlv2` examples jobs, `result.masks` + `result.hook` (warnings). Tests use the existing fake pipeline, no SAM. | `tests/test_api_hook.py` (#27 - #30 incl. errors, keys = fixtures), `tests/test_worker_*.py`: `cases.json` `hook_warnings`, `PostProcess` passed only for `owlv2` examples, `masks` 400s, `rerun` copies `masks` |
 | ui | examples mode with `owlv2`: a "SAM 2 masks" toggle (sends `masks`); on the review page, a "Set hook point" action: click on the image -> #28 with image-pixel coords, draws the point and the radius circle, "Clear" -> #29; shows `result.hook.warnings` after a job; `?mock=1` from the fixtures | manual check |
 | export | nothing: rows have one polygon ring, as today | - |
