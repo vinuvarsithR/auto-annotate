@@ -90,6 +90,18 @@ CREATE TABLE hook_points (               -- #27 - #30 (OWLv2 + SAM 2); migrate()
   updated_at   TEXT NOT NULL,
   PRIMARY KEY (project_id, sequence)
 );
+CREATE TABLE assistant_actions (         -- Claude connector audit log; migrate() creates it if missing
+  id          INTEGER PRIMARY KEY,
+  created_at  TEXT NOT NULL,
+  channel     TEXT NOT NULL CHECK (channel IN ('mcp', 'chat')),
+  actor       TEXT NOT NULL,             -- "claude:<name>", e.g. "claude:dhyan"
+  project_id  INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+  tool        TEXT NOT NULL,             -- e.g. "delete_annotation"
+  arguments   TEXT NOT NULL,             -- JSON input as received (chat: without "confirm")
+  outcome     TEXT NOT NULL CHECK (outcome IN ('ok', 'error', 'needs_confirmation')),
+  confirmed   INTEGER NOT NULL DEFAULT 0, -- 1 = ran with confirm=true (MCP) or the chat Confirm button
+  summary     TEXT                       -- JSON: error code, or the ids it created/changed (never full data)
+);
 -- projects gets two columns (migrate() adds them if missing; not part of the Project JSON):
 --   load_classes TEXT   -- JSON list of class names, NULL = default ["rb", "sb", "biax"]
 --   hook_radius  REAL   -- px, NULL = default 130

@@ -71,6 +71,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     | #24   | trained_models table     | (new table, created if missing) |
     | #27   | hook_points table        | (new table, created if missing) |
     | #30   | projects.load_classes, projects.hook_radius | NULL (= defaults) |
+    | #31   | assistant_actions table  | (new table, created if missing) |
     """
     migrate_jobs(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
@@ -85,7 +86,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     ann_cols = {r["name"] for r in conn.execute("PRAGMA table_info(annotations)")}
     if "polygon" not in ann_cols:
         conn.execute("ALTER TABLE annotations ADD COLUMN polygon TEXT")
-    for table in ("trained_models", "hook_points"):
+    for table in ("trained_models", "hook_points", "assistant_actions"):
         m = re.search(rf"CREATE TABLE {table} \(.*?\n\);", SCHEMA.read_text(encoding="utf-8"),
                       re.S)
         if m is None:

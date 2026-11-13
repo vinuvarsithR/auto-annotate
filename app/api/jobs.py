@@ -75,7 +75,7 @@ def _check_classes(conn: sqlite3.Connection, pid: int) -> None:
         raise ApiError(400, "no_classes", f"project {pid} has no classes; PUT the classes first")
 
 
-def _insert_job(request: Request, conn: sqlite3.Connection, pid: int, total: int,
+def insert_job(request: Request, conn: sqlite3.Connection, pid: int, total: int,
                 config: dict) -> dict:
     with conn:
         cur = conn.execute(
@@ -89,8 +89,12 @@ def _insert_job(request: Request, conn: sqlite3.Connection, pid: int, total: int
     return db.job_dict(conn.execute("SELECT * FROM jobs WHERE id=?", (cur.lastrowid,)).fetchone())
 
 
-def _create_rerun(pid: int, body: JobIn, request: Request, conn: sqlite3.Connection) -> dict:
-    """#9 rerun: same detector, mode and options as the last examples job, on the todo images."""
+def plan_rerun(pid: int, body: JobIn, request: Request,
+               conn: sqlite3.Connection) -> tuple[int, dict]:
+    """#9 rerun: same detector, mode and options as the last examples job, on the todo images.
+
+    Every check of the request, nothing written. Returns (total, config) for insert_job.
+    The Claude connector's rerun_examples tool uses it to check before asking to confirm."""
     extra = [f for f in RERUN_OTHER_FIELDS if f in body.model_fields_set]
     if extra:
         raise ApiError(400, "bad_request", f"rerun takes no other fields; got: {', '.join(extra)}")
@@ -107,7 +111,7 @@ def _create_rerun(pid: int, body: JobIn, request: Request, conn: sqlite3.Connect
               "options": source.get("options") or {}, "rerun_of": source_id}
     if "masks" in source:
         config["masks"] = source["masks"]
-    return _insert_job(request, conn, pid, len(image_ids), config)
+    return len(image_ids), config
 
 
 def _resolve_mode(request: Request, model: str, mode: Any) -> str | None:
@@ -125,9 +129,15 @@ def _resolve_mode(request: Request, model: str, mode: Any) -> str | None:
 def create_job(pid: int, body: JobIn, request: Request,
                conn: sqlite3.Connection = Depends(get_conn)):
     require_project(conn, pid)
-    if body.rerun:
-        return _create_rerun(pid, body, request, conn)
+    plan = plan_rerun if body.rerun else plan_job
+    total, config = plan(pid, body, request, conn)
+    return insert_job(request, conn, pid, total, config)
 
+
+def plan_job(pid: int, body: JobIn, request: Request,
+             conn: sqlite3.Connection) -> tuple[int, dict]:
+    """#9 (not rerun): every check of the request, nothing written; the project exists.
+    Returns (total, config) for insert_job. Also used by the run_detection tool."""
     if db.trained_model(conn, pid, body.model) is not None:
         # Train on Colab: this project's uploaded model; it has no modes, runs like a text job
         if body.mode is not None:
@@ -160,7 +170,7 @@ def create_job(pid: int, body: JobIn, request: Request,
     config = {**body.model_dump(exclude={"rerun", "masks"}), "mode": mode}
     if "masks" in body.model_fields_set:
         config["masks"] = body.masks
-    return _insert_job(request, conn, pid, total, config)
+    return total, config
 
 
 @router.get("/jobs/{jid}")
