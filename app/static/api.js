@@ -208,6 +208,12 @@ const realApi = {
   deleteHookPoint: (pid, seq) => http("DELETE", `/projects/${pid}/hook/points/${encodeURIComponent(seq)}`),
   patchHook: (pid, body) => http("PATCH", `/projects/${pid}/hook`, body),           // {load_classes?, radius?}
 
+  // ---- assistant sidebar (#31 - #34)
+  assistantStatus: () => http("GET", "/assistant/status"),
+  chat: (body) => http("POST", "/assistant/chat", body),       // {session_id, project_id, user, message}
+  chatConfirm: (body) => http("POST", "/assistant/chat/confirm", body), // {session_id, confirm_id, decision, user}
+  deleteChat: (sid) => http("DELETE", `/assistant/chat/${encodeURIComponent(sid)}`),
+
   // Endpoint 16: GET /api/models -> {"models": [...], "modes": {name: [...]}}, default mode first.
   // With pid, the project's uploaded models are listed too (modes []).
   // If an older backend answers 404, fall back to the one detector that always exists.
@@ -256,6 +262,8 @@ async function loadMock() {
     pushed: new Set(),   // image ids "sent to Roboflow" by a mock push job (no SDK call in mock mode)
     // #27 - #30 per project id: {load_classes: null | [...], radius: null | number, points: [Point]}
     hooks: {},
+    fx,                  // the raw fixtures (assistant status samples)
+    chats: {},           // assistant sessions: id -> {messages, pending: [{confirm_id, tool, arguments}]}
   };
   const h = fx["GET /api/projects/1/hook"];
   if (h) {
@@ -487,6 +495,86 @@ function mockProject(db, pid) {
   out.counts = { images: imgs.length,
                  ...countStatuses(db.annotations.filter((a) => ids.has(a.image_id))) };
   return out;
+}
+
+// ---- assistant (#31 - #34) in mock mode. No Claude: a message equal to a chat_fake.json scenario's
+// request.message gets that scenario's expect_response (or its error). "?mock=1&chat=off" = no key.
+const CHAT_FIXTURES_URL = "/docs/fixtures/assistant/chat_fake.json";
+const TOOLS_FIXTURES_URL = "/docs/fixtures/assistant/tools.json";
+const CHAT_OFF = new URLSearchParams(location.search).get("chat") === "off";
+const CHAT_MAX_MESSAGES = 40;
+const USER_NAME_RE = /^[A-Za-z0-9 ._-]{1,40}$/;
+// One extra mock-only prompt so a make_train_package download link can be tried (data from tools.json).
+const MOCK_TRAIN_PROMPT = "Make a training package.";
+let chatFx = null;
+
+async function loadChatFixtures() {
+  if (chatFx) return chatFx;
+  const get = async (url) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new ApiError("mock", `cannot load ${url} (${res.status})`, res.status);
+    return res.json();
+  };
+  const [chat, tools] = await Promise.all([get(CHAT_FIXTURES_URL), get(TOOLS_FIXTURES_URL)]);
+  chatFx = { scenarios: chat.scenarios, tools };
+  return chatFx;
+}
+
+function mockChatOff() {
+  return new ApiError("assistant_unavailable", "Claude chat is off: ANTHROPIC_API_KEY is not set in the server's .env", 503);
+}
+
+function mockCheckUser(user) {
+  if (typeof user !== "string" || !USER_NAME_RE.test(user.trim())) {
+    throw new ApiError("bad_request", "user: set your name first (1-40 letters, digits, space . _ -)", 400);
+  }
+}
+
+function mockSession(db, sid) {
+  const s = db.chats[sid];
+  if (!s) {
+    throw new ApiError("not_found", `conversation ${sid} not found (the server keeps chats in memory; a restart clears them)`, 404);
+  }
+  return s;
+}
+
+let mockChatSeq = 0;
+const mockId = (p) => `${p}-${Date.now().toString(36)}-${++mockChatSeq}`;
+
+// The scripted answer for one message: a fixture scenario, the train-package prompt, or a help reply.
+function mockChatAnswer(fx, message) {
+  const sc = fx.scenarios.find((s) => s.request.message === message &&
+    !(s.env && s.env.ANTHROPIC_API_KEY === "")); // "no key" is ?chat=off, not a message
+  if (sc) {
+    if (sc.expect_status) {
+      const e = sc.expect_response.error;
+      throw new ApiError(e.code, e.message, sc.expect_status);
+    }
+    return clone(sc.expect_response);
+  }
+  if (message === MOCK_TRAIN_PROMPT) {
+    const ex = (fx.tools.examples.make_train_package || [])[0];
+    const url = ex && ex.output.ok ? ex.output.data.download_url : "/api/assistant/downloads/MOCK";
+    return { reply: `The training package is ready: ${url} (kept for 24 h).`,
+             tool_calls: [{ tool: "make_train_package", arguments: ex ? ex.input : { project_id: 1 }, outcome: "ok" }],
+             pending: [], stopped: "end_turn", usage: { input_tokens: 1800, output_tokens: 40 } };
+  }
+  const prompts = fx.scenarios.filter((s) => !(s.env && s.env.ANTHROPIC_API_KEY === ""))
+                              .map((s) => `"${s.request.message}"`).concat([`"${MOCK_TRAIN_PROMPT}"`]);
+  return { reply: `Mock mode has no Claude. Try one of the scripted messages: ${prompts.join(", ")}. ` +
+                  'Add &chat=off to the URL for "chat is off".',
+           tool_calls: [], pending: [], stopped: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } };
+}
+
+// A confirmed pending tool, run on the mock data. Returns the result envelope.
+function mockRunConfirmed(db, p) {
+  if (p.tool === "delete_annotation") {
+    const id = p.arguments.annotation_id;
+    if (!db.annotations.some((a) => a.id === id)) return { ok: false, error: { code: "not_found", message: `annotation ${id} not found` } };
+    db.annotations = db.annotations.filter((a) => a.id !== id);
+    return { ok: true, data: { deleted: id } };
+  }
+  return { ok: false, error: { code: "bad_request", message: `mock mode cannot run ${p.tool}` } };
 }
 
 const mockApi = {
@@ -870,6 +958,62 @@ The real server sends a zip with data.yaml, split.json, train.ipynb, images and 
     mockProject(db, pid);
     return { weights: mockLiveWeights(db, pid).map(stripWeights) };
   },
+  // ---- assistant (#31 - #34)
+  async assistantStatus() {
+    const db = await loadMock();
+    return clone(db.fx[CHAT_OFF ? "GET /api/assistant/status (no key)" : "GET /api/assistant/status"]);
+  },
+  async chat(body) {
+    const db = await loadMock();
+    if (CHAT_OFF) throw mockChatOff();
+    body = body || {};
+    const extra = Object.keys(body).filter((k) => !["session_id", "project_id", "user", "message"].includes(k));
+    const msg = typeof body.message === "string" ? body.message : "";
+    if (extra.length || !msg.length || msg.length > 4000 || !Number.isInteger(body.project_id)) {
+      throw new ApiError("bad_request", "body must be {session_id, project_id, user, message} with message 1-4000 characters", 400);
+    }
+    mockCheckUser(body.user);
+    mockProject(db, body.project_id);
+    let sid = body.session_id;
+    if (sid != null) mockSession(db, sid);
+    else { sid = mockId("s"); db.chats[sid] = { messages: 0, pending: [] }; }
+    const s = db.chats[sid];
+    if (s.messages >= CHAT_MAX_MESSAGES) throw new ApiError("conflict", "this chat has 40 messages; start a new chat", 409);
+    s.pending = []; // a new message ends every earlier pending confirmation
+    await mockDelay(350); // "thinking"
+    const out = mockChatAnswer(await loadChatFixtures(), msg.trim());
+    if (out.stopped !== "refusal") s.messages += 1; // a refused turn is removed from the history
+    out.session_id = sid;
+    out.pending = out.pending.map((p) => ({ ...p, confirm_id: mockId("c") }));
+    s.pending = out.pending.map((p) => ({ confirm_id: p.confirm_id, tool: p.tool, arguments: clone(p.arguments) }));
+    return out;
+  },
+  async chatConfirm(body) {
+    const db = await loadMock();
+    if (CHAT_OFF) throw mockChatOff();
+    body = body || {};
+    const keys = Object.keys(body).sort().join(",");
+    if (keys !== "confirm_id,decision,session_id,user" || !["confirm", "cancel"].includes(body.decision)) {
+      throw new ApiError("bad_request", "body must be {session_id, confirm_id, decision: confirm | cancel, user}", 400);
+    }
+    mockCheckUser(body.user);
+    const s = mockSession(db, body.session_id);
+    const p = s.pending.find((q) => q.confirm_id === body.confirm_id);
+    if (!p) throw new ApiError("conflict", `confirmation ${body.confirm_id} is no longer valid`, 409);
+    s.pending = s.pending.filter((q) => q !== p); // valid once
+    const result = body.decision === "confirm" ? mockRunConfirmed(db, p) : null;
+    return { confirm_id: p.confirm_id, tool: p.tool, decision: body.decision, result };
+  },
+  async deleteChat(sid) {
+    const db = await loadMock();
+    if (CHAT_OFF) throw mockChatOff();
+    mockSession(db, sid);
+    delete db.chats[sid];
+    return null;
+  },
+  // Mock only: forget every chat, as a server restart does (to try the "conversation was lost" path).
+  async _restartChats() { (await loadMock()).chats = {}; },
+
   // ---- hook points (#27 - #30); errors in the contract's order
   async getHook(pid) {
     const db = await loadMock();

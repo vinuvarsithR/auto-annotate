@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-13.1";
+  window.ASSET_VERSION = "2026-11-13.2";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -25,6 +25,9 @@
   <label id="projectField" class="field">Project <select id="projectSelect"></select></label>
   <label class="field">Reviewer <input id="reviewerInput" type="text" placeholder="Your name" size="10"></label>
   <span class="spacer"></span>
+  <button id="assistantBtn" type="button" aria-expanded="false" aria-controls="assistant" title="Assistant: chat with Claude about this project" hidden>
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+    Assistant</button>
   <button id="helpBtn" type="button" class="icon" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
 </header>
 <div id="progress" class="progress" tabindex="0" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Review progress">
@@ -314,6 +317,30 @@
       <ul id="imageList" class="filmstrip"></ul>
     </div>
   </aside>
+
+  <!-- far right: assistant chat (#31 - #34), hidden behind the top-bar Assistant button -->
+  <aside id="assistant" aria-label="Assistant" hidden>
+    <div class="as-head">
+      <h2>Assistant</h2>
+      <span id="asProject" class="muted as-project"></span>
+      <button id="asNewBtn" type="button" title="Forget this conversation and start a new one">New chat</button>
+      <button id="asCloseBtn" type="button" class="icon ghost" aria-label="Close assistant" title="Close">&times;</button>
+    </div>
+    <div id="asOff" class="as-off" hidden>
+      <h3>Assistant not set up</h3>
+      <p id="asOffText"></p>
+    </div>
+    <div id="asLog" class="as-log" role="log" aria-live="polite"></div>
+    <form id="asForm" class="as-form">
+      <p id="asNameNote" class="as-name" hidden>Type your name in the <button type="button" id="asNameBtn" class="linkish">Reviewer</button>
+        field first: the assistant records who asked for each change.</p>
+      <textarea id="asInput" rows="3" maxlength="4000" placeholder="Ask about this project, e.g. How many boxes still need review?" aria-label="Message to the assistant"></textarea>
+      <div class="as-send">
+        <span class="muted">Enter sends, Shift+Enter new line</span>
+        <button id="asSendBtn" type="submit" class="primary">Send</button>
+      </div>
+    </form>
+  </aside>
 </main>
 
 <dialog id="helpDialog" aria-labelledby="helpTitle">
@@ -365,7 +392,7 @@
 
 <script>
   // Loaded in this order (document.write keeps them synchronous and ordered), with ?v=ASSET_VERSION.
-  for (const f of ["api.js", "canvas.js", "app.js", "setup.js", "projects.js"])
+  for (const f of ["api.js", "canvas.js", "app.js", "setup.js", "projects.js", "assistant.js"])
     document.write('<script src="' + f + '?v=' + ASSET_VERSION + '"><\/script>');
 </script>
 </body>
