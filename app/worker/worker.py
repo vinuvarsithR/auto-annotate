@@ -22,6 +22,10 @@ Plain-English summary
 * Trained models (Train on Colab, #24): when config.model is a trained_models name, the row
   is read first (deleted -> the job fails "model NAME was deleted"), then
   register_trained(name, path, task), then run(...) as for any detector.
+* owlv2 examples jobs (OWLv2 + SAM 2): at job start the project's hook settings and hook points
+  are read once (hook_context), turned into a PostProcess (hooks by image id via sequence_of,
+  masks from config.masks) and passed to run(post=...). `result` also gets `masks` and `hook`
+  (settings used, points of this job's videos, a warning per video with no hook point).
 * Re-run jobs (#9 `rerun`, config has `rerun_of`): just before writing an image, its
   review_status is read again; not 'todo' any more -> nothing is deleted or added (still counted).
 * Any exception -> job 'failed' with a one-line error message.
@@ -50,6 +54,7 @@ import re
 import shutil
 import sqlite3
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -78,6 +83,56 @@ def default_load_pipeline() -> tuple[Callable, type]:
     from autolabel import pipeline
     from autolabel.models.base import ClassSpec
     return pipeline.run, ClassSpec
+
+
+def post_process_type() -> type:
+    """autolabel.models.base.PostProcess (models' code), or a stand-in with the same fields."""
+    try:
+        from autolabel.models.base import PostProcess
+        return PostProcess
+    except ImportError:
+        return _StandInPostProcess
+
+
+@dataclass(frozen=True)
+class _StandInPostProcess:  # same fields as the contract's PostProcess, until models merges it
+    load_classes: tuple = ("rb", "sb", "biax")
+    radius: float = 130.0
+    hooks: dict = field(default_factory=dict, hash=False, compare=False)
+    masks: str = "none"
+
+
+def hook_context(conn: sqlite3.Connection, pid: int, images: list[tuple[str, str]],
+                 masks: str) -> tuple[object, dict]:
+    """OWLv2 + SAM 2, read once at job start: (PostProcess, result['hook'] without warnings,
+    plus 'job_sequences' {sequence: image count in this job} for the warnings)."""
+    from autolabel.sequences import sequence_of  # pure, no torch
+
+    settings = db.hook_settings(conn, pid)
+    points = db.hook_points(conn, pid)
+    names = {r["id"]: r["file_name"] for r in conn.execute(
+        "SELECT id, file_name FROM images WHERE project_id=?", (pid,))}
+    hooks: dict[str, tuple[float, float]] = {}
+    job_sequences: dict[str, int] = {}
+    for image_id, _path in images:
+        seq = sequence_of(names[int(image_id)])
+        job_sequences[seq] = job_sequences.get(seq, 0) + 1
+        if seq in points:
+            hooks[image_id] = points[seq]
+    post = post_process_type()(load_classes=tuple(settings["load_classes"]),
+                               radius=settings["radius"], hooks=hooks, masks=masks)
+    hook = {"load_classes": settings["load_classes"], "radius": settings["radius"],
+            "points": {s: list(points[s]) for s in sorted(job_sequences) if s in points},
+            "job_sequences": job_sequences}
+    return post, hook
+
+
+def hook_warnings(hook: dict, classes_ran: list[str]) -> list[dict]:
+    """One warning per video of the job with no hook point; [] when no load class ran."""
+    if not set(hook["load_classes"]) & set(classes_ran):
+        return []
+    return [{"sequence": s, "images": n, "reason": "no hook point"}
+            for s, n in sorted(hook["job_sequences"].items()) if s not in hook["points"]]
 
 
 def default_register_trained(name: str, path: str, task: str, model=None) -> None:
@@ -296,8 +351,13 @@ class Worker:
         # Text jobs and old jobs (no config.mode) call run with exactly these arguments.
         run_args = {"detector": model, "options": options}
         delete_filter, delete_args = "", []
+        post = hook = None
+        if model == "owlv2" and config.get("mode") == "examples":  # OWLv2 + SAM 2
+            post, hook = hook_context(conn, pid, images, config.get("masks") or "none")
+            run_args["post"] = post
         if config.get("mode") == "examples":
-            example_run = self._prepare_examples(conn, jid, pid, model, options, specs)
+            example_run = self._prepare_examples(conn, jid, pid, model, options, specs,
+                                                 post, hook)
             if example_run is None:  # no class left: nothing is run or deleted
                 with conn:
                     conn.execute("UPDATE jobs SET status='done', progress=1.0, done=?, "
@@ -362,7 +422,7 @@ class Worker:
                          (db.now(), jid))
 
     def _prepare_examples(self, conn: sqlite3.Connection, jid: int, pid: int, model: str,
-                          options: dict, specs: list):
+                          options: dict, specs: list, post=None, hook: dict | None = None):
         """Steps 1-3 of #9 examples mode. Returns the ExampleRun, or None if no class is left."""
         from autolabel import pipeline
         from autolabel.models.base import Example
@@ -381,6 +441,11 @@ class Worker:
             skipped += [{"class_name": name, "reason": reasons.get(name) or "no usable examples"}
                         for name in example_run.unusable]
         result = {"mode": "examples", "examples_by_class": used, "skipped_classes": skipped}
+        if post is not None:  # owlv2 examples: OWLv2 + SAM 2 keys
+            ran = [s.name for s in example_run.classes] if example_run is not None else []
+            result["masks"] = post.masks
+            result["hook"] = {"load_classes": hook["load_classes"], "radius": hook["radius"],
+                              "points": hook["points"], "warnings": hook_warnings(hook, ran)}
         with conn:
             conn.execute("UPDATE jobs SET result=? WHERE id=?", (json.dumps(result), jid))
         return example_run if example_run is not None and example_run.classes else None

@@ -81,3 +81,15 @@ CREATE TABLE trained_models (            -- #24 - #26; migrate() creates it if m
   deleted_at   TEXT,                     -- set by #26; the row is kept
   UNIQUE (project_id, version)
 );
+CREATE TABLE hook_points (               -- #27 - #30 (OWLv2 + SAM 2); migrate() creates it if missing
+  project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  sequence     TEXT NOT NULL,            -- autolabel.sequences.sequence_of(images.file_name)
+  x            REAL NOT NULL,            -- hook point in image pixels
+  y            REAL NOT NULL,
+  image_id     INTEGER REFERENCES images(id) ON DELETE SET NULL,  -- the image it was clicked on
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (project_id, sequence)
+);
+-- projects gets two columns (migrate() adds them if missing; not part of the Project JSON):
+--   load_classes TEXT   -- JSON list of class names, NULL = default ["rb", "sb", "biax"]
+--   hook_radius  REAL   -- px, NULL = default 130

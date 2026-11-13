@@ -69,6 +69,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     | #22   | jobs.result              | NULL (and the kind CHECK gains 'import': table rebuilt) |
     | polygons | annotations.polygon     | NULL (plain box) |
     | #24   | trained_models table     | (new table, created if missing) |
+    | #27   | hook_points table        | (new table, created if missing) |
+    | #30   | projects.load_classes, projects.hook_radius | NULL (= defaults) |
     """
     migrate_jobs(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
@@ -83,11 +85,47 @@ def migrate(conn: sqlite3.Connection) -> None:
     ann_cols = {r["name"] for r in conn.execute("PRAGMA table_info(annotations)")}
     if "polygon" not in ann_cols:
         conn.execute("ALTER TABLE annotations ADD COLUMN polygon TEXT")
-    m = re.search(r"CREATE TABLE trained_models \(.*?\n\);", SCHEMA.read_text(encoding="utf-8"),
-                  re.S)
-    if m is None:
-        raise RuntimeError("schema.sql has no CREATE TABLE trained_models")
-    conn.execute(m.group(0).replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+    for table in ("trained_models", "hook_points"):
+        m = re.search(rf"CREATE TABLE {table} \(.*?\n\);", SCHEMA.read_text(encoding="utf-8"),
+                      re.S)
+        if m is None:
+            raise RuntimeError(f"schema.sql has no CREATE TABLE {table}")
+        conn.execute(m.group(0).replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+    proj_cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+    if "load_classes" not in proj_cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN load_classes TEXT")
+    if "hook_radius" not in proj_cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN hook_radius REAL")
+
+
+# ------------------------------------------------------------------ hook points (#27 - #30)
+
+DEFAULT_LOAD_CLASSES = ("rb", "sb", "biax")
+DEFAULT_HOOK_RADIUS = 130.0
+
+
+def hook_settings(conn: sqlite3.Connection, pid: int) -> dict:
+    """Effective hook settings of a project (defaults filled in) + whether each is the default."""
+    row = conn.execute("SELECT load_classes, hook_radius FROM projects WHERE id=?",
+                       (pid,)).fetchone()
+    raw_classes, raw_radius = (row[0], row[1]) if row is not None else (None, None)
+    return {"load_classes": (list(DEFAULT_LOAD_CLASSES) if raw_classes is None
+                             else list(json.loads(raw_classes))),
+            "load_classes_default": raw_classes is None,
+            "radius": DEFAULT_HOOK_RADIUS if raw_radius is None else float(raw_radius),
+            "radius_default": raw_radius is None}
+
+
+def hook_point_dict(row: sqlite3.Row) -> dict:
+    """One item of #27 `points`."""
+    return {"sequence": row["sequence"], "x": float(row["x"]), "y": float(row["y"]),
+            "image_id": row["image_id"], "updated_at": row["updated_at"]}
+
+
+def hook_points(conn: sqlite3.Connection, pid: int) -> dict[str, tuple[float, float]]:
+    """sequence -> (x, y) px, for every hook point of the project."""
+    return {r["sequence"]: (float(r["x"]), float(r["y"])) for r in conn.execute(
+        "SELECT sequence, x, y FROM hook_points WHERE project_id=? ORDER BY sequence", (pid,))}
 
 
 def trained_model_dict(row: sqlite3.Row) -> dict:

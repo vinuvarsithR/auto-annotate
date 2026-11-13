@@ -75,6 +75,8 @@ def test_migrate_adds_polygon_and_keeps_every_row(tmp_path, schema):
     assert len(after["annotations"]) == 3
     for row in after["annotations"]:
         assert row.pop("polygon") is None  # old rows stay plain boxes
+    for row in after["projects"]:  # #30 columns: NULL = defaults
+        assert (row.pop("load_classes"), row.pop("hook_radius")) == (None, None)
     for t in ("projects", "images", "classes", "annotations"):
         assert after[t] == before[t], t
     assert [(j["id"], j["kind"], j["status"]) for j in after["jobs"]] == [(3, "detect", "done")]

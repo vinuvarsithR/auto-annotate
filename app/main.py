@@ -22,7 +22,7 @@ from typing import Callable
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import annotations, classes, images, imports, jobs, models, projects, weights
+from app.api import annotations, classes, hook, images, imports, jobs, models, projects, weights
 from app.api.errors import install_error_handlers
 from app.db import db
 from app.worker.worker import ImporterLoader, PipelineLoader, PusherLoader, Worker
@@ -116,7 +116,7 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                               register_trained=app.state.register_trained)
 
     install_error_handlers(app)
-    for module in (projects, images, imports, classes, jobs, annotations, models, weights):
+    for module in (projects, images, imports, classes, jobs, annotations, models, weights, hook):
         app.include_router(module.router, prefix="/api")
 
     # Endpoint 14 belongs to the export session; include it once it exists.
