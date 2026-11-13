@@ -1272,6 +1272,185 @@
    "message": "best.pt is not a loadable ultralytics checkpoint"
   }
  },
+ "GET /api/projects/1/hook": {
+  "load_classes": [
+   "rb",
+   "sb",
+   "biax"
+  ],
+  "load_classes_default": true,
+  "radius": 130.0,
+  "radius_default": true,
+  "points": [
+   {
+    "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+    "x": 616.0,
+    "y": 347.0,
+    "image_id": 10,
+    "updated_at": "2026-11-13T10:00:00Z"
+   }
+  ],
+  "sequences": [
+   {
+    "sequence": "biax__cam0_2026-09-29_18-48-25",
+    "images": 1,
+    "has_point": false
+   },
+   {
+    "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+    "images": 1,
+    "has_point": true
+   },
+   {
+    "sequence": "sb_evener__cam0_2026-09-29_18-57-19",
+    "images": 1,
+    "has_point": false
+   }
+  ]
+ },
+ "PUT /api/projects/1/hook/points (request)": {
+  "image_id": 10,
+  "x": 616,
+  "y": 347
+ },
+ "PUT /api/projects/1/hook/points": {
+  "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+  "x": 616.0,
+  "y": 347.0,
+  "image_id": 10,
+  "updated_at": "2026-11-13T10:00:00Z"
+ },
+ "DELETE /api/projects/1/hook/points/rb_load__cam0_2026-09-29_18-34-11": null,
+ "PATCH /api/projects/1/hook (request)": {
+  "load_classes": [
+   "rb",
+   "sb",
+   "biax"
+  ],
+  "radius": 120
+ },
+ "PATCH /api/projects/1/hook": {
+  "load_classes": [
+   "rb",
+   "sb",
+   "biax"
+  ],
+  "load_classes_default": false,
+  "radius": 120.0,
+  "radius_default": false,
+  "points": [
+   {
+    "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+    "x": 616.0,
+    "y": 347.0,
+    "image_id": 10,
+    "updated_at": "2026-11-13T10:00:00Z"
+   }
+  ],
+  "sequences": [
+   {
+    "sequence": "biax__cam0_2026-09-29_18-48-25",
+    "images": 1,
+    "has_point": false
+   },
+   {
+    "sequence": "rb_load__cam0_2026-09-29_18-34-11",
+    "images": 1,
+    "has_point": true
+   },
+   {
+    "sequence": "sb_evener__cam0_2026-09-29_18-57-19",
+    "images": 1,
+    "has_point": false
+   }
+  ]
+ },
+ "error example (400 bad_request, #28 point outside the image)": {
+  "error": {
+   "code": "bad_request",
+   "message": "x must be in 0..1280 and y in 0..720"
+  }
+ },
+ "error example (404 not_found, #29 no hook point)": {
+  "error": {
+   "code": "not_found",
+   "message": "no hook point for sequence biax__cam0_2026-09-29_18-48-25"
+  }
+ },
+ "error example (400 bad_request, #9 masks needs owlv2 examples)": {
+  "error": {
+   "code": "bad_request",
+   "message": "masks is only for model owlv2 in mode examples"
+  }
+ },
+ "POST /api/projects/1/jobs (owlv2 examples + sam2) request": {
+  "model": "owlv2",
+  "mode": "examples",
+  "image_ids": null,
+  "options": {},
+  "masks": "sam2"
+ },
+ "GET /api/jobs/12 (detect, examples, owlv2 + sam2)": {
+  "id": 12,
+  "project_id": 1,
+  "kind": "detect",
+  "status": "done",
+  "progress": 1.0,
+  "done": 3,
+  "total": 3,
+  "error": null,
+  "config": {
+   "model": "owlv2",
+   "mode": "examples",
+   "image_ids": null,
+   "options": {},
+   "masks": "sam2"
+  },
+  "result": {
+   "mode": "examples",
+   "examples_by_class": {
+    "person": 30,
+    "rb": 12,
+    "biax": 6
+   },
+   "skipped_classes": [
+    {
+     "class_name": "sb",
+     "reason": "needs at least 5 examples"
+    }
+   ],
+   "masks": "sam2",
+   "hook": {
+    "load_classes": [
+     "rb",
+     "sb",
+     "biax"
+    ],
+    "radius": 130.0,
+    "points": {
+     "rb_load__cam0_2026-09-29_18-34-11": [
+      616.0,
+      347.0
+     ]
+    },
+    "warnings": [
+     {
+      "sequence": "biax__cam0_2026-09-29_18-48-25",
+      "images": 1,
+      "reason": "no hook point"
+     },
+     {
+      "sequence": "sb_evener__cam0_2026-09-29_18-57-19",
+      "images": 1,
+      "reason": "no hook point"
+     }
+    ]
+   }
+  },
+  "created_at": "2026-11-13T10:05:00Z",
+  "started_at": "2026-11-13T10:05:00Z",
+  "finished_at": "2026-11-13T10:07:00Z"
+ },
  "all_annotations": [
   {
    "id": 101,

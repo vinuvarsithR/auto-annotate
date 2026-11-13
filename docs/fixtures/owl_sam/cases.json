@@ -1,0 +1,719 @@
+{
+ "_note": "Cases for docs/CONTRACT.md 'OWLv2 + SAM 2 polygons'. bbox = [x, y, w, h] px, image 1280x720, image_id 'img1'. Compare numbers with a 1e-6 tolerance; output order matters.",
+ "merge": [
+  {
+   "name": "smaller fully inside: union, higher score, in the place of the larger box",
+   "input": [
+    {
+     "category": "person",
+     "bbox": [
+      900,
+      50,
+      40,
+      40
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      100,
+      100,
+      200,
+      100
+     ],
+     "score": 0.6
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      120,
+      110,
+      100,
+      80
+     ],
+     "score": 0.8
+    }
+   ],
+   "output": [
+    {
+     "category": "person",
+     "bbox": [
+      900,
+      50,
+      40,
+      40
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      100,
+      100,
+      200,
+      100
+     ],
+     "score": 0.8
+    }
+   ]
+  },
+  {
+   "name": "exactly 80% inside: merged (>=)",
+   "input": [
+    {
+     "category": "sb",
+     "bbox": [
+      60,
+      300,
+      160,
+      50
+     ],
+     "score": 0.3
+    },
+    {
+     "category": "sb",
+     "bbox": [
+      140,
+      300,
+      100,
+      50
+     ],
+     "score": 0.5
+    }
+   ],
+   "output": [
+    {
+     "category": "sb",
+     "bbox": [
+      60,
+      300,
+      180,
+      50
+     ],
+     "score": 0.5
+    }
+   ]
+  },
+  {
+   "name": "79% inside: both kept",
+   "input": [
+    {
+     "category": "sb",
+     "bbox": [
+      59,
+      300,
+      160,
+      50
+     ],
+     "score": 0.3
+    },
+    {
+     "category": "sb",
+     "bbox": [
+      140,
+      300,
+      100,
+      50
+     ],
+     "score": 0.5
+    }
+   ],
+   "output": [
+    {
+     "category": "sb",
+     "bbox": [
+      59,
+      300,
+      160,
+      50
+     ],
+     "score": 0.3
+    },
+    {
+     "category": "sb",
+     "bbox": [
+      140,
+      300,
+      100,
+      50
+     ],
+     "score": 0.5
+    }
+   ]
+  },
+  {
+   "name": "different class fully inside: both kept",
+   "input": [
+    {
+     "category": "sb",
+     "bbox": [
+      380,
+      380,
+      200,
+      200
+     ],
+     "score": 0.4
+    },
+    {
+     "category": "person",
+     "bbox": [
+      400,
+      400,
+      50,
+      50
+     ],
+     "score": 0.9
+    }
+   ],
+   "output": [
+    {
+     "category": "sb",
+     "bbox": [
+      380,
+      380,
+      200,
+      200
+     ],
+     "score": 0.4
+    },
+    {
+     "category": "person",
+     "bbox": [
+      400,
+      400,
+      50,
+      50
+     ],
+     "score": 0.9
+    }
+   ]
+  },
+  {
+   "name": "chain of 3 nested: one box",
+   "input": [
+    {
+     "category": "biax",
+     "bbox": [
+      500,
+      500,
+      20,
+      20
+     ],
+     "score": 0.7
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      490,
+      490,
+      60,
+      40
+     ],
+     "score": 0.2
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      480,
+      480,
+      100,
+      80
+     ],
+     "score": 0.4
+    }
+   ],
+   "output": [
+    {
+     "category": "biax",
+     "bbox": [
+      480,
+      480,
+      100,
+      80
+     ],
+     "score": 0.7
+    }
+   ]
+  },
+  {
+   "name": "smaller pokes out: the union is bigger than both",
+   "input": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      100,
+      100
+     ],
+     "score": 0.4
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      10,
+      10,
+      100,
+      90
+     ],
+     "score": 0.6
+    }
+   ],
+   "output": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      110,
+      100
+     ],
+     "score": 0.6
+    }
+   ]
+  }
+ ],
+ "hook_filter": [
+  {
+   "name": "distance: 130 px kept, 131 px dropped, then one load",
+   "hook": [
+    616,
+    347
+   ],
+   "radius": 130,
+   "load_classes": [
+    "rb",
+    "sb",
+    "biax"
+   ],
+   "input": [
+    {
+     "category": "sb",
+     "bbox": [
+      697,
+      322,
+      100,
+      50
+     ],
+     "score": 0.9
+    },
+    {
+     "category": "person",
+     "bbox": [
+      10,
+      10,
+      40,
+      40
+     ],
+     "score": 0.2
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      696,
+      322,
+      100,
+      50
+     ],
+     "score": 0.5
+    }
+   ],
+   "output": [
+    {
+     "category": "person",
+     "bbox": [
+      10,
+      10,
+      40,
+      40
+     ],
+     "score": 0.2
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      696,
+      322,
+      100,
+      50
+     ],
+     "score": 0.5
+    }
+   ]
+  },
+  {
+   "name": "one load per image: highest score, first on a tie; persons untouched",
+   "hook": [
+    616,
+    347
+   ],
+   "radius": 130,
+   "load_classes": [
+    "rb",
+    "sb",
+    "biax"
+   ],
+   "input": [
+    {
+     "category": "biax",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      566,
+      297,
+      100,
+      100
+     ],
+     "score": 0.7
+    },
+    {
+     "category": "person",
+     "bbox": [
+      600,
+      600,
+      30,
+      30
+     ],
+     "score": 0.1
+    },
+    {
+     "category": "sb",
+     "bbox": [
+      516,
+      337,
+      200,
+      20
+     ],
+     "score": 0.7
+    },
+    {
+     "category": "person",
+     "bbox": [
+      700,
+      600,
+      30,
+      30
+     ],
+     "score": 0.6
+    }
+   ],
+   "output": [
+    {
+     "category": "rb",
+     "bbox": [
+      566,
+      297,
+      100,
+      100
+     ],
+     "score": 0.7
+    },
+    {
+     "category": "person",
+     "bbox": [
+      600,
+      600,
+      30,
+      30
+     ],
+     "score": 0.1
+    },
+    {
+     "category": "person",
+     "bbox": [
+      700,
+      600,
+      30,
+      30
+     ],
+     "score": 0.6
+    }
+   ]
+  },
+  {
+   "name": "no hook point: nothing filtered, no one-load rule either",
+   "hook": null,
+   "radius": 130,
+   "load_classes": [
+    "rb",
+    "sb",
+    "biax"
+   ],
+   "input": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      50,
+      50
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "sb",
+     "bbox": [
+      1000,
+      600,
+      100,
+      20
+     ],
+     "score": 0.6
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    }
+   ],
+   "output": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      50,
+      50
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "sb",
+     "bbox": [
+      1000,
+      600,
+      100,
+      20
+     ],
+     "score": 0.6
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    }
+   ]
+  },
+  {
+   "name": "custom load classes: only biax is a load",
+   "hook": [
+    616,
+    347
+   ],
+   "radius": 130,
+   "load_classes": [
+    "biax"
+   ],
+   "input": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      50,
+      50
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      1000,
+      600,
+      40,
+      20
+     ],
+     "score": 0.9
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    }
+   ],
+   "output": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      50,
+      50
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "biax",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    }
+   ]
+  },
+  {
+   "name": "empty load classes: nothing filtered",
+   "hook": [
+    616,
+    347
+   ],
+   "radius": 130,
+   "load_classes": [],
+   "input": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      50,
+      50
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    }
+   ],
+   "output": [
+    {
+     "category": "rb",
+     "bbox": [
+      0,
+      0,
+      50,
+      50
+     ],
+     "score": 0.5
+    },
+    {
+     "category": "rb",
+     "bbox": [
+      596,
+      337,
+      40,
+      20
+     ],
+     "score": 0.4
+    }
+   ]
+  }
+ ],
+ "hook_warnings": [
+  {
+   "name": "worker: run images from 3 sequences, only one has a point",
+   "load_classes": [
+    "rb",
+    "sb",
+    "biax"
+   ],
+   "radius": 130.0,
+   "classes_ran": [
+    "person",
+    "rb",
+    "biax"
+   ],
+   "images": [
+    "rb_load__cam0_2026-09-29_18-34-11_00049.jpg",
+    "rb_load__cam0_2026-09-29_18-34-11_00050.jpg",
+    "biax__cam0_2026-09-29_18-48-25_00290.jpg",
+    "loose_photo.jpg"
+   ],
+   "points": {
+    "rb_load__cam0_2026-09-29_18-34-11": [
+     616.0,
+     347.0
+    ],
+    "sb_evener__cam0_2026-09-29_18-57-19": [
+     500.0,
+     360.0
+    ]
+   },
+   "result_hook": {
+    "load_classes": [
+     "rb",
+     "sb",
+     "biax"
+    ],
+    "radius": 130.0,
+    "points": {
+     "rb_load__cam0_2026-09-29_18-34-11": [
+      616.0,
+      347.0
+     ]
+    },
+    "warnings": [
+     {
+      "sequence": "biax__cam0_2026-09-29_18-48-25",
+      "images": 1,
+      "reason": "no hook point"
+     },
+     {
+      "sequence": "loose_photo",
+      "images": 1,
+      "reason": "no hook point"
+     }
+    ]
+   }
+  },
+  {
+   "name": "worker: no load class ran, so no warnings",
+   "load_classes": [
+    "rb",
+    "sb",
+    "biax"
+   ],
+   "radius": 130.0,
+   "classes_ran": [
+    "person"
+   ],
+   "images": [
+    "biax__cam0_2026-09-29_18-48-25_00290.jpg"
+   ],
+   "points": {},
+   "result_hook": {
+    "load_classes": [
+     "rb",
+     "sb",
+     "biax"
+    ],
+    "radius": 130.0,
+    "points": {},
+    "warnings": []
+   }
+  }
+ ]
+}

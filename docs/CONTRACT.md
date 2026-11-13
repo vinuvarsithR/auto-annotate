@@ -105,6 +105,19 @@ CREATE TABLE trained_models (            -- #24 - #26; migrate() creates it if m
   deleted_at   TEXT,                     -- set by #26; the row is kept
   UNIQUE (project_id, version)
 );
+
+CREATE TABLE hook_points (               -- #27 - #30 (OWLv2 + SAM 2); migrate() creates it if missing
+  project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  sequence     TEXT NOT NULL,            -- autolabel.sequences.sequence_of(images.file_name)
+  x            REAL NOT NULL,            -- hook point in image pixels
+  y            REAL NOT NULL,
+  image_id     INTEGER REFERENCES images(id) ON DELETE SET NULL,  -- the image it was clicked on
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (project_id, sequence)
+);
+-- projects gets two columns (migrate() adds them if missing; not part of the Project JSON):
+--   load_classes TEXT   -- JSON list of class names, NULL = default ["rb", "sb", "biax"]
+--   hook_radius  REAL   -- px, NULL = default 130
 ```
 
 Status rules (the backend enforces them):
@@ -146,7 +159,8 @@ set, the bbox is **always** the polygon's bounding box, computed by the server (
 points times the image width/height). `migrate()` adds the column on startup
 (`ALTER TABLE annotations ADD COLUMN polygon TEXT`) if missing; old rows stay NULL (plain boxes), no
 rebuild is needed. `drop_overlapping` uses the bbox only. Model boxes have `polygon` NULL, except
-`yoloe` boxes (#9, examples mode). `polygon` and `mask` are independent; #14 and #21 use `polygon`
+`yoloe` boxes (#9, examples mode), trained `segment` models and `owlv2` examples boxes from a job with
+`masks: "sam2"` (OWLv2 + SAM 2 section). `polygon` and `mask` are independent; #14 and #21 use `polygon`
 first (see #14).
 
 Image review status (`images.review_status`):
@@ -241,6 +255,10 @@ Error codes (the UI may rely on these; `message` is for humans and may change):
 | 24 | POST | `/projects/{pid}/weights` | upload trained `.pt` weights (multipart) |
 | 25 | GET | `/projects/{pid}/weights` | list the project's uploaded models |
 | 26 | DELETE | `/weights/{wid}` | delete an uploaded model |
+| 27 | GET | `/projects/{pid}/hook` | hook settings + hook points per video |
+| 28 | PUT | `/projects/{pid}/hook/points` | set the hook point of one video (by a clicked image) |
+| 29 | DELETE | `/projects/{pid}/hook/points/{sequence}` | clear the hook point of one video |
+| 30 | PATCH | `/projects/{pid}/hook` | change load classes / radius |
 
 ### 1. POST /projects
 Request `{"name": "eot_crane"}`. Response 201 is a **Project**:
@@ -345,7 +363,7 @@ A detector learns from the project's own boxes, with no training. Detectors and 
 |---|---|---|---|---|
 | `yoloe` | `examples` | new | `yoloe_examples` | yes |
 | `owlv2` | `text` | exists, unchanged | `owlv2` | no |
-| `owlv2` | `examples` | new | `owlv2_image` | no |
+| `owlv2` | `examples` | new | `owlv2_image` | only with `masks: "sam2"` (OWLv2 + SAM 2 section) |
 | `fake` | `text`, `examples` | `examples` returns its usual boxes for classes with examples | `fake` | no |
 
 `yoloe` stays the default detector for examples mode: the one to use unless there is a reason to
@@ -1009,6 +1027,193 @@ Who builds what (Train on Colab):
 | export | `yolo-seg` in `autolabel/export/formats.py`; `segmentation` + polygon `area` in `to_coco` and `coco_for_image`; polygon rows in `autolabel/importers/yolo.py` and `coco.py`; the per-file COCO note; the #21 test upload to `test-g9qbh`. Tests from `docs/fixtures/polygons/`. |
 | ui | Spec in `docs/agents/ui.md`: show polygon outlines, draw new polygons, move / add / delete vertices, copy/paste and Repeat previous keep the polygon, undo keeps the polygon, `yolo-seg` in the export format choice, polygon rules in the `?mock=1` layer. |
 | models | nothing |
+
+### OWLv2 + SAM 2 polygons (#27 - #30, #9 `masks`)
+Approved 2026-11-13 from spike v2 (`D:\autoannotate\spikes\owl_sam_spike_v2\results_v2.md`,
+`choices.json`; all values picked on train frames, scored on 40 test frames). After `owlv2` examples-mode
+detection, four steps run in this order, per image:
+
+| # | Step | Runs when | Spike effect on test (all classes, VERIFIED) |
+|---|---|---|---|
+| 1 | containment merge | every `owlv2` examples job | box F1 0.52 -> 0.55 |
+| 2 | hook filter + one load per image | every `owlv2` examples job, on images whose video has a hook point | 0.55 -> 0.73 (63 load boxes dropped, 0 true positives lost) |
+| 3 | SAM 2.1 tiny mask from the box | `masks: "sam2"` | mask F1 0.72 -> 0.73 |
+| 4 | mask -> one polygon, no box fallback | `masks: "sam2"` | see step 4 (largest part: test mask F1 0.72) |
+
+Text mode, other detectors and other modes are unchanged. Speed (spike v1, Windows CPU, VERIFIED): OWLv2
+4.59 s/img + SAM 2.1 tiny 1.96 s/img.
+
+**Step 1, containment merge** (`merge_contained`). Two boxes of the **same class**, where the one with
+the smaller-or-equal area has **>= 80%** of its area inside the other (intersection / smaller area >= 0.8)
+-> one box: the **union** of the two bboxes, `score` = the higher of the two, every other field from the
+larger box. Repeat until no pair is left. Scan order (makes results exact): for `i` in list order, for `j`
+in list order, `j != i`, the first pair where `j` is the smaller-or-equal box and the rule holds: the merged
+box replaces item `i` in place, item `j` is removed, start again. Different classes never merge.
+
+**Step 2, hook filter** (`hook_filter`). Per video (= `sequence_of(images.file_name)`, the same key as the
+#23 split), the project may have one hook point (x, y px, set by a click in the UI). Load classes =
+project setting (#30), default `["rb", "sb", "biax"]`; names that are not project classes are ignored.
+
+| Rule | Value |
+|---|---|
+| Distance | center of the bbox to the hook point, Euclidean px. A load box with distance **> radius** is dropped; `<=` is kept. Radius = project setting (#30), default **130** px. |
+| One load per image | after the distance rule, keep only the load box with the highest `score` (on a tie, the first in list order); all load classes count together. Non-load boxes are never touched. |
+| No hook point for the image's video | nothing is filtered on that image (neither rule), and the job `result` gets a warning for that video (below) |
+| Load classes empty | the step is off: nothing filtered, no warnings |
+| When read | hook points and settings are read once at job start (worker step 1) and fixed for the job |
+
+**Step 3, SAM mask** (`Segmenter`, `clean_mask`).
+
+| Rule | Value |
+|---|---|
+| Model | SAM 2.1 tiny through ultralytics (`ultralytics==8.4.199`, as in `requirements.txt`), CPU. Weights: `AUTOLABEL_SAM_WEIGHTS`, else `models/sam2.1_t.pt` under the repo root (gitignored). Missing file -> the job fails with a one-line error before the first image; it never downloads. Loaded once per process, lazily. |
+| Prompt | the box (after steps 1-2), pixels, one call per image for all its boxes, `multimask_output=True` (3 masks + 3 scores per box), masks at image size. The spike's call path is `predictor.set_image` + `predictor.inference_features(..., bboxes=..., multimask_output=True)` (`steps.py`, VERIFIED on 8.4.199); models may use any call that gives the same masks. |
+| Pick | among the box's masks that are non-empty and have **>= 90%** of their pixels inside the box grown by **5 px** on each side: the one with the highest SAM score. None qualifies -> the mask with the highest inside fraction. |
+| Opening | `cv2.morphologyEx(MORPH_OPEN)` with a **5 x 5** `MORPH_ELLIPSE` kernel. If that empties the mask, keep the mask from before the opening. |
+| Clip | pixels outside the box (`floor(x0)..ceil(x1)`, `floor(y0)..ceil(y1)`, inclusive) are cleared |
+
+**Step 4, mask -> polygon: single largest part** (`largest_polygon`). `cv2.findContours(RETR_EXTERNAL)`
+gives the parts (holes dropped); the part with the largest `cv2.contourArea` is used, **always** (no 90%
+rule, unlike `yoloe`). Simplify as `yoloe` (`approxPolyDP`, closed, tolerance 0.001 x the image's longest
+side), divide by width / height, round to 6 decimals. Then `polygon` = that ring and `bbox` = its bounding
+box (section 1 rule), `score`, `category` and `source` (`owlv2_image`) unchanged, `mask` None.
+**No box fallback:** an empty mask, or a polygon with fewer than 3 points or zero area -> the box is
+dropped (not stored).
+
+Why one part and not multi-part (spike chose multi-part):
+
+| Where the polygon goes | One ring | Several rings |
+|---|---|---|
+| `annotations.polygon`, API, section conventions | yes (the convention is "one outer ring") | needs a new shape and migration |
+| #14 / #23 `yolo-seg` (one line = one object, one ring) | yes | no: two lines would be two objects |
+| #14 COCO `segmentation` | yes | yes (COCO allows a list of parts) |
+| #21 Roboflow push (`coco_for_image`, one ring) | yes, tested 2026-11-04 | not tested (GUESS) |
+| #22 import of our own COCO export | yes | no: multi-part is imported as box only |
+| UI polygon editor | yes | no |
+
+Cost on the spike (VERIFIED, `results_v2.md`): train frames tie (mask F1 0.706 both); test frames mask
+F1 0.72 vs 0.75 and box F1 0.71 vs 0.74 (the box shrinks to the largest part when a beam splits). Small
+sample: one sb or biax object moves F1 by about 0.1. Multi-part can come later as its own change.
+
+#### #9 change: `masks`
+Request, examples mode with `owlv2`:
+```json
+{"model": "owlv2", "mode": "examples", "image_ids": null, "options": {}, "masks": "sam2"}
+```
+
+| Rule | Value |
+|---|---|
+| `masks` | optional top-level field (like `mode`, never in `options`): `"sam2"` or `"none"`. Absent = `"none"`. Any other value -> 400 `bad_request`. |
+| Allowed for | resolved `model` `owlv2` and `mode` `examples` only; `masks` present (any value) on another model or mode -> 400 `bad_request` |
+| `config.masks` | stored only when the request sent it, so older jobs and other jobs keep their `config` shape |
+| `rerun` | also copies `config.masks` from the source job when present (`rerun` itself still takes no other field) |
+| Check order | after `unknown_mode`, before `no_classes` |
+
+`result` of an `owlv2` examples job (written at worker step 3, as the other keys) gets two more keys:
+```json
+{"mode": "examples", "examples_by_class": {"person": 30, "rb": 12, "biax": 6},
+ "skipped_classes": [{"class_name": "sb", "reason": "needs at least 5 examples"}],
+ "masks": "sam2",
+ "hook": {"load_classes": ["rb", "sb", "biax"], "radius": 130.0,
+          "points": {"rb_load__cam0_2026-09-29_18-34-11": [616.0, 347.0]},
+          "warnings": [{"sequence": "biax__cam0_2026-09-29_18-48-25", "images": 1, "reason": "no hook point"}]}}
+```
+
+| Key | Rule |
+|---|---|
+| `masks` | `"sam2"` or `"none"` (the resolved value) |
+| `hook.load_classes`, `hook.radius` | the effective settings used (defaults filled in) |
+| `hook.points` | sequence -> `[x, y]`, only for sequences that have at least one image in this job |
+| `hook.warnings` | one entry per sequence with images in this job and no hook point, sorted by `sequence`; `images` = how many of this job's images are in it; `reason` is always `"no hook point"`. `[]` when no load class ran in this job, or load classes are empty. |
+
+Other detectors' `result` keep exactly the keys of #9 (no `masks`, no `hook`).
+
+#### 27. GET /projects/{pid}/hook
+Response 200 **HookSettings**:
+```json
+{"load_classes": ["rb", "sb", "biax"], "load_classes_default": true, "radius": 130.0, "radius_default": true,
+ "points": [{"sequence": "rb_load__cam0_2026-09-29_18-34-11", "x": 616.0, "y": 347.0, "image_id": 10,
+             "updated_at": "2026-11-13T10:00:00Z"}],
+ "sequences": [{"sequence": "biax__cam0_2026-09-29_18-48-25", "images": 1, "has_point": false},
+               {"sequence": "rb_load__cam0_2026-09-29_18-34-11", "images": 1, "has_point": true},
+               {"sequence": "sb_evener__cam0_2026-09-29_18-57-19", "images": 1, "has_point": false}]}
+```
+`points` sorted by `sequence`; `image_id` may be `null` (image gone). `sequences` = every sequence of the
+project's images, sorted, with its image count. A point may exist for a sequence with no images left; it
+is listed in `points` only. `*_default` = the value is the default (the DB column is NULL). Unknown pid -> 404.
+
+#### 28. PUT /projects/{pid}/hook/points
+```json
+{"image_id": 10, "x": 616, "y": 347}
+```
+Sets (or replaces) the hook point of that image's video: `sequence = sequence_of(image.file_name)`,
+`image_id` stored. Response 200 is the point (one item of #27 `points`). Errors, in order: unknown pid ->
+404 `not_found`; bad body (missing field, extra field, `x`/`y` not finite numbers) -> 400 `bad_request`;
+image not in this project -> 400 `bad_image_ids`; `x` outside `0..width` or `y` outside `0..height` of that
+image -> 400 `bad_request`.
+
+#### 29. DELETE /projects/{pid}/hook/points/{sequence}
+`sequence` is URL-encoded. Response **204**. Unknown pid, or no point for that sequence -> 404 `not_found`.
+
+#### 30. PATCH /projects/{pid}/hook
+```json
+{"load_classes": ["rb", "sb", "biax"], "radius": 120}
+```
+Both optional; `null` resets that one to its default. `load_classes`: list of distinct current class
+names of the project (`[]` allowed = filter off); an unknown or repeated name -> 400 `bad_request`.
+`radius`: finite number > 0, else 400 `bad_request`. Extra fields -> 400 `bad_request`. Response 200 is
+HookSettings (#27). A later class delete (#8) does not change the setting; deleted names are ignored at
+job time.
+
+#18 also removes the project's `hook_points` rows (ON DELETE CASCADE).
+
+#### Python interface (owner: models)
+```python
+# autolabel/models/base.py
+@dataclass(frozen=True)
+class PostProcess:                 # worker -> pipeline.run, one per job
+    load_classes: tuple[str, ...] = ("rb", "sb", "biax")
+    radius: float = 130.0
+    hooks: dict = field(default_factory=dict, hash=False, compare=False)
+                                   # image_id (str, as passed to run) -> (x, y) px; missing = no hook filter
+    masks: str = "none"            # "sam2" | "none"
+
+# autolabel/models/postprocess.py (steps 1-2, pure, no torch)
+CONTAIN_FRAC = 0.8
+def merge_contained(preds: list[Prediction], frac: float = CONTAIN_FRAC) -> list[Prediction]: ...
+def hook_filter(preds: list[Prediction], hook: tuple[float, float] | None,
+                load_classes: Iterable[str], radius: float) -> list[Prediction]: ...
+
+# autolabel/models/sam.py (steps 3-4)
+class Segmenter(Protocol):
+    def segment(self, image: Image.Image, boxes: list[tuple]) -> list[tuple[np.ndarray, np.ndarray]]: ...
+    # boxes (x, y, w, h) px; per box: (masks bool k x H x W at image size, scores float k), k >= 1
+def get_segmenter() -> Segmenter: ...      # SAM 2.1 tiny, cached per process; missing weights ->
+                                           # FileNotFoundError with a one-line message
+class FakeSegmenter:                       # tests: k = 1, the filled ellipse inscribed in the box, score 0.9
+    ...
+def clean_mask(masks, scores, bbox: tuple, open_px: int = 5) -> np.ndarray: ...   # step 3 pick/open/clip
+def largest_polygon(mask: np.ndarray, width: int, height: int) -> list | None: ...  # step 4; None = drop
+def add_polygons(image: Image.Image, preds: list[Prediction], segmenter: Segmenter) -> list[Prediction]: ...
+
+# autolabel/pipeline.py: run() gets two keyword arguments
+def run(..., post: PostProcess | None = None, segmenter: Segmenter | None = None): ...
+    # post set: per image, after detection: merge_contained -> hook_filter(hooks.get(image_id)) ->
+    # if post.masks == "sam2": add_polygons (segmenter, else get_segmenter(), fetched before the
+    # first image). post None: exactly as today. Applies to whatever detector runs (tests use fake).
+```
+The worker passes `post` only for `owlv2` examples jobs; then the usual delete + `drop_overlapping`
+(section 1) runs on what `run` yields.
+
+#### Who builds what (OWLv2 + SAM 2)
+
+| Role | Builds | Tests (must pass) |
+|---|---|---|
+| models | `PostProcess` in `base.py`; `autolabel/models/postprocess.py`; `autolabel/models/sam.py` (`get_segmenter`, `FakeSegmenter`, `clean_mask`, `largest_polygon`, `add_polygons`); `pipeline.run(post=, segmenter=)` | `tests/test_models_postprocess.py`: every case in `docs/fixtures/owl_sam/cases.json` `merge` and `hook_filter`. `tests/test_models_sam.py` with `FakeSegmenter` and numpy masks only (no weights): multimask pick (inside rule + fallback), opening, opening that empties, clip, two-part mask -> largest part + bbox, empty mask -> box dropped, missing weights -> `FileNotFoundError`. `tests/test_pipeline_*.py`: `run(post=...)` with `fake` + `FakeSegmenter`, order of the steps. |
+| backend | `hook_points` table, the two `projects` columns, `migrate()`; #27 - #30; #9 `masks` (checks, `config.masks`, `rerun` copy); worker: read settings + points at job start, build `PostProcess` (hooks by image id via `sequence_of`), pass it for `owlv2` examples jobs, `result.masks` + `result.hook` (warnings). Tests use the existing fake pipeline, no SAM. | `tests/test_api_hook.py` (#27 - #30 incl. errors, keys = fixtures), `tests/test_worker_*.py`: `cases.json` `hook_warnings`, `PostProcess` passed only for `owlv2` examples, `masks` 400s, `rerun` copies `masks` |
+| ui | examples mode with `owlv2`: a "SAM 2 masks" toggle (sends `masks`); on the review page, a "Set hook point" action: click on the image -> #28 with image-pixel coords, draws the point and the radius circle, "Clear" -> #29; shows `result.hook.warnings` after a job; `?mock=1` from the fixtures | manual check |
+| export | nothing: rows have one polygon ring, as today | - |
+| integrator | this section, `docs/fixtures/owl_sam/cases.json`, fixtures #27 - #30 + job 12 in `api_samples.json` | full `pytest` at merge |
 
 ## 3. Detector interface (Python)
 

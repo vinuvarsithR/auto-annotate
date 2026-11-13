@@ -79,6 +79,10 @@ Next:
   the image's non-rejected boxes to `pipeline.drop_overlapping`, store what it returns). Not wired
   yet: nothing calls drop_overlapping (verified 2026-11-03).
 - ui: import screen for #22 (zip or folder upload, poll the import job, show `result`).
+- 2026-11-13 contract "OWLv2 + SAM 2 polygons" (#27-#30, #9 `masks`, fixtures docs/fixtures/owl_sam/):
+  models = merge/hook filter/SAM/polygon, backend = hook points + `masks` + result.hook, ui = hook click + toggle.
+  Polygon = single largest part (export/push/import/UI handle one ring only). SAM weights: AUTOLABEL_SAM_WEIGHTS
+  (D:\autoannotate\weights\sam2.1_t.pt on this machine).
 
 ## Phase 1 state
 
