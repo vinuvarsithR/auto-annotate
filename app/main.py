@@ -7,6 +7,8 @@ Run it (from the repo root, inside .venv):
 * API under /api (docs/CONTRACT.md section 2), UI from app/static at /.
 * data/app.db and data/uploads/ are created on startup.
 * A background worker thread runs detect, roboflow_push and import jobs (app/worker/worker.py).
+* Claude connector (app/assistant/): #31 - #35 under /api/assistant, the MCP server at /mcp/
+  (token / loopback gate), settings from .env read in the lifespan.
 * create_app(...) lets tests use a temp folder, a fake detector and no thread.
 """
 
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,10 +27,42 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import annotations, classes, hook, images, imports, jobs, models, projects, weights
 from app.api.errors import install_error_handlers
+from app.assistant import routes as assistant_routes
+from app.assistant.mcp_server import McpGate
 from app.db import db
 from app.worker.worker import ImporterLoader, PipelineLoader, PusherLoader, Worker
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def start_assistant(app: FastAPI, anthropic_client=None):
+    """Claude connector at startup: settings from .env, old downloads deleted, the chat manager,
+    and a NEW MCP Server for this app. Returns the Server (its session manager is run by the
+    caller), or None when the mcp package is missing (then /mcp/ answers 503)."""
+    from app.assistant import downloads
+    from app.assistant.chat import ChatManager
+    from app.assistant.settings import load_settings
+
+    settings = load_settings()
+    app.state.assistant_settings = settings
+    downloads.cleanup(app.state.data_dir)
+
+    def make_client():
+        if anthropic_client is not None:
+            return anthropic_client
+        import anthropic
+        return anthropic.Anthropic(api_key=settings.api_key)  # the only credential used
+
+    app.state.assistant_chat = ChatManager(app.state, settings, make_client)
+    try:
+        from app.assistant.mcp_server import build_http_app, build_server
+        server = build_server(app.state)
+        app.state.mcp_http_app = build_http_app(server, settings.token_required)
+    except ImportError:
+        logging.getLogger("app").warning("mcp package not installed: /mcp/ is off")
+        app.state.mcp_http_app = None
+        return None
+    return server
 
 
 def default_list_detectors() -> list[str]:
@@ -85,7 +120,10 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                static_dir: Path | None = STATIC_DIR,
                inspect_weights: Callable | None = None,
                register_trained: Callable | None = None,
-               unregister_trained: Callable | None = None) -> FastAPI:
+               unregister_trained: Callable | None = None,
+               anthropic_client=None) -> FastAPI:
+    """anthropic_client: None = built from ANTHROPIC_API_KEY on the first chat message;
+    tests pass a fake with .messages.create and .beta.messages.create."""
     data_dir = Path(data_dir)
     db_path = data_dir / "app.db"
 
@@ -98,10 +136,17 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
             clean_imports(data_dir / "imports", conn)
         finally:
             conn.close()
+        mcp_server = start_assistant(app, anthropic_client)
         if start_worker:
             app.state.worker.start()
-        yield
-        app.state.worker.stop()
+        try:
+            if mcp_server is not None:
+                async with mcp_server.session_manager.run():  # a session manager runs only once
+                    yield
+            else:
+                yield
+        finally:
+            app.state.worker.stop()
 
     app = FastAPI(title="auto-annotate", lifespan=lifespan)
     app.state.data_dir = data_dir
@@ -116,8 +161,10 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                               register_trained=app.state.register_trained)
 
     install_error_handlers(app)
-    for module in (projects, images, imports, classes, jobs, annotations, models, weights, hook):
+    for module in (projects, images, imports, classes, jobs, annotations, models, weights, hook,
+                   assistant_routes):
         app.include_router(module.router, prefix="/api")
+    app.mount("/mcp", McpGate(app.state), name="mcp")  # #36; not under /api
 
     # Endpoint 14 belongs to the export session; include it once it exists.
     if importlib.util.find_spec("app.api.export") is not None:
