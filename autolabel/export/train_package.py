@@ -5,23 +5,28 @@ Zip layout
 ----------
     data.yaml                       path /content/dataset, train/val folders, nc, names
     split.json                      which sequences went to train / val, and why (see below)
-    train.ipynb                     4-cell Colab notebook: intro, upload, train, download
+    train.ipynb                     4-cell Colab notebook: intro, upload, train, val + download
     images/train/<name>   labels/train/<stem>.txt
     images/val/<name>     labels/val/<stem>.txt     (absent when there is only one sequence)
 
 Images and label lines are exactly those of #14 (`yolo` for detect, `yolo-seg` for segment),
 built with the same functions. Train / val is split BY SEQUENCE (one video never lands in both),
 because neighbouring frames look almost the same and would make val look better than it is.
+
+The notebook's last cell writes `<run>_metrics.json` (final val mAP + the split); the app reads it
+back with `read_metrics` when the weights are imported (CONTRACT "Teammates + training routes").
 """
 
 from __future__ import annotations
 
 import io
 import json
+import math
 import re
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import Any, Callable
 
 from autolabel.export.formats import export_names, to_yolo
 from autolabel.export.select import (
@@ -39,10 +44,126 @@ ULTRALYTICS_PIN = "ultralytics==8.4.199"
 BASE_WEIGHTS = {"detect": "yolo11s.pt", "segment": "yolo11s-seg.pt"}
 IMGSZ = 960
 EPOCHS = 100
+EPOCHS_RANGE = (1, 500)
+IMGSZ_RANGE = (320, 2048)          # and a multiple of 32
+ALLOWED_WEIGHTS = {
+    "detect": tuple(f"yolo11{s}.pt" for s in "nsmlx"),
+    "segment": tuple(f"yolo11{s}-seg.pt" for s in "nsmlx"),
+}
+METRICS_FORMAT = "autolabel-metrics-1"
+METRICS_MAX_BYTES = 1024 * 1024
 
 
 class NoPolygons(Exception):
     """segment was asked but no exported box has a polygon (the route answers 409)."""
+
+
+class BadMetrics(Exception):
+    """A metrics file breaks a rule of the contract (the backend answers 400 bad_metrics)."""
+
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def check_train_options(task: Any, epochs: Any = EPOCHS, imgsz: Any = IMGSZ,
+                        base_weights: Any = None) -> str:
+    """
+    Checks the #23 options; returns the base weights to use (None -> BASE_WEIGHTS[task]).
+    Raises ValueError with a readable message (the route answers 400 bad_request).
+    """
+    if task not in TRAIN_TASKS:
+        raise ValueError(f"task must be one of {list(TRAIN_TASKS)}")
+    lo, hi = EPOCHS_RANGE
+    if not _is_int(epochs) or not lo <= epochs <= hi:
+        raise ValueError(f"epochs must be an int {lo}-{hi}")
+    lo, hi = IMGSZ_RANGE
+    if not _is_int(imgsz) or not lo <= imgsz <= hi or imgsz % 32:
+        raise ValueError(f"imgsz must be an int {lo}-{hi} and a multiple of 32")
+    if base_weights is None:
+        return BASE_WEIGHTS[task]
+    if base_weights not in ALLOWED_WEIGHTS[task]:
+        other = next(t for t in TRAIN_TASKS if t != task)
+        if base_weights in ALLOWED_WEIGHTS[other]:
+            raise ValueError(f"base_weights {base_weights} is for {other}, not {task}")
+        raise ValueError(f"base_weights must be one of {list(ALLOWED_WEIGHTS[task])} for {task}")
+    return base_weights
+
+
+# ------------------------------------------------------------------ metrics file
+
+def _bad(msg: str) -> BadMetrics:
+    return BadMetrics(f"metrics file: {msg}")
+
+
+def _check_maps(value: Any, key: str) -> dict:
+    if not isinstance(value, dict):
+        raise _bad(f"metrics.{key} must be an object with map50 and map50_95")
+    out = {}
+    for k in ("map50", "map50_95"):
+        v = value.get(k)
+        if (not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v)
+                or not 0 <= v <= 1):
+            raise _bad(f"metrics.{key}.{k} must be a number in [0, 1]")
+        out[k] = float(v)
+    return out
+
+
+def _check_utc(value: Any) -> None:
+    msg = "metrics.finished_at must be an ISO UTC string"
+    if not isinstance(value, str):
+        raise _bad(msg)
+    try:
+        t = datetime.fromisoformat(value)
+    except ValueError:
+        raise _bad(msg) from None
+    if t.utcoffset() != timedelta(0):
+        raise _bad(msg)
+
+
+def read_metrics(data: bytes, task: str) -> dict:
+    """
+    Reads a `<run>_metrics.json` written by the notebook. Returns {"metrics": ..., "split": ...}
+    (unknown keys inside `metrics` are dropped, `split` is returned unchanged).
+    Raises BadMetrics(message) when a contract rule is broken.
+    """
+    if not data:
+        raise _bad("file is empty")
+    if len(data) > METRICS_MAX_BYTES:
+        raise _bad("file is larger than 1 MB")
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise _bad("not UTF-8 JSON") from None
+    if not isinstance(doc, dict):
+        raise _bad("must be a JSON object")
+    if doc.get("format") != METRICS_FORMAT:
+        raise _bad(f"format must be {METRICS_FORMAT}")
+    if doc.get("task") != task:
+        raise _bad(f"task is {doc.get('task')!r}, the import's task is {task!r}")
+    split = doc.get("split")
+    if not isinstance(split, dict):
+        raise _bad("split must be an object (the package's split.json)")
+    m = doc.get("metrics")
+    if not isinstance(m, dict):
+        raise _bad("metrics must be an object")
+
+    box = _check_maps(m.get("box"), "box")
+    if task == "segment":
+        mask = _check_maps(m.get("mask"), "mask")
+    else:
+        if m.get("mask") is not None:
+            raise _bad("metrics.mask must be null for detect")
+        mask = None
+    for k in ("epochs", "imgsz"):
+        if not _is_int(m.get(k)) or m[k] < 1:
+            raise _bad(f"metrics.{k} must be a positive int")
+    if not isinstance(m.get("base_weights"), str):
+        raise _bad("metrics.base_weights must be a string")
+    _check_utc(m.get("finished_at"))
+    metrics = {"box": box, "mask": mask, "epochs": m["epochs"], "imgsz": m["imgsz"],
+               "base_weights": m["base_weights"], "finished_at": m["finished_at"]}
+    return {"metrics": metrics, "split": split}
 
 
 def safe_name(name: str) -> str:
@@ -102,8 +223,10 @@ def _cell(kind: str, text: str) -> dict:
     return cell
 
 
-def notebook(project_name: str, task: str, split: dict) -> dict:
+def notebook(project_name: str, task: str, split: dict, epochs: int = EPOCHS,
+             imgsz: int = IMGSZ, base_weights: str | None = None) -> dict:
     """The 4-cell Colab notebook of #23 as a JSON-ready dict."""
+    weights = base_weights or BASE_WEIGHTS[task]
     run = f"{safe_name(project_name)}_{task}"
     if split["val_is_train"]:
         counts = (f"{split['train']['images']} images, one sequence only: "
@@ -122,7 +245,8 @@ def notebook(project_name: str, task: str, split: dict) -> dict:
         "\n"
         "1. Run the **upload** cell and pick the training package zip.\n"
         "2. Run the **train** cell and wait until it finishes.\n"
-        f"3. Run the **download** cell; it saves `{run}_best.pt`. Upload that file in the app.\n"
+        f"3. Run the **check + download** cell; it checks the model on the val images and saves "
+        f"`{run}_best.pt` and `{run}_metrics.json`. Import both in the app.\n"
     )
     upload = (
         f"!pip install -q {ULTRALYTICS_PIN}\n"
@@ -136,15 +260,34 @@ def notebook(project_name: str, task: str, split: dict) -> dict:
     )
     train = (
         "from ultralytics import YOLO\n"
-        f'model = YOLO("{BASE_WEIGHTS[task]}")\n'
-        f'model.train(data="/content/dataset/data.yaml", imgsz={IMGSZ}, epochs={EPOCHS}, '
+        f'model = YOLO("{weights}")\n'
+        f'model.train(data="/content/dataset/data.yaml", imgsz={imgsz}, epochs={epochs}, '
         f'project="/content/runs", name="{run}", exist_ok=True)\n'
     )
+    mask = ('{"map50": float(m.seg.map50), "map50_95": float(m.seg.map)}'
+            if task == "segment" else "None")
     download = (
-        "import shutil\n"
+        "import datetime, json, shutil\n"
         "from google.colab import files\n"
+        "from ultralytics import YOLO\n"
         f'shutil.copy("/content/runs/{run}/weights/best.pt", "/content/{run}_best.pt")\n'
+        f'm = YOLO("/content/{run}_best.pt").val(data="/content/dataset/data.yaml", '
+        f'imgsz={imgsz}, split="val")\n'
+        'with open("/content/dataset/split.json", encoding="utf-8") as f:\n'
+        "    split = json.load(f)\n"
+        "metrics = {\n"
+        '    "box": {"map50": float(m.box.map50), "map50_95": float(m.box.map)},\n'
+        f'    "mask": {mask},\n'
+        f'    "epochs": {epochs}, "imgsz": {imgsz}, "base_weights": "{weights}",\n'
+        '    "finished_at": datetime.datetime.now(datetime.timezone.utc)'
+        '.strftime("%Y-%m-%dT%H:%M:%SZ"),\n'
+        "}\n"
+        f'with open("/content/{run}_metrics.json", "w", encoding="utf-8") as f:\n'
+        f'    json.dump({{"format": "{METRICS_FORMAT}", "source": "colab", "task": "{task}", '
+        '"split": split, "metrics": metrics}, f, indent=1)\n'
+        'print("val box mAP50", metrics["box"]["map50"], "mask", metrics["mask"])\n'
         f'files.download("/content/{run}_best.pt")\n'
+        f'files.download("/content/{run}_metrics.json")\n'
     )
     return {
         "nbformat": 4,
@@ -164,14 +307,14 @@ def notebook(project_name: str, task: str, split: dict) -> dict:
 
 def build_train_package(project_name: str, task: str,
                         images: list[dict], classes: list[dict], annotations: list[dict],
-                        image_bytes: Callable[[dict], bytes]) -> bytes:
+                        image_bytes: Callable[[dict], bytes], *, epochs: int = EPOCHS,
+                        imgsz: int = IMGSZ, base_weights: str | None = None) -> bytes:
     """
-    API JSON shapes in (as build_zip); returns the #23 zip. Raises ValueError (bad task),
-    NothingToExport (no done/empty image), NoPolygons. Calls image_bytes only for exported
-    images, and only after every check passed.
+    API JSON shapes in (as build_zip); returns the #23 zip. Raises ValueError (bad task or
+    option), NothingToExport (no done/empty image), NoPolygons. Calls image_bytes only for
+    exported images, and only after every check passed. base_weights None = BASE_WEIGHTS[task].
     """
-    if task not in TRAIN_TASKS:
-        raise ValueError(f"task must be one of {list(TRAIN_TASKS)}")
+    base_weights = check_train_options(task, epochs, imgsz, base_weights)
     chosen = exportable_images(images)
     if not chosen:
         raise NothingToExport("no image has review_status done or empty")
@@ -223,7 +366,8 @@ def build_train_package(project_name: str, task: str,
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("data.yaml", data_yaml)
         zf.writestr("split.json", json.dumps(split, indent=1))
-        zf.writestr("train.ipynb", json.dumps(notebook(project_name, task, split), indent=1))
+        zf.writestr("train.ipynb", json.dumps(notebook(project_name, task, split, epochs, imgsz,
+                                                         base_weights), indent=1))
         for im in chosen:
             part, name = part_of[im["id"]], names[im["id"]]
             zf.writestr(f"labels/{part}/{PurePosixPath(name).stem}.txt", labels[im["id"]])

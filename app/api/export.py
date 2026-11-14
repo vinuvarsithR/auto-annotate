@@ -21,15 +21,16 @@ from app.api.errors import ApiError
 from app.db import db
 from autolabel.export import (
     FORMATS,
-    TRAIN_TASKS,
     NoPolygons,
     NothingToExport,
     build_train_package,
     build_zip,
+    check_train_options,
     roboflow_settings,
     safe_name,
     validate_statuses,
 )
+from autolabel.export.train_package import EPOCHS, IMGSZ
 
 router = APIRouter()
 
@@ -111,12 +112,16 @@ def train_package(pid: int, body: Any = Body(default=None),
         body = {}
     if not isinstance(body, dict):
         raise ApiError(400, "bad_request", "body must be a JSON object")
-    extra = sorted(set(body) - {"task"})
+    extra = sorted(set(body) - {"task", "epochs", "imgsz", "base_weights"})
     if extra:
         raise ApiError(400, "bad_request", f"unknown field(s): {', '.join(extra)}")
     task = body.get("task", "detect")
-    if task not in TRAIN_TASKS:
-        raise ApiError(400, "bad_request", f"task must be one of {list(TRAIN_TASKS)}")
+    epochs = body.get("epochs", EPOCHS)
+    imgsz = body.get("imgsz", IMGSZ)
+    try:
+        base_weights = check_train_options(task, epochs, imgsz, body.get("base_weights"))
+    except ValueError as e:
+        raise ApiError(400, "bad_request", str(e))
 
     images, classes, annotations, paths = _load_rows(conn, pid)
 
@@ -128,7 +133,8 @@ def train_package(pid: int, body: Any = Body(default=None),
 
     try:
         blob = build_train_package(project["name"], task, images, classes, annotations,
-                                   image_bytes)
+                                   image_bytes, epochs=epochs, imgsz=imgsz,
+                                   base_weights=base_weights)
     except NothingToExport:
         raise ApiError(409, "conflict", f"project {pid} has no done or empty images to export")
     except NoPolygons:

@@ -321,3 +321,271 @@ def test_route_missing_image_file_is_404(tmp_path):
         Path(path).unlink()
         r = c.post(f"/api/projects/{s['pid']}/train-package")
         assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+
+
+# ------------------------------------------------------------------ options (#23 change, 2026-11-14)
+
+def _cells(z):
+    return [_code(c) for c in json.loads(z.read("train.ipynb"))["cells"]]
+
+
+def test_options_reach_cells_3_and_4(tp):
+    images, anns = seqs([("seqA", 10, 1), ("seqB", 3, 2)])
+    anns[0]["polygon"] = TRIANGLE
+    blob = tp.build_train_package("eot crane", "segment", images, CLASSES, anns,
+                                  lambda im: b"x", epochs=50, imgsz=640,
+                                  base_weights="yolo11m-seg.pt")
+    cells = _cells(zipfile.ZipFile(io.BytesIO(blob)))
+    assert len(cells) == 4
+    assert 'YOLO("yolo11m-seg.pt")' in cells[2]
+    assert "imgsz=640" in cells[2] and "epochs=50" in cells[2]
+    assert "imgsz=960" not in cells[2] and "epochs=100" not in cells[2]
+    assert "imgsz=640" in cells[3] and '"base_weights": "yolo11m-seg.pt"' in cells[3]
+    assert '"epochs": 50' in cells[3]
+
+
+def test_options_none_base_weights_is_default(tp):
+    images, anns = seqs([("seqA", 3, 1)])
+    blob = tp.build_train_package("p", "detect", images, CLASSES, anns, lambda im: b"x",
+                                  base_weights=None)
+    assert 'YOLO("yolo11s.pt")' in _cells(zipfile.ZipFile(io.BytesIO(blob)))[2]
+
+
+@pytest.mark.parametrize("task,kw", [
+    ("detect", {"epochs": 0}), ("detect", {"epochs": 501}), ("detect", {"epochs": True}),
+    ("detect", {"epochs": 5.0}), ("detect", {"imgsz": 319}), ("detect", {"imgsz": 2080}),
+    ("detect", {"imgsz": 650}), ("detect", {"imgsz": "960"}),
+    ("detect", {"base_weights": "yolo11s-seg.pt"}), ("segment", {"base_weights": "yolo11s.pt"}),
+    ("detect", {"base_weights": "yolov8s.pt"}), ("detect", {"base_weights": 3}),
+])
+def test_bad_options_raise_before_other_checks(tp, task, kw):
+    # no exportable image: a bad option must still be ValueError (400), not NothingToExport (409)
+    with pytest.raises(ValueError):
+        tp.build_train_package("p", task, [img(1, "seqA", 0, "todo")], CLASSES, [],
+                               lambda im: b"x", **kw)
+
+
+def test_option_edges_are_allowed(tp):
+    for task, w in (("detect", "yolo11x.pt"), ("segment", "yolo11n-seg.pt")):
+        assert tp.check_train_options(task, 1, 320, w) == w
+        assert tp.check_train_options(task, 500, 2048, None) == tp.train_package.BASE_WEIGHTS[task]
+
+
+# ------------------------------------------------------------------ cell 4 run with fake ultralytics
+
+class _FakeMaps:
+    def __init__(self, map50, map_):
+        self.map50, self.map = map50, map_
+
+
+def _run_cell4(tp, tmp_path, monkeypatch, task):
+    """Runs notebook cell 4 with /content -> tmp_path and fake google.colab / ultralytics."""
+    import sys
+    import types
+    images, anns = seqs([("seqA", 10, 1), ("seqB", 3, 2), ("seqC", 2, 1)])
+    anns[0]["polygon"] = TRIANGLE
+    z = build(tp, images, anns, task=task)
+    run = f"eot_crane_{task}"
+    content = tmp_path / "content"
+    (content / "dataset").mkdir(parents=True)
+    (content / "dataset" / "split.json").write_bytes(z.read("split.json"))
+    (content / "runs" / run / "weights").mkdir(parents=True)
+    (content / "runs" / run / "weights" / "best.pt").write_bytes(b"weights")
+
+    calls = {"val": [], "download": []}
+
+    class FakeYOLO:
+        def __init__(self, path):
+            self.path = path
+
+        def val(self, **kw):
+            calls["val"].append((self.path, kw))
+            return types.SimpleNamespace(box=_FakeMaps(0.81, 0.55), seg=_FakeMaps(0.78, 0.49))
+
+    ultra = types.ModuleType("ultralytics")
+    ultra.YOLO = FakeYOLO
+    colab = types.ModuleType("google.colab")
+    colab.files = types.SimpleNamespace(download=lambda p: calls["download"].append(p))
+    google = types.ModuleType("google")
+    google.colab = colab
+    for name, mod in (("ultralytics", ultra), ("google", google), ("google.colab", colab)):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    code = _cells(z)[3].replace("/content", content.as_posix())
+    exec(compile(code, "cell4", "exec"), {})
+    return z, run, content, calls
+
+
+@pytest.mark.parametrize("task", ["detect", "segment"])
+def test_cell4_writes_metrics_that_read_metrics_accepts(tp, tmp_path, monkeypatch, task):
+    z, run, content, calls = _run_cell4(tp, tmp_path, monkeypatch, task)
+    pt, js = content / f"{run}_best.pt", content / f"{run}_metrics.json"
+    assert pt.read_bytes() == b"weights"
+    assert calls["download"] == [pt.as_posix(), js.as_posix()]
+    ((path, kw),) = calls["val"]
+    assert path == pt.as_posix()
+    assert kw == {"data": f"{content.as_posix()}/dataset/data.yaml", "imgsz": 960, "split": "val"}
+
+    doc = json.loads(js.read_text(encoding="utf-8"))
+    assert doc["format"] == "autolabel-metrics-1" and doc["source"] == "colab"
+    assert doc["task"] == task
+    assert doc["split"] == split_of(z)
+    out = tp.read_metrics(js.read_bytes(), task)
+    assert out["split"] == split_of(z)
+    m = out["metrics"]
+    assert m["box"] == {"map50": 0.81, "map50_95": 0.55}
+    assert m["mask"] == ({"map50": 0.78, "map50_95": 0.49} if task == "segment" else None)
+    assert m["epochs"] == 100 and m["imgsz"] == 960
+    assert m["base_weights"] == tp.train_package.BASE_WEIGHTS[task]
+    assert m["finished_at"].endswith("Z")
+    same_keys(doc, FIXTURES["metrics file (eot_crane_segment_metrics.json)"])
+
+
+def test_cell4_text(tp):
+    images, anns = seqs([("seqA", 3, 1)])
+    cell = _cells(build(tp, images, anns))[3]
+    assert ".val(" in cell and 'split="val"' in cell and "_metrics.json" in cell
+    assert cell.count("files.download(") == 2
+    assert 'files.download("/content/eot_crane_detect_best.pt")' in cell
+    assert 'files.download("/content/eot_crane_detect_metrics.json")' in cell
+    assert "/content/dataset/split.json" in cell
+
+
+# ------------------------------------------------------------------ read_metrics
+
+def _metrics_doc():
+    return json.loads(json.dumps(FIXTURES["metrics file (eot_crane_segment_metrics.json)"]))
+
+
+def _enc(doc):
+    return json.dumps(doc).encode()
+
+
+def test_read_metrics_fixture(tp):
+    doc = _metrics_doc()
+    out = tp.read_metrics(_enc(doc), "segment")
+    assert out == {"metrics": doc["metrics"], "split": doc["split"]}
+
+
+def test_read_metrics_detect_mask_null(tp):
+    doc = _metrics_doc()
+    doc["task"], doc["metrics"]["mask"] = "detect", None
+    assert tp.read_metrics(_enc(doc), "detect")["metrics"]["mask"] is None
+    del doc["metrics"]["mask"]
+    assert tp.read_metrics(_enc(doc), "detect")["metrics"]["mask"] is None
+
+
+def test_read_metrics_ignores_other_keys(tp):
+    doc = _metrics_doc()
+    doc["extra"] = 1
+    doc["metrics"]["extra"] = {"x": 1}
+    doc["metrics"]["box"]["precision"] = 0.5
+    out = tp.read_metrics(_enc(doc), "segment")["metrics"]
+    assert "extra" not in out and out["box"] == {"map50": 0.81, "map50_95": 0.55}
+
+
+_DEL = object()
+
+
+def _set(path, value):
+    def change(doc):
+        d = doc
+        for k in path[:-1]:
+            d = d[k]
+        if value is _DEL:
+            del d[path[-1]]
+        else:
+            d[path[-1]] = value
+    return change
+
+
+BAD_RULES = {
+    "format wrong": _set(("format",), "autolabel-metrics-2"),
+    "format missing": _set(("format",), _DEL),
+    "task mismatch": _set(("task",), "detect"),
+    "split missing": _set(("split",), _DEL),
+    "split not object": _set(("split",), []),
+    "metrics missing": _set(("metrics",), _DEL),
+    "box missing": _set(("metrics", "box"), _DEL),
+    "box map50 > 1": _set(("metrics", "box", "map50"), 1.2),
+    "box map50 < 0": _set(("metrics", "box", "map50"), -0.1),
+    "box map50_95 str": _set(("metrics", "box", "map50_95"), "0.5"),
+    "box map50 bool": _set(("metrics", "box", "map50"), True),
+    "box map50 missing": _set(("metrics", "box", "map50"), _DEL),
+    "mask null for segment": _set(("metrics", "mask"), None),
+    "mask map50_95 > 1": _set(("metrics", "mask", "map50_95"), 2),
+    "epochs 0": _set(("metrics", "epochs"), 0),
+    "epochs float": _set(("metrics", "epochs"), 50.0),
+    "imgsz missing": _set(("metrics", "imgsz"), _DEL),
+    "imgsz negative": _set(("metrics", "imgsz"), -960),
+    "base_weights not str": _set(("metrics", "base_weights"), None),
+    "finished_at not iso": _set(("metrics", "finished_at"), "yesterday"),
+    "finished_at no tz": _set(("metrics", "finished_at"), "2026-11-14T09:30:00"),
+    "finished_at not utc": _set(("metrics", "finished_at"), "2026-11-14T09:30:00+05:30"),
+    "finished_at number": _set(("metrics", "finished_at"), 1731576600),
+}
+
+
+@pytest.mark.parametrize("rule", list(BAD_RULES))
+def test_read_metrics_bad_rule(tp, rule):
+    doc = _metrics_doc()
+    BAD_RULES[rule](doc)
+    with pytest.raises(tp.BadMetrics) as e:
+        tp.read_metrics(_enc(doc), "segment")
+    assert str(e.value).startswith("metrics file: ")
+
+
+def test_read_metrics_detect_with_mask_is_bad(tp):
+    doc = _metrics_doc()
+    doc["task"] = "detect"
+    with pytest.raises(tp.BadMetrics):
+        tp.read_metrics(_enc(doc), "detect")
+
+
+@pytest.mark.parametrize("data", [b"", b"\xff\xfe{}", b"{not json", b"[]", b"null",
+                                  b" " * (1024 * 1024) + b"{}"])
+def test_read_metrics_bad_bytes(tp, data):
+    with pytest.raises(tp.BadMetrics):
+        tp.read_metrics(data, "segment")
+
+
+def test_read_metrics_message_matches_fixture(tp):
+    doc = _metrics_doc()
+    doc["format"] = "x"
+    with pytest.raises(tp.BadMetrics) as e:
+        tp.read_metrics(_enc(doc), "segment")
+    assert str(e.value) == FIXTURES["error example (400 bad_metrics, #24)"]["error"]["message"]
+
+
+# ------------------------------------------------------------------ route #23 options
+
+def test_route_options_reach_notebook(tmp_path):
+    with _client(tmp_path) as c:
+        s = _done_project(c)
+        r = c.post(f"/api/projects/{s['pid']}/train-package",
+                   json={"task": "detect", "epochs": 30, "imgsz": 1280,
+                         "base_weights": "yolo11n.pt"})
+        assert r.status_code == 200, r.text
+        cells = _cells(zipfile.ZipFile(io.BytesIO(r.content)))
+        assert 'YOLO("yolo11n.pt")' in cells[2] and "epochs=30" in cells[2]
+        assert "imgsz=1280" in cells[2] and "imgsz=1280" in cells[3]
+
+
+@pytest.mark.parametrize("body", [
+    {"task": "detect", "base_weights": "yolo11s-seg.pt"},
+    {"task": "segment", "base_weights": "yolo11s.pt"},
+    {"base_weights": "yolo11s-seg.pt"},
+    {"epochs": 0}, {"epochs": 501}, {"epochs": "50"}, {"epochs": None},
+    {"imgsz": 1000}, {"imgsz": 4096}, {"imgsz": True},
+])
+def test_route_bad_options_are_400(tmp_path, body):
+    with _client(tmp_path) as c:
+        s = _done_project(c)
+        r = c.post(f"/api/projects/{s['pid']}/train-package", json=body)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "bad_request", r.text
+
+
+def test_route_bad_option_unknown_project_is_404(tmp_path):
+    with _client(tmp_path) as c:
+        r = c.post("/api/projects/99/train-package", json={"epochs": 0})
+        assert r.status_code == 404
