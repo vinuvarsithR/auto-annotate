@@ -151,6 +151,46 @@ def test_ipv6_loopback_is_allowed(tmp_path, monkeypatch):
         assert c.post("/mcp/", headers=JSON_HEADERS, json=INIT).status_code == 200
 
 
+def _app_with_static_ui(tmp_path):
+    """Like make_app but with the real static UI mounted at /, as in production: a bare /mcp
+    used to fall through to it and get 405."""
+    from app.main import STATIC_DIR, create_app
+    return create_app(tmp_path / "data", start_worker=False, static_dir=STATIC_DIR)
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_both_paths_list_tools_from_loopback(tmp_path, monkeypatch, path):
+    hermetic_env(monkeypatch, tmp_path, token="")
+    with open_client(_app_with_static_ui(tmp_path)) as c:
+        h = {**JSON_HEADERS, "mcp-protocol-version": "2025-06-18"}
+        r = c.post(path, headers=h, json=_rpc("tools/list", {}), follow_redirects=False)
+        assert r.status_code == 200
+        assert [t["name"] for t in r.json()["result"]["tools"]] == [
+            t["name"] for t in TOOLS_FIXTURE["tools"]]
+        assert c.get("/").status_code == 200  # the static UI is still served
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_both_paths_refuse_a_lan_client_without_token(tmp_path, monkeypatch, path):
+    hermetic_env(monkeypatch, tmp_path, token="")
+    with open_client(_app_with_static_ui(tmp_path), client_host="192.168.1.50") as c:
+        r = c.post(path, headers=JSON_HEADERS, json=_rpc("tools/list", {}),
+                   follow_redirects=False)
+        assert r.status_code == 403
+        assert r.json() == SAMPLES["error example (403 forbidden, /mcp/ no token set, not loopback)"]
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_both_paths_need_the_bearer_when_token_set(tmp_path, monkeypatch, path):
+    hermetic_env(monkeypatch, tmp_path, token=TOKEN)
+    with open_client(_app_with_static_ui(tmp_path), client_host="192.168.1.50",
+                     host="192.168.1.10:8000") as c:
+        assert c.post(path, headers=JSON_HEADERS, json=INIT,
+                      follow_redirects=False).status_code == 401
+        h = {**JSON_HEADERS, "authorization": f"Bearer {TOKEN}"}
+        assert c.post(path, headers=h, json=INIT, follow_redirects=False).status_code == 200
+
+
 def test_no_token_dns_rebinding_protection_is_on(app_no_token):
     _, c = app_no_token
     r = c.post("/mcp/", headers={**JSON_HEADERS, "host": "evil.example:8000"}, json=INIT)

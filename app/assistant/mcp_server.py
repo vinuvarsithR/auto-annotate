@@ -126,3 +126,19 @@ class McpGate:
                 response = JSONResponse(error_body("forbidden", FORBIDDEN), status_code=403)
                 return await response(scope, receive, send)
         await inner(scope, receive, send)
+
+
+class McpNoSlash:
+    """ASGI app for the exact path /mcp (no slash). The /mcp mount only matches /mcp/..., so
+    without this a POST /mcp fell through to the static UI (405). No redirect (MCP clients may
+    not follow a POST redirect): the scope is rewritten to what the mount gives /mcp/, then the
+    same gate runs, so the token / loopback check applies to both paths."""
+
+    def __init__(self, gate: McpGate):
+        self.gate = gate
+
+    async def __call__(self, scope, receive, send):
+        root = scope.get("root_path", "")
+        path = root + "/mcp/"
+        scope = dict(scope, path=path, raw_path=path.encode(), root_path=root + "/mcp")
+        await self.gate(scope, receive, send)

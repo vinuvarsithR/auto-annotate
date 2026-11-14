@@ -8,7 +8,7 @@ Run it (from the repo root, inside .venv):
 * data/app.db and data/uploads/ are created on startup.
 * A background worker thread runs detect, roboflow_push and import jobs (app/worker/worker.py).
 * Claude connector (app/assistant/): #31 - #35 under /api/assistant, the MCP server at /mcp/
-  (token / loopback gate), settings from .env read in the lifespan.
+  and /mcp (token / loopback gate on both), settings from .env read in the lifespan.
 * create_app(...) lets tests use a temp folder, a fake detector and no thread.
 """
 
@@ -24,11 +24,12 @@ from typing import Callable
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from app.api import annotations, classes, hook, images, imports, jobs, models, projects, weights
 from app.api.errors import install_error_handlers
 from app.assistant import routes as assistant_routes
-from app.assistant.mcp_server import McpGate
+from app.assistant.mcp_server import McpGate, McpNoSlash
 from app.db import db
 from app.worker.worker import ImporterLoader, PipelineLoader, PusherLoader, Worker
 
@@ -164,7 +165,9 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
     for module in (projects, images, imports, classes, jobs, annotations, models, weights, hook,
                    assistant_routes):
         app.include_router(module.router, prefix="/api")
-    app.mount("/mcp", McpGate(app.state), name="mcp")  # #36; not under /api
+    gate = McpGate(app.state)  # #36; not under /api
+    app.router.routes.append(Route("/mcp", McpNoSlash(gate)))  # exact /mcp, every method
+    app.mount("/mcp", gate, name="mcp")  # /mcp/...
 
     # Endpoint 14 belongs to the export session; include it once it exists.
     if importlib.util.find_spec("app.api.export") is not None:
