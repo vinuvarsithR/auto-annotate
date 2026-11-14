@@ -151,6 +151,26 @@ Build against docs/CONTRACT.md. Only edit files this session owns (CONTRACT.md s
   (section 1). VERIFIED on ?mock=1 (Node + Chrome). PENDING: real-backend checks, until backend and
   models are on main. "no usable examples" is only checked from fixture job 10: fake rejects nothing.
 
+- 2026-11-13 OWLv2 + SAM 2 (commit 6f0dca0): "Outlines (SAM 2)" toggle (owlv2 + examples only, sends
+  `masks`), Hook points section in the Labels panel (#27 - #30, Set/Move = click on image, Clear, all
+  videos, load classes + radius), job result shows `masks` + `hook.warnings`. `sequenceOf()` in api.js
+  is a JS copy of autolabel.sequences.sequence_of (keep them the same). Mock offers `owlv2` (acts like
+  fake + hook filter + ellipse polygons). VERIFIED on ?mock=1 in Chrome.
+- 2026-11-14 Assistant sidebar (#31 - #34, app/static/assistant.js): top-bar "Assistant" button (review
+  screen only, open state in localStorage), #31 off -> "Assistant not set up", needs the reviewer name,
+  reply + collapsed tool-call list + stopped notes + links (download_url), Confirm / Cancel cards (#33;
+  expire on the next message, 409 -> "no longer valid"), New chat (#34), lost session (404) -> note +
+  resend once in a new chat, reload of image / counts / hook after a write `ok` (add_class reopens the
+  project).
+  Mock: a message equal to a `chat_fake.json` scenario's `request.message` gets its `expect_response`
+  (or error); `?mock=1&chat=off` = no key; extra mock-only prompt "Make a training package." (tools.json
+  example, for the link); `api._restartChats()` simulates a server restart; confirm runs
+  `delete_annotation` on mock data. VERIFIED on ?mock=1 in Chrome: all 6 scenarios, confirm reloads the
+  open image (box 106 gone), cancel, expired card + 409, lost session, layout screenshot.
+  PENDING: real-server click-test after backend #31 - #35 is merged.
+  Gotcha: Chrome-extension tests time out when the Chrome window is in the background (timers throttled,
+  screenshots fail); call `await sendMessage()` directly instead of clicking + polling.
+
 ## Polygon spec (from the integrator, user decisions 2026-11-04)
 
 Build against docs/CONTRACT.md #11-#14. Polygons are normalized 0..1; the server computes the bbox.

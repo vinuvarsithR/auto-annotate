@@ -276,6 +276,52 @@ input[type="range"] { accent-color: var(--text); width: 100%; margin: 0; }
 #strip { flex: 0 1 var(--strip-w); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line);
   background: var(--base); transition: width var(--t-med) var(--ease); }
 #strip.collapsed { flex: 0 0 44px; }
+
+/* Assistant sidebar (#31 - #34): rightmost column of the review screen */
+#assistantBtn { gap: 6px; }
+#assistantBtn[aria-expanded="true"] { background: var(--line); border-color: var(--muted); }
+#assistant { flex: 0 1 340px; min-width: 260px; display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--line); background: var(--base); font-size: 13px; }
+#assistant[hidden], #assistant [hidden] { display: none; }
+.as-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 12px; border-bottom: 1px solid var(--line); }
+.as-head h2 { margin: 0; font-size: 13px; }
+.as-project { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-head button:not(.icon) { height: 26px; padding: 0 10px; font-size: 12px; }
+.as-off { padding: 14px 12px; }
+.as-off h3 { margin: 0 0 6px; font-size: 13px; color: var(--needs_review); }
+.as-off p { margin: 0; color: var(--muted); line-height: 1.45; }
+.as-log { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.as-log:empty::before { content: "Ask about the open project. Changes that are hard to undo wait for your Confirm."; color: var(--muted); }
+.as-msg { line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.as-msg.user { align-self: flex-end; max-width: 88%; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 6px 10px; }
+.as-msg.bot { padding: 0 2px; }
+.as-msg.bot a { color: var(--edited); }
+.as-msg.note { color: var(--muted); font-size: 12px; }
+.as-msg.err { color: var(--rejected); font-size: 12px; }
+.as-msg.wait { color: var(--muted); font-size: 12px; }
+.as-calls { font-size: 12px; color: var(--muted); }
+.as-calls summary { cursor: pointer; }
+.as-calls summary:hover { color: var(--text); }
+.as-calls ul { list-style: none; margin: 4px 0 0; padding: 0 0 0 4px; display: flex; flex-direction: column; gap: 3px; }
+.as-calls code { font: 12px/1.4 ui-monospace, Consolas, monospace; color: var(--text); overflow-wrap: anywhere; }
+.as-calls .oc-ok { color: var(--accepted); }
+.as-calls .oc-error { color: var(--rejected); }
+.as-calls .oc-needs_confirmation { color: var(--needs_review); }
+.as-pending { border: 1px solid rgba(217,178,111,0.55); border-left-width: 3px; border-radius: var(--radius); padding: 8px 10px; }
+.as-pending .tool { font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
+.as-pending p { margin: 4px 0 8px; line-height: 1.45; }
+.as-pending .row { margin: 0; }
+.as-pending .row button { height: 26px; padding: 0 12px; font-size: 12px; }
+.as-pending .outcome { font-size: 12px; color: var(--muted); }
+.as-pending.done { border-color: var(--line); }
+.as-form { border-top: 1px solid var(--line); padding: 10px 12px 12px; }
+.as-form textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 56px; max-height: 240px;
+  padding: 6px 8px; border-radius: var(--radius); background: var(--base); border: 1px solid var(--line);
+  color: var(--text); font: inherit; }
+.as-send { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; font-size: 11px; }
+.as-name { margin: 0 0 8px; font-size: 12px; color: var(--needs_review); }
 .strip-head { display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 8px; flex: none; }
 .strip-head .icon svg { transition: transform var(--t-med) var(--ease); }
 #strip.collapsed .strip-head .icon svg { transform: rotate(180deg); }
