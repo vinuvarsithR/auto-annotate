@@ -31,7 +31,9 @@ setup and layout. This file holds the working rules, current state and next step
    (and `AUTOLABEL_YOLO_WEIGHTS` if used).
 5. **Commits:** on your own branch only. Never merge into main; the integrator does that
    (`git merge --no-edit YOUR_BRANCH`, pytest, `git push --all`).
-6. **App:** run it on a free port, not 8000 or 8001: `uvicorn app.main:app --port YOUR_PORT`.
+6. **App:** the team's app runs on port 8000 (`uvicorn app.main:app --port 8000`; all docs, MCP URLs
+   and defaults use 8000). Agent sessions testing their own branch use a different free port
+   (e.g. 8010+), never 8000, so they don't clash with the running app. 8001 is not used.
 7. **Roboflow:** the key lives only in `.env` as ROBOFLOW_API_KEY; never print, log or commit
    it. Use the Python SDK, not the Roboflow connector. Same for ANTHROPIC_API_KEY and AUTOLABEL_MCP_TOKEN:
    `.env` only, never printed, logged, committed or sent to the browser; tests use fake values.
