@@ -148,6 +148,13 @@ def list_annotations(iid: int, status: str | None = None,
 
 @router.post("/images/{iid}/annotations", status_code=201)
 def add_annotation(iid: int, body: AnnotationIn, conn: sqlite3.Connection = Depends(get_conn)):
+    return insert_annotation(conn, iid, body)
+
+
+def insert_annotation(conn: sqlite3.Connection, iid: int, body: AnnotationIn,
+                      status: str = "accepted") -> dict:
+    """#12 (status accepted). The add_annotation tool passes status needs_review: the #12 row
+    then the #13 status rule, in the same transaction (one row, never edited)."""
     image = require_image(conn, iid)
     _require_class_in_project(conn, body.class_id, image["project_id"])
     polygon = body.polygon
@@ -163,10 +170,10 @@ def add_annotation(iid: int, body: AnnotationIn, conn: sqlite3.Connection = Depe
         cur = conn.execute(
             "INSERT INTO annotations (image_id, class_id, x, y, w, h, mask, polygon, score, "
             "source, status, job_id, reviewer, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'human', 'accepted', NULL, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'human', ?, NULL, ?, ?, ?)",
             (iid, body.class_id, x, y, w, h,
              json.dumps(body.mask) if body.mask is not None else None,
-             json.dumps(polygon) if polygon is not None else None, body.reviewer, t, t),
+             json.dumps(polygon) if polygon is not None else None, status, body.reviewer, t, t),
         )
     return db.annotation_dict(db.get_annotation(conn, cur.lastrowid))
 

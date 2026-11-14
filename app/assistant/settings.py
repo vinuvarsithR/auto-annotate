@@ -35,6 +35,7 @@ class AssistantSettings:
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
     max_tokens: int = DEFAULT_MAX_TOKENS
     users_file: str = ""  # AUTOLABEL_MCP_USERS_FILE; "" = <data dir>/mcp_users.json
+    public_url: str = ""  # AUTOLABEL_PUBLIC_URL (no trailing /); "" = the request's address
 
     @property
     def chat_available(self) -> bool:
@@ -78,6 +79,7 @@ def load_settings(env_file: Path | None = None) -> AssistantSettings:
         max_tool_calls=_positive_int("AUTOLABEL_CLAUDE_MAX_TOOL_CALLS", DEFAULT_MAX_TOOL_CALLS),
         max_tokens=_positive_int("AUTOLABEL_CLAUDE_MAX_TOKENS", DEFAULT_MAX_TOKENS),
         users_file=(os.environ.get("AUTOLABEL_MCP_USERS_FILE") or "").strip(),
+        public_url=(os.environ.get("AUTOLABEL_PUBLIC_URL") or "").strip().rstrip("/"),
     )
 
 

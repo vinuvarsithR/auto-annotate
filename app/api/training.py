@@ -109,6 +109,28 @@ def package_download(state: Any, response, fallback_name: str) -> dict:
             "size_bytes": len(blob), "expires_at": expires_at, "split": split}
 
 
+def plan_split(conn: sqlite3.Connection, pid: int, task: str) -> dict | None:
+    """The split.json (with `warnings`) of the package #23 would build now, without reading
+    image files or building the zip (export's plan_train_package). The #23 409s as the route
+    words them. None while export's plan_train_package is not merged yet (no warnings known)."""
+    from app.api import export as export_api  # export's module: imported, never edited
+    import autolabel.export as export_pkg
+    from autolabel.export import train_package as tp
+
+    plan = getattr(export_pkg, "plan_train_package", None) or getattr(tp, "plan_train_package",
+                                                                      None)
+    project = require_project(conn, pid)
+    if plan is None:
+        return None
+    images, classes, annotations, _paths = export_api._load_rows(conn, pid)
+    try:
+        return plan(project["name"], task, images, classes, annotations)
+    except export_pkg.NothingToExport:
+        raise ApiError(409, "conflict", f"project {pid} has no done or empty images to export")
+    except export_pkg.NoPolygons:
+        raise ApiError(409, "conflict", f"project {pid} has no exported box with a polygon")
+
+
 def colab_package(state: Any, conn: sqlite3.Connection, pid: int, values: dict) -> dict:
     """target colab: the #23 package with these values, stored for download; the #37 body."""
     from app.api import export as export_api  # export's module: imported, never edited
@@ -121,7 +143,8 @@ def colab_package(state: Any, conn: sqlite3.Connection, pid: int, values: dict) 
     pkg = package_download(state, response, f"project_{pid}_train_{task}.zip")
     split = pkg.pop("split")
     run = f"{safe_name(project['name'])}_{task}"
-    return {**values, "package": pkg, "split": split, "next_steps": [
+    return {**values, "package": pkg, "split": split, "warnings": split.get("warnings", []),
+            "next_steps": [
         "Download the zip.",
         "Open train.ipynb in Google Colab (Runtime > Change runtime type > GPU).",
         f"Run the 3 code cells; it downloads {run}_best.pt and {run}_metrics.json.",

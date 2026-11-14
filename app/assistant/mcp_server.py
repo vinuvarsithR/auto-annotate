@@ -79,11 +79,14 @@ def build_server(state: Any):
 
     async def on_call_tool(ctx, params):
         request = getattr(ctx, "request", None)  # None for an in-process mcp.Client
-        user = None
+        user = base_url = None
         if request is not None:
             user = request.scope.get(USER_SCOPE_KEY) or clean_name(request.headers.get(USER_HEADER))
+            host = request.headers.get("host")
+            base_url = f"http://{host}" if host else None  # web_url BASE (E2E gaps item 6)
         envelope = await anyio.to_thread.run_sync(
-            call_tool, ToolContext(state, "mcp", user), params.name, params.arguments)
+            call_tool, ToolContext(state, "mcp", user, base_url=base_url), params.name,
+            params.arguments)
         return envelope_result(envelope)
 
     return Server("autolabel", on_list_tools=on_list_tools, on_call_tool=on_call_tool)

@@ -129,8 +129,6 @@ def test_scenario(make, name):
             if k in exp:
                 assert req[k] == exp[k], k
         if "tool_names" in exp:
-            # chat_fake.json still lists the 17 tools of 2026-11-13; tools.json (19) is the
-            # contract's list since 2026-11-14 (change request in docs/agents/backend.md)
             names = [t["name"] for t in req["tools"]]
             assert names == [t["name"] for t in TOOLS_FIXTURE["tools"]]
             assert [n for n in names if n in exp["tool_names"]] == exp["tool_names"]
@@ -216,7 +214,7 @@ def test_chat_tools_are_the_fixture_without_confirm():
         schema["properties"].pop("confirm", None)
         assert got == {"name": want["name"], "description": want["description"],
                        "input_schema": schema}
-    assert len(CHAT_TOOLS) == 19
+    assert len(CHAT_TOOLS) == 21
 
 
 @pytest.mark.parametrize("model,beta", [("claude-sonnet-5-5", True), ("claude-opus-5-5", True),
@@ -241,7 +239,7 @@ def test_fallbacks_only_for_listed_models(make, model, beta):
 # ------------------------------------------------------------------ stop reasons
 
 def test_pause_turn_calls_again(make):
-    fake = FakeClient([{"stop_reason": "pause_turn", "content": [{"type": "text", "text": "…"}],
+    fake = FakeClient([{"stop_reason": "pause_turn", "content": [{"type": "text", "text": "â€¦"}],
                         "usage": {"input_tokens": 3, "output_tokens": 1}}, end_turn("done")])
     _, c = make(fake)
     body = c.post("/api/assistant/chat", json={"project_id": 1, "user": "d", "message": "a"}).json()
@@ -519,3 +517,14 @@ def test_connection_error_says_unreachable(make):
     r = c.post("/api/assistant/chat", json={"project_id": 1, "user": "d", "message": "a"})
     assert r.status_code == 502
     assert r.json() == {"error": {"code": "assistant_error", "message": "Claude API unreachable"}}
+
+
+def test_chat_links_use_the_request_base_url_and_system_asks_for_them(make):
+    assert "web_url" in SYSTEM
+    fake = FakeClient([tool_turn(("project_summary", {"project_id": 1})), end_turn()])
+    app, _ = make(fake)
+    c = open_client(app, host="192.168.1.10:8000")
+    r = c.post("/api/assistant/chat", json={"project_id": 1, "user": "d", "message": "a"})
+    assert r.status_code == 200
+    result = fake.requests[1]["messages"][-1]["content"][0]
+    assert '"web_url": "http://192.168.1.10:8000/#project-1"' in result["content"]
