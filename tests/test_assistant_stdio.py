@@ -17,7 +17,7 @@ from mcp import Client, types
 
 from app.assistant import mcp_stdio
 from tests.test_assistant_helpers import (
-    TOOLS_FIXTURE, hermetic_env, load_fixture_data, make_app, rows,
+    TOOLS_FIXTURE, hermetic_env, load_fixture_data, make_app, rows, swap,
 )
 
 TOKEN = "stdio-token-xyz"
@@ -158,7 +158,9 @@ def test_end_to_end_through_the_real_app(live_app):
     listed = _run(server, lambda c: c.list_tools())
     assert [t.name for t in listed.tools] == [t["name"] for t in TOOLS_FIXTURE["tools"]]
     result = _run(server, lambda c: c.call_tool("project_summary", {"project_id": 1}))
-    assert result.structured_content == TOOLS_FIXTURE["examples"]["project_summary"][0]["output"]
+    base = url.removesuffix("/mcp/")  # web_url BASE = the Host the stdio bridge connects to
+    assert result.structured_content == swap(
+        TOOLS_FIXTURE["examples"]["project_summary"][0]["output"], "http://localhost:8000", base)
     result = _run(server, lambda c: c.call_tool("add_class", {"project_id": 1, "name": "hook"}))
     assert result.is_error is False and result.structured_content["ok"] is True
     assert rows(app, "SELECT channel, actor, tool FROM assistant_actions") == [

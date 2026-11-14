@@ -57,6 +57,8 @@ _VALIDATORS = {t["name"]: Draft202012Validator(t["input_schema"]) for t in TOOLS
 MAX_RESULT_CHARS = 50_000
 DETECT_CONFIRM_ABOVE = 50   # run_detection / rerun_examples: more images than this need confirm
 STATUS_CONFIRM_ABOVE = 10   # set_annotation_status: more boxes than this need confirm
+REVIEW_CONFIRM_ABOVE = 10   # set_review_status: more images than this need confirm
+LOCAL_BASE = "http://localhost:8000"
 
 _NAME = re.compile(r"^[A-Za-z0-9 ._-]{1,40}$")
 NO_NAME_MESSAGE = ("set X-Autolabel-User to your name (1-40 letters, digits, space, . _ -) in "
@@ -77,10 +79,19 @@ class ToolContext:
     channel: str               # "mcp" | "chat"
     user: str | None = None    # already cleaned with clean_name; None = no (valid) name
     button: bool = False       # chat: run by the Confirm button (#33)
+    base_url: str | None = None  # MCP: http://<Host>; chat: the #32 request's base URL
 
     @property
     def actor(self) -> str:
         return f"claude:{self.user}" if self.user else "claude:?"
+
+    @property
+    def base(self) -> str:
+        """BASE of web_url / download_url: AUTOLABEL_PUBLIC_URL, else the request's address,
+        else (in-process calls) http://localhost:8000."""
+        settings = getattr(self.state, "assistant_settings", None)
+        public = getattr(settings, "public_url", "") if settings is not None else ""
+        return public or (self.base_url or "").rstrip("/") or LOCAL_BASE
 
     def secrets(self) -> list[str]:
         settings = getattr(self.state, "assistant_settings", None)
@@ -170,7 +181,9 @@ def _dispatch(run: _Run, name: str, args: Any, is_write: bool) -> dict:
     if problem is not None:
         return error("bad_request", problem)
     try:
-        return ok(HANDLERS[name](run))
+        data = HANDLERS[name](run)
+        _add_links(run, name, data)
+        return ok(data)
     except NeedsConfirmation as nc:
         arguments = {k: v for k, v in args.items() if k != "confirm"}
         return {"ok": False, "needs_confirmation": {
@@ -185,6 +198,47 @@ def _dispatch(run: _Run, name: str, args: Any, is_write: bool) -> dict:
         msg = scrub(f"{type(e).__name__}: {e}".splitlines()[0][:300], run.ctx.secrets())
         log.error("assistant tool %s failed: %s", name, msg)
         return error("internal_error", msg)
+
+
+def _add_links(run: _Run, name: str, data: Any) -> None:
+    """Tool results only (REST unchanged): web_url (last key) on every Project, Image and
+    Annotation object; absolute download_url (E2E gaps item 6)."""
+    base = run.ctx.base
+    projects_of: dict[int, int | None] = {}
+
+    def project(p: dict) -> None:
+        p["web_url"] = f"{base}/#project-{p['id']}"
+
+    def image(im: dict) -> None:
+        im["web_url"] = f"{base}/#project-{im['project_id']}/image-{im['id']}"
+
+    def box(a: dict) -> None:
+        iid = a["image_id"]
+        if iid not in projects_of:
+            projects_of[iid] = _project_of_image(run.conn, iid)
+        a["web_url"] = f"{base}/#project-{projects_of[iid]}/image-{iid}"
+
+    if name == "list_projects":
+        for p in data["projects"]:
+            project(p)
+    elif name == "project_summary":
+        project(data["project"])
+    elif name in ("list_images", "set_review_status"):
+        for im in data["images"]:
+            image(im)
+    elif name == "get_annotations":
+        image(data["image"])
+        for a in data["annotations"]:
+            box(a)
+    elif name == "set_annotation_status":
+        for a in data["annotations"]:
+            box(a)
+    elif name in ("update_annotation", "add_annotation"):
+        box(data)
+    elif name == "make_train_package":
+        data["download_url"] = base + data["download_url"]
+    elif name == "start_training":
+        data["package"]["download_url"] = base + data["package"]["download_url"]
 
 
 def _limit_size(run: _Run, name: str, envelope: dict) -> dict:
@@ -411,6 +465,28 @@ def _update_annotation(run: _Run):
     return data
 
 
+def _add_annotation(run: _Run):
+    a, conn = run.args, run.conn
+    polygon = a.get("polygon")
+    if polygon is None and "bbox" not in a:
+        raise ApiError(400, "bad_request", "send bbox or polygon")
+    shape = {"polygon": polygon} if polygon is not None else {"bbox": a["bbox"]}
+    annotations_api.AnnotationIn(class_id=0, **shape)  # body check first, as the route does
+    iid = a["image_id"]
+    pid = run.project_id = _project_of_image(conn, iid)
+    if pid is None:
+        raise not_found("image", iid)
+    cls = conn.execute("SELECT id FROM classes WHERE project_id=? AND name=?",
+                       (pid, a["class_name"])).fetchone()
+    if cls is None:
+        raise ApiError(400, "bad_class_id",
+                       f"class {a['class_name']} is not a class of project {pid}")
+    body = annotations_api.AnnotationIn(class_id=cls["id"], reviewer=run.ctx.actor, **shape)
+    data = annotations_api.insert_annotation(conn, iid, body, a.get("status", "accepted"))
+    run.summary = {"annotation_id": data["id"]}
+    return data
+
+
 def _delete_annotation(run: _Run):
     conn = run.conn
     aid = run.args["annotation_id"]
@@ -440,15 +516,78 @@ def _set_hook_point(run: _Run):
     return data
 
 
+def _set_review_status(run: _Run):
+    a, conn = run.args, run.conn
+    ids: list[int] = a["image_ids"]
+    status = a["review_status"]
+    rows = []
+    for iid in ids:
+        row = conn.execute("SELECT * FROM images WHERE id=?", (iid,)).fetchone()
+        if row is None:
+            raise ApiError(404, "not_found", f"image {iid} not found; nothing changed")
+        rows.append(row)
+    run.project_id = rows[0]["project_id"]
+
+    def check_empty() -> None:  # #20: empty only when every box of the image is rejected
+        if status != "empty":
+            return
+        marks = ",".join("?" * len(ids))
+        bad = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT image_id FROM annotations WHERE image_id IN ({marks}) "
+            "AND status != 'rejected' ORDER BY image_id", ids)]
+        if bad:
+            which = (f"images {', '.join(map(str, bad))} empty: they have" if len(bad) > 1
+                     else f"image {bad[0]} empty: it has")
+            raise ApiError(409, "conflict",
+                           f"cannot mark {which} boxes that are not rejected; nothing changed")
+
+    check_empty()
+    if len(ids) > REVIEW_CONFIRM_ABOVE and not run.confirm:
+        now = {s: 0 for s in db.REVIEW_STATUSES}
+        for r in rows:
+            now[r["review_status"]] += 1
+        text = ", ".join(f"{n} {s}" for s, n in now.items() if n)
+        raise NeedsConfirmation(f"Set review_status {status} on {len(ids)} images (now: {text}).",
+                                {"images": len(ids), "review_status": status, "from": now})
+    conn.execute("BEGIN IMMEDIATE")  # all or nothing; no box added between check and update
+    try:
+        check_empty()
+        conn.executemany("UPDATE images SET review_status=? WHERE id=?",
+                         [(status, iid) for iid in ids])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    run.summary = {"image_ids": ids, "review_status": status}
+    fresh = [conn.execute("SELECT * FROM images WHERE id=?", (iid,)).fetchone() for iid in ids]
+    return {"images": db.images_dicts(conn, fresh)}
+
+
+def _check_package_warnings(run: _Run, pid: int, task: str) -> list[dict]:
+    """E2E gaps item 5: risky when the package would have warnings (checked before building).
+    Returns the warnings (to put in the result after confirm)."""
+    split = training_api.plan_split(run.conn, pid, task)
+    warnings = (split or {}).get("warnings") or []
+    if warnings and not run.confirm:
+        plural = "warning" if len(warnings) == 1 else "warnings"
+        raise NeedsConfirmation(
+            f"Build a {task} training package for project {pid} despite {len(warnings)} "
+            f"{plural}: " + " ".join(w["message"] for w in warnings),
+            {"warnings": warnings, "split": split, "task": task})
+    return warnings
+
+
 def _make_train_package(run: _Run):
     from app.api import export as export_api  # export's module: imported, never edited
 
     a = run.args
     pid = run.project_id = a["project_id"]
     task = a.get("task", "detect")
+    _check_package_warnings(run, pid, task)
     response = export_api.train_package(pid, {"task": task}, run.conn)
     data = training_api.package_download(run.ctx.state, response,
                                          f"project_{pid}_train_{task}.zip")
+    data["warnings"] = data["split"].get("warnings", [])
     run.summary = {"file_name": data["file_name"], "size_bytes": data["size_bytes"]}
     return data
 
@@ -464,6 +603,7 @@ def _start_training(run: _Run):
     training_api.check_target(run.ctx.state, pid, values)  # local: 503 / 501 before any confirm
     if values["target"] == "local" and not run.confirm:  # reserved: unreachable today
         raise NeedsConfirmation(f"Train a {values['task']} model on this host's GPU.", values)
+    _check_package_warnings(run, pid, values["task"])
     data = training_api.colab_package(run.ctx.state, conn, pid, values)
     run.summary = {"target": values["target"], "file_name": data["package"]["file_name"]}
     return data
@@ -535,8 +675,10 @@ HANDLERS: dict[str, Callable[[_Run], Any]] = {
     "rerun_examples": _rerun_examples,
     "set_annotation_status": _set_annotation_status,
     "update_annotation": _update_annotation,
+    "add_annotation": _add_annotation,
     "delete_annotation": _delete_annotation,
     "set_hook_point": _set_hook_point,
+    "set_review_status": _set_review_status,
     "make_train_package": _make_train_package,
     "start_training": _start_training,
     "import_weights": _import_weights,

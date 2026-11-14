@@ -10,6 +10,7 @@ from mcp import Client
 from app.assistant.mcp_server import build_server
 from tests.test_assistant_helpers import (
     SAMPLES, TOOLS_FIXTURE, hermetic_env, load_fixture_data, make_app, open_client, rows, same_keys,
+    swap,
 )
 
 TOKEN = "test-mcp-token-123"
@@ -228,8 +229,10 @@ def test_token_set_lan_client_with_token_works(app_token):
                json=_rpc("tools/call", {"name": "project_summary",
                                         "arguments": {"project_id": 1}}))
     assert r.status_code == 200
-    assert r.json()["result"]["structuredContent"] == \
-        TOOLS_FIXTURE["examples"]["project_summary"][0]["output"]
+    # web_url BASE over HTTP = http:// + the request's Host (E2E gaps item 6)
+    assert r.json()["result"]["structuredContent"] == swap(
+        TOOLS_FIXTURE["examples"]["project_summary"][0]["output"], "http://localhost:8000",
+        "http://192.168.1.10:8000")
 
 
 def test_token_set_api_is_unchanged(app_token):
@@ -430,3 +433,15 @@ def test_users_file_stores_hashes_only(tmp_path):
     entry = json.loads(text)["users"][0]
     assert entry["token_sha256"] == users_mod.token_hash(token)
     assert set(entry) == set(SAMPLES["mcp_users.json (example)"]["users"][0])
+
+
+def test_web_url_uses_the_request_host(app_no_token):
+    """E2E gaps item 6: unset AUTOLABEL_PUBLIC_URL -> http:// + the MCP request's Host."""
+    app, _ = app_no_token
+    with open_client(app, host="127.0.0.1:8000") as c:
+        assert c.post("/mcp/", headers=JSON_HEADERS, json=INIT).status_code == 200
+        r = c.post("/mcp/", headers={**JSON_HEADERS, "mcp-protocol-version": "2025-06-18"},
+                   json=_rpc("tools/call", {"name": "list_images",
+                                            "arguments": {"project_id": 1, "limit": 1}}))
+    image = r.json()["result"]["structuredContent"]["data"]["images"][0]
+    assert image["web_url"] == "http://127.0.0.1:8000/#project-1/image-10"

@@ -174,3 +174,14 @@ def test_default_cuda_available_asks_torch(monkeypatch):
             return True
     monkeypatch.setitem(sys.modules, "torch", type("T", (), {"cuda": Cuda})())
     assert default_cuda_available() is True
+
+
+def test_colab_response_has_warnings_after_split(colab):
+    """E2E gaps item 5: #37 gets "warnings" (= split.json warnings) right after "split";
+    REST is never risky and keeps the relative download_url."""
+    c, _ = colab
+    got = post(c, {"target": "colab"}).json()
+    keys = list(got)
+    assert keys[keys.index("split") + 1] == "warnings"
+    assert got["warnings"] == got["split"].get("warnings", [])
+    assert got["package"]["download_url"].startswith("/api/assistant/downloads/")

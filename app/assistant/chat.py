@@ -54,7 +54,8 @@ SYSTEM = (
     "when a tool result says needs_confirmation, tell the user in one or two sentences what will "
     "happen and ask them to press Confirm. Never say such an action is done until a later note "
     "says the user pressed Confirm and it returned ok. The first line of each user message says "
-    "which project the user has open and who they are.")
+    "which project the user has open and who they are. "
+    "When you mention an image or project, give its web_url so the human can open it in the app.")
 
 
 def _chat_tool(t: dict) -> dict:
@@ -154,7 +155,8 @@ class ChatManager:
 
     # ------------------------------------------------------------ #32 one message
 
-    def send(self, session_id: str | None, project: dict, user: str, message: str) -> dict:
+    def send(self, session_id: str | None, project: dict, user: str, message: str,
+             base_url: str | None = None) -> dict:
         s = self.get(session_id) if session_id else None
         if s is not None:
             self._acquire(s)
@@ -166,7 +168,7 @@ class ChatManager:
                 raise ApiError(409, "conflict", f"this chat has {MAX_USER_MESSAGES} messages; "
                                "start a new chat")
             s.pending.clear()  # pending items live until the next message
-            return self._run(s, project, user, message)
+            return self._run(s, project, user, message, base_url)
         finally:
             s.lock.release()
 
@@ -194,7 +196,8 @@ class ChatManager:
         log.warning("assistant chat: %s", text)
         return ChatError(text)
 
-    def _run(self, s: Session, project: dict, user: str, message: str) -> dict:
+    def _run(self, s: Session, project: dict, user: str, message: str,
+             base_url: str | None = None) -> dict:
         history = s.history
         # undo point: everything this message adds is removed on refusal or API error
         mark = len(history)
@@ -212,7 +215,7 @@ class ChatManager:
                                 f"[project {project['id']} \"{project['name']}\"; user {user}]\n"
                                 f"{message}"}])
         s.user_messages += 1
-        ctx = ToolContext(self.state, "chat", user)
+        ctx = ToolContext(self.state, "chat", user, base_url=base_url)
         usage = {"input_tokens": 0, "output_tokens": 0}
         tool_calls: list[dict] = []
         pending: list[Pending] = []
@@ -299,7 +302,8 @@ class ChatManager:
 
     # ------------------------------------------------------------ #33 confirm / cancel
 
-    def confirm(self, session_id: str, confirm_id: str, decision: str, user: str) -> dict:
+    def confirm(self, session_id: str, confirm_id: str, decision: str, user: str,
+                base_url: str | None = None) -> dict:
         s = self.get(session_id)
         self._acquire(s)
         try:
@@ -309,7 +313,7 @@ class ChatManager:
                                "used or expired (a newer message was sent)")
             args_text = json.dumps(item.arguments)
             if decision == "confirm":
-                ctx = ToolContext(self.state, "chat", user, button=True)
+                ctx = ToolContext(self.state, "chat", user, button=True, base_url=base_url)
                 result = call_tool(ctx, item.tool, {**item.arguments, "confirm": True})
                 note = (f"[{user} pressed Confirm: {item.tool} {args_text} -> "
                         f"{outcome_of(result)}]")

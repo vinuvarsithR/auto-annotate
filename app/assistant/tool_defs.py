@@ -1,7 +1,7 @@
 """
 tool_defs.py - the Claude connector tool list (docs/CONTRACT.md "Claude connector").
 
-Copied from docs/fixtures/assistant/tools.json `tools` (19 tools, that order; names, descriptions
+Copied from docs/fixtures/assistant/tools.json `tools` (21 tools, that order; names, descriptions
 and input_schema exact). `kind` (read / write) and `risky` are contract metadata, never sent.
 tests/test_assistant_mcp.py checks this list is still identical to the fixture.
 """
@@ -43,7 +43,7 @@ TOOLS: list[dict] = [{'name': 'list_projects',
                                   'offset': {'type': 'integer', 'minimum': 0, 'default': 0},
                                   'limit': {'type': 'integer',
                                             'minimum': 1,
-                                            'maximum': 200,
+                                            'maximum': 50,
                                             'default': 50}},
                    'required': ['project_id'],
                    'additionalProperties': False}},
@@ -191,6 +191,32 @@ TOOLS: list[dict] = [{'name': 'list_projects',
                                                       'edited']}},
                    'required': ['annotation_id'],
                    'additionalProperties': False}},
+ {'name': 'add_annotation',
+  'kind': 'write',
+  'risky': 'never',
+  'description': 'Draw a new box on an image (#12): class by name, bbox [x, y, w, h] in pixels, or '
+                 'a polygon (normalized 0..1 points; then bbox is computed). source human; status '
+                 'accepted (default) or needs_review. Refused on an image marked empty.',
+  'input_schema': {'type': 'object',
+                   'properties': {'image_id': {'type': 'integer', 'minimum': 1},
+                                  'class_name': {'type': 'string', 'minLength': 1},
+                                  'bbox': {'type': 'array',
+                                           'items': {'type': 'number'},
+                                           'minItems': 4,
+                                           'maxItems': 4},
+                                  'polygon': {'type': ['array', 'null'],
+                                              'minItems': 3,
+                                              'items': {'type': 'array',
+                                                        'items': {'type': 'number',
+                                                                  'minimum': 0,
+                                                                  'maximum': 1},
+                                                        'minItems': 2,
+                                                        'maxItems': 2}},
+                                  'status': {'type': 'string',
+                                             'enum': ['accepted', 'needs_review'],
+                                             'default': 'accepted'}},
+                   'required': ['image_id', 'class_name'],
+                   'additionalProperties': False}},
  {'name': 'delete_annotation',
   'kind': 'write',
   'risky': 'always',
@@ -216,25 +242,56 @@ TOOLS: list[dict] = [{'name': 'list_projects',
                                   'y': {'type': 'number'}},
                    'required': ['image_id', 'x', 'y'],
                    'additionalProperties': False}},
+ {'name': 'set_review_status',
+  'kind': 'write',
+  'risky': 'more than 10 images',
+  'description': 'Set the review status of images (#20): todo, done (reviewed) or empty (reviewed, '
+                 'no objects; refused while an image has a box that is not rejected). All or '
+                 'nothing. Needs confirm=true for more than 10 images.',
+  'input_schema': {'type': 'object',
+                   'properties': {'image_ids': {'type': 'array',
+                                                'items': {'type': 'integer', 'minimum': 1},
+                                                'minItems': 1,
+                                                'maxItems': 500,
+                                                'uniqueItems': True},
+                                  'review_status': {'type': 'string',
+                                                    'enum': ['todo', 'done', 'empty']},
+                                  'confirm': {'type': 'boolean',
+                                              'default': False,
+                                              'description': 'true only after the human has seen '
+                                                             'the needs_confirmation result and '
+                                                             'said yes'}},
+                   'required': ['image_ids', 'review_status'],
+                   'additionalProperties': False}},
  {'name': 'make_train_package',
   'kind': 'write',
-  'risky': 'never',
+  'risky': 'when the package has warnings',
   'description': 'Build the Colab training package zip (#23) and return a download link for the '
-                 'human.',
+                 'human. The result lists warnings (one video only: no real validation set; a '
+                 'class with 0 labels). If the result is needs_confirmation, show every warning to '
+                 'the human and call again with confirm=true only after they agree.',
   'input_schema': {'type': 'object',
                    'properties': {'project_id': {'type': 'integer', 'minimum': 1},
                                   'task': {'type': 'string',
                                            'enum': ['detect', 'segment'],
-                                           'default': 'detect'}},
+                                           'default': 'detect'},
+                                  'confirm': {'type': 'boolean',
+                                              'default': False,
+                                              'description': 'true only after the human has seen '
+                                                             'the needs_confirmation result and '
+                                                             'said yes'}},
                    'required': ['project_id'],
                    'additionalProperties': False}},
  {'name': 'start_training',
   'kind': 'write',
-  'risky': 'target local (reserved)',
+  'risky': 'colab: when the package has warnings; local: always (reserved)',
   'description': "Start training a model on the project's reviewed images (#37). target 'colab' "
                  'returns a training package download link and the steps to run it on Google '
                  "Colab; target 'local' (GPU on the app host) is not available on this host and "
-                 'returns an error that points to colab.',
+                 'returns an error that points to colab. The colab result lists warnings (one '
+                 'video only: no real validation set; a class with 0 labels). If the result is '
+                 'needs_confirmation, show every warning to the human and call again with '
+                 'confirm=true only after they agree.',
   'input_schema': {'type': 'object',
                    'properties': {'project_id': {'type': 'integer', 'minimum': 1},
                                   'target': {'type': 'string', 'enum': ['colab', 'local']},

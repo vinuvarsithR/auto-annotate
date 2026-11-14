@@ -70,7 +70,8 @@ STATES = {
     ("set_annotation_status", 1): {"setup": _boxes_201_212},
     ("push_to_roboflow", 0): {"setup": _roboflow_ready},
     ("push_to_roboflow", 1): {"setup": _roboflow_ready},
-    ("start_training", 1): {"app": {"cuda_available": lambda: False}},
+    ("set_review_status", 3): {"setup": lambda app, mp: add_images(app, 11, start_id=1000)},
+    ("start_training", 2): {"app": {"cuda_available": lambda: False}},
     ("import_weights", 0): {"setup": _inbox, "app": {"inspect_weights": fake_inspect}},
     ("import_weights", 1): {"setup": _inbox, "app": {"inspect_weights": fake_inspect}},
 }
@@ -101,7 +102,7 @@ def call(app, name, args, user="tester", channel="mcp", button=False):
 def test_every_tool_has_an_example():
     names = [t["name"] for t in TOOLS_FIXTURE["tools"]]
     assert list(TOOLS_FIXTURE["examples"]) == names
-    assert len(READ_TOOLS) == 8 and len(WRITE_TOOLS) == 11
+    assert len(READ_TOOLS) == 8 and len(WRITE_TOOLS) == 13
 
 
 @pytest.mark.parametrize("tool,index,example", EXAMPLES,
@@ -162,6 +163,10 @@ def test_update_example_values(started):
     ("project_summary", {"project_id": "1"}),                  # wrong type
     ("project_summary", {"project_id": 1, "x": 1}),            # additionalProperties
     ("list_images", {"project_id": 1, "limit": 500}),
+    ("list_images", {"project_id": 1, "limit": 51}),
+    ("set_review_status", {"image_ids": [10], "review_status": "reviewed"}),
+    ("add_annotation", {"image_id": 10, "class_name": "person", "bbox": [1, 2, 3, 4],
+                        "status": "rejected"}),
     ("set_annotation_status", {"annotation_ids": [101, 101], "action": "approve"}),
     ("delete_annotation", {"annotation_id": 106, "confirm": "yes"}),
     ("project_summary", [1]),
@@ -354,11 +359,28 @@ def test_project_summary_lists_every_class_and_null_latest_job(started):
 
 def test_result_size_limit(started):
     app, _ = started
-    add_images(app, 250)
-    got = call(app, "list_images", {"project_id": 1, "limit": 200})
+    conn = connect(app)
+    with conn:  # 300 boxes on one image: get_annotations is far over 50,000 characters
+        conn.executemany("INSERT INTO annotations (id, image_id, class_id, x, y, w, h, source, "
+                         "status, created_at, updated_at) VALUES (?, 12, 1, 1, 1, 5, 5, 'owlv2', "
+                         "'needs_review', 't', 't')", [(i,) for i in range(300, 600)])
+    conn.close()
+    got = call(app, "get_annotations", {"image_id": 12})
     assert got == {"ok": False, "error": {"code": "bad_request",
                                           "message": "result too large; use offset/limit"}}
-    assert call(app, "list_images", {"project_id": 1, "limit": 20})["ok"]
+    assert call(app, "get_annotations", {"image_id": 10})["ok"]
+
+
+def test_list_images_max_50_fits_the_result_cap(started):
+    """E2E gaps item 3: limit max 50 (200 went over the cap on a 235-image project)."""
+    app, _ = started
+    add_images(app, 80)
+    got = call(app, "list_images", {"project_id": 1, "limit": 50})
+    assert got["ok"] and len(got["data"]["images"]) == 50
+    assert len(json.dumps(got)) < 50_000
+    got = call(app, "list_images", {"project_id": 1, "limit": 51})
+    assert got["error"] == {"code": "bad_request",
+                            "message": "limit: 51 is greater than the maximum of 50"}
 
 
 def test_too_large_write_result_says_it_was_done(started):
@@ -453,7 +475,8 @@ def test_train_package_download(started):
     got = call(app, "make_train_package", {"project_id": 1, "task": "segment"})
     data = got["data"]
     assert data["file_name"] == "eot_crane_train_segment.zip"
-    assert data["download_url"].startswith("/api/assistant/downloads/")
+    assert data["download_url"].startswith("http://localhost:8000/api/assistant/downloads/")
+    assert data["warnings"] == data["split"].get("warnings", [])
     r = c.get(data["download_url"])
     assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
     assert 'filename="eot_crane_train_segment.zip"' in r.headers["content-disposition"]
@@ -545,7 +568,7 @@ def test_start_training_checks(tmp_path, env, monkeypatch):
                     )["error"]["code"] == "bad_request"
         got = call(app, "start_training", {"project_id": 1, "target": "colab"})
         assert got["ok"] and got["data"]["package"]["download_url"].startswith(
-            "/api/assistant/downloads/")
+            "http://localhost:8000/api/assistant/downloads/")
         row = rows(app, "SELECT tool, outcome, summary FROM assistant_actions")[-1]
         assert (row["tool"], row["outcome"]) == ("start_training", "ok")
         assert json.loads(row["summary"])["target"] == "colab"
@@ -617,6 +640,153 @@ def test_import_weights_bad_metrics_before_the_confirmation(importing):
 
 def test_new_tool_annotations_are_not_destructive():
     from app.assistant.mcp_server import tool_annotations
-    for name in ("start_training", "import_weights"):
+    for name in ("start_training", "import_weights", "add_annotation", "set_review_status"):
         a = tool_annotations(name, "write")
         assert a.read_only_hint is False and a.destructive_hint is False
+
+
+# ------------------------------------------------------------------ E2E gaps (2026-11-15)
+
+def _review(app):
+    return rows(app, "SELECT id, review_status FROM images ORDER BY id")
+
+
+def test_set_review_status_empty_conflict_changes_nothing(started):
+    app, _ = started
+    add_images(app, 1, start_id=2000)  # no boxes: could be empty on its own
+    before = _review(app)
+    got = call(app, "set_review_status", {"image_ids": [2000, 10], "review_status": "empty"})
+    assert got["error"]["code"] == "conflict" and "image 10 " in got["error"]["message"]
+    assert _review(app) == before
+    got = call(app, "set_review_status", {"image_ids": [2000, 999], "review_status": "done"})
+    assert got["error"]["code"] == "not_found" and _review(app) == before
+    got = call(app, "set_review_status", {"image_ids": [2000], "review_status": "empty"},
+               user="dhyan")
+    assert got["ok"] and got["data"]["images"][0]["review_status"] == "empty"
+    assert got["data"]["images"][0]["web_url"] == "http://localhost:8000/#project-1/image-2000"
+    row = rows(app, "SELECT actor, project_id, outcome, summary FROM assistant_actions")[-1]
+    assert row == {"actor": "claude:dhyan", "project_id": 1, "outcome": "ok",
+                   "summary": json.dumps({"image_ids": [2000], "review_status": "empty"})}
+
+
+def test_set_review_status_10_runs_11_asks(started):
+    app, _ = started
+    add_images(app, 11, start_id=1000)
+    got = call(app, "set_review_status", {"image_ids": list(range(1000, 1010)),
+                                          "review_status": "done"})
+    assert got["ok"] and [im["id"] for im in got["data"]["images"]] == list(range(1000, 1010))
+    ids = [10, *range(1000, 1011)]
+    got = call(app, "set_review_status", {"image_ids": ids, "review_status": "todo"})
+    nc = got["needs_confirmation"]
+    assert nc["details"] == {"images": 12, "review_status": "todo",
+                             "from": {"todo": 2, "done": 10, "empty": 0}}
+    assert "2 todo, 10 done" in nc["effect"]
+    assert rows(app, "SELECT COUNT(*) AS n FROM images WHERE review_status='done'")[0]["n"] == 11  # + fixture image
+    got = call(app, "set_review_status", {"image_ids": ids, "review_status": "todo",
+                                          "confirm": True})
+    assert got["ok"] and {im["review_status"] for im in got["data"]["images"]} == {"todo"}
+
+
+def test_add_annotation_rules(started):
+    app, c = started
+    got = call(app, "add_annotation", {"image_id": 10, "class_name": "sb", "bbox": [5, 6, 7, 8],
+                                       "status": "needs_review"}, user="dhyan")
+    a = got["data"]
+    assert (a["source"], a["status"], a["score"], a["reviewer"], a["bbox"]) == (
+        "human", "needs_review", None, "claude:dhyan", [5.0, 6.0, 7.0, 8.0])
+    assert a["web_url"] == "http://localhost:8000/#project-1/image-10"
+    assert list(a)[-1] == "web_url"
+    got = call(app, "add_annotation", {"image_id": 10, "class_name": "person", "bbox": [1, 2, 3, 4]})
+    assert got["data"]["status"] == "accepted"
+    # a class of another project -> bad_class_id
+    pid = c.post("/api/projects", json={"name": "other"}).json()["id"]
+    c.put(f"/api/projects/{pid}/classes", json={"classes": [{"name": "crane",
+                                                             "description": "crane"}]})
+    got = call(app, "add_annotation", {"image_id": 10, "class_name": "crane", "bbox": [1, 2, 3, 4]})
+    assert got["error"]["code"] == "bad_class_id"
+    assert call(app, "add_annotation", {"image_id": 999, "class_name": "person",
+                                        "bbox": [1, 2, 3, 4]})["error"]["code"] == "not_found"
+    assert call(app, "add_annotation", {"image_id": 10, "class_name": "person",
+                                        "bbox": [1, 2, 0, 4]})["error"]["code"] == "bad_request"
+    # an image marked empty -> conflict, nothing added
+    add_images(app, 1, start_id=2000)
+    assert call(app, "set_review_status", {"image_ids": [2000], "review_status": "empty"})["ok"]
+    got = call(app, "add_annotation", {"image_id": 2000, "class_name": "person",
+                                       "bbox": [1, 2, 3, 4]})
+    assert got["error"]["code"] == "conflict"
+    assert rows(app, "SELECT COUNT(*) AS n FROM annotations WHERE image_id=2000")[0]["n"] == 0
+
+
+WARNINGS = [{"code": "val_is_train", "message": "No validation set."},
+            {"code": "class_without_train_labels", "class": "rb", "boxes_in_package": 0,
+             "message": "Class rb has no labelled boxes."}]
+
+
+@pytest.fixture
+def warned(started, monkeypatch):
+    """export's plan_train_package faked to report two warnings; yields (app, client, calls)."""
+    import autolabel.export as export_pkg
+
+    calls = []
+
+    def plan(project_name, task, images, classes, annotations):
+        calls.append((project_name, task))
+        if not any(im["review_status"] in ("done", "empty") for im in images):
+            raise export_pkg.NothingToExport()
+        return {"rule": "val_is_train", "warnings": WARNINGS}
+
+    monkeypatch.setattr(export_pkg, "plan_train_package", plan, raising=False)
+    app, c = started
+    yield app, c, calls
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("make_train_package", {"project_id": 1, "task": "segment"}),
+    ("start_training", {"project_id": 1, "target": "colab", "task": "segment"}),
+])
+def test_package_warnings_need_confirmation_and_build_nothing(warned, tool, args):
+    app, _, calls = warned
+    got = call(app, tool, args)
+    nc = got["needs_confirmation"]
+    assert nc["details"] == {"warnings": WARNINGS, "split": {"rule": "val_is_train",
+                                                             "warnings": WARNINGS},
+                             "task": "segment"}
+    assert "No validation set." in nc["effect"] and "Class rb has no labelled boxes." in nc["effect"]
+    assert calls == [("eot_crane", "segment")]
+    assert list(downloads.folder(app.state.data_dir).glob("*.zip")) == []
+    got = call(app, tool, {**args, "confirm": True}, user="dhyan")
+    assert got["ok"] and len(list(downloads.folder(app.state.data_dir).glob("*.zip"))) == 1
+
+
+def test_package_checks_come_before_the_warnings(warned):
+    app, _, calls = warned
+    conn = connect(app)
+    with conn:
+        conn.execute("UPDATE images SET review_status='todo'")
+    conn.close()
+    assert call(app, "make_train_package", {"project_id": 1})["error"]["code"] == "conflict"
+    assert call(app, "make_train_package", {"project_id": 99})["error"]["code"] == "not_found"
+    got = call(app, "start_training", {"project_id": 1, "target": "colab", "imgsz": 330})
+    assert got["error"]["code"] == "bad_request"
+    assert len(calls) == 1  # only the first call got as far as the plan
+
+
+def test_public_url_wins_for_web_url_and_download_url(tmp_path, monkeypatch):
+    hermetic_env(monkeypatch, tmp_path, AUTOLABEL_PUBLIC_URL="http://192.168.1.20:8000/")
+    app = make_app(tmp_path)
+    with open_client(app):
+        load_fixture_data(app)
+        ctx = ToolContext(app.state, "mcp", "dhyan", base_url="http://127.0.0.1:8000")
+        got = call_tool(ctx, "list_projects", {})
+        assert got["data"]["projects"][0]["web_url"] == "http://192.168.1.20:8000/#project-1"
+        got = call_tool(ctx, "make_train_package", {"project_id": 1})
+        assert got["data"]["download_url"].startswith(
+            "http://192.168.1.20:8000/api/assistant/downloads/")
+
+
+def test_base_url_order():
+    state = SimpleNamespace(assistant_settings=SimpleNamespace(public_url=""))
+    assert ToolContext(state, "mcp").base == "http://localhost:8000"
+    assert ToolContext(state, "mcp", base_url="http://h:1/").base == "http://h:1"
+    state.assistant_settings.public_url = "http://pub:8000"
+    assert ToolContext(state, "mcp", base_url="http://h:1").base == "http://pub:8000"

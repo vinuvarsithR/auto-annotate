@@ -104,7 +104,7 @@ def chat(request: Request, body: Any = Body(None), conn: sqlite3.Connection = De
     conn.close()  # the loop opens its own connections per tool call
     try:
         return manager.send(session_id, {"id": project["id"], "name": project["name"]},
-                            user, message)
+                            user, message, base_url=str(request.base_url).rstrip("/"))
     except ChatError as e:
         raise ApiError(502, "assistant_error", str(e))
 
@@ -122,7 +122,8 @@ def confirm(request: Request, body: Any = Body(None)):
     if decision not in ("confirm", "cancel"):
         raise ApiError(400, "bad_request", "decision must be confirm or cancel")
     user = _user(body)
-    return manager.confirm(session_id, confirm_id, decision, user)
+    return manager.confirm(session_id, confirm_id, decision, user,
+                           base_url=str(request.base_url).rstrip("/"))
 
 
 @router.delete("/assistant/chat/{session_id}", status_code=204)

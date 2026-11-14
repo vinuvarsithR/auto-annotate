@@ -34,7 +34,7 @@ FAKE_KEY = "sk-ant-test-fake-key"
 CONNECTOR_VARS = ("ANTHROPIC_API_KEY", "AUTOLABEL_MCP_TOKEN", "AUTOLABEL_CLAUDE_MODEL",
                   "AUTOLABEL_CLAUDE_EFFORT", "AUTOLABEL_CLAUDE_MAX_TOOL_CALLS",
                   "AUTOLABEL_CLAUDE_MAX_TOKENS", "AUTOLABEL_MCP_USERS_FILE",
-                  "AUTOLABEL_IMPORT_DIRS")
+                  "AUTOLABEL_IMPORT_DIRS", "AUTOLABEL_PUBLIC_URL")
 DEFAULT_MODES = {"fake": ["text", "examples"]}
 JOB_SAMPLES = ("GET /api/jobs/5", "GET /api/jobs/6", "GET /api/jobs/8 (import done)",
                "GET /api/jobs/9 (import done, folder upload)", "GET /api/jobs/10 (detect, examples)",

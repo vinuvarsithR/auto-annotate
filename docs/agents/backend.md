@@ -150,3 +150,20 @@ Decisions the contract leaves open, tell me if any is wrong:
 2026-11-13. The chat sends all 19 (tools.json). `tests/test_assistant_chat.py` now checks the request
 against tools.json and that the 17 fixture names appear in that order; please add `start_training` and
 `import_weights` after `make_train_package` in the fixture.
+(Done in 841afcc.)
+
+## 2026-11-15 E2E gaps
+
+Built: tools `set_review_status` + `add_annotation` (21 tools), `list_images` limit max 50, `web_url` on
+Project / Image / Annotation in tool results (BASE = AUTOLABEL_PUBLIC_URL, else MCP Host / chat request base URL,
+else http://localhost:8000), absolute `download_url` in tool results, #37 `warnings`, `make_train_package` /
+`start_training` risky on warnings (`training.plan_split` -> export's `plan_train_package`, before building),
+sidebar SYSTEM line. #12 insert moved to `annotations.insert_annotation` (route + tool share it).
+
+Decisions, tell me if any is wrong:
+1. Until export's `plan_train_package` is merged, `plan_split` returns None (no warnings, never risky).
+   The tools.json examples make_train_package-0/1, start_training-0/1 and test_api_training's fixture-keys test
+   need export's split.json (`val_frames`, `warnings`) and fail until then.
+2. `set_review_status`: the `empty` conflict is checked before the >10 confirmation and again inside the
+   transaction; one bad id -> nothing changes.
+3. `add_annotation` checks the body (bbox/polygon) before the image and class, as #12 does.
