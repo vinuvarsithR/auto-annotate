@@ -84,6 +84,41 @@ def test_opening_that_empties_keeps_the_mask_before_opening():
     assert np.array_equal(out, tiny)
 
 
+def parts(mask):
+    import cv2
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return len(contours)
+
+
+def test_close_px_is_contract_value():
+    assert sam.CLOSE_PX == 25
+
+
+def test_closing_joins_two_parts_20px_apart():
+    # a load cut by a cable: two halves with a 20 px gap
+    left, right = rect(55, 30, 74, 50), rect(95, 30, 105, 50)
+    out = clean_mask([left | right], [0.9], BOX)
+    assert parts(out) == 1
+    assert out[40, 85]                                   # the gap is filled
+    poly = largest_polygon(out, W, H)
+    assert min(p[0] for p in poly) * W == pytest.approx(55) and max(p[0] for p in poly) * W == pytest.approx(105)
+
+
+def test_close_px_0_leaves_two_parts():
+    left, right = rect(55, 30, 74, 50), rect(95, 30, 105, 50)
+    out = clean_mask([left | right], [0.9], BOX, open_px=0, close_px=0)   # no opening: it rounds the corners
+    assert parts(out) == 2 and np.array_equal(out, left | right)
+
+
+def test_closing_never_adds_pixels_outside_the_box():
+    # parts touch the box edges, so the closing would spill outside without the clip
+    m = rect(50, 20, 60, 60) | rect(85, 20, 110, 60) | rect(50, 20, 110, 24)
+    out = clean_mask([m], [0.9], BOX)
+    keep = rect(50, 20, 110, 60)
+    assert not (out & ~keep).any()
+    assert out[40, 70]                                   # the 24 px gap between the two bars was closed
+
+
 def test_clip_clears_pixels_outside_the_box():
     m = rect(47, 18, 113, 63)             # up to 3 px outside on every side
     out = clean_mask([m], [0.9], BOX, open_px=0)
@@ -106,11 +141,11 @@ def test_largest_polygon_of_a_rectangle():
 
 
 def test_two_parts_give_the_largest_part_and_its_bbox():
-    big, small = rect(60, 25, 100, 55), rect(103, 25, 108, 30)
+    big, small = rect(52, 25, 75, 55), rect(103, 25, 108, 30)   # 27 px apart: more than the 25 px closing joins
     seg = OneMask([big | small], [0.9])
     (out,) = add_polygons(Image.new("RGB", (W, H)), [pred()], seg)
     assert out.polygon is not None and out.mask is None
-    assert out.bbox == pytest.approx((60, 25, 40, 30))   # the big part only
+    assert out.bbox == pytest.approx((52, 25, 23, 30))   # the big part only
     assert out.score == 0.7 and out.category == "rb" and out.source == "owlv2_image"
 
 
