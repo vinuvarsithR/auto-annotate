@@ -73,6 +73,8 @@
      "delete_annotation",
      "set_hook_point",
      "make_train_package",
+     "start_training",
+     "import_weights",
      "push_to_roboflow"
     ],
     "no_confirm_property": true,
