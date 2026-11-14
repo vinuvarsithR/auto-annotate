@@ -1259,6 +1259,7 @@ names, descriptions and `input_schema`s (JSON Schema, `additionalProperties: fal
 (`list_projects`, `project_summary`, `list_images`, `get_annotations`, `list_classes`, `get_job`, `list_models`,
 `get_hook`) and 9 write tools (`add_class`, `run_detection`, `rerun_examples`, `set_annotation_status`,
 `update_annotation`, `delete_annotation`, `set_hook_point`, `make_train_package`, `push_to_roboflow`).
+Since 2026-11-14: **19 tools**, `start_training` and `import_weights` added (see *Teammates + training routes*).
 
 | Rule | Value |
 |---|---|
@@ -1445,6 +1446,226 @@ expired (> 24 h) -> 404. Files older than 24 h are deleted at startup and on eac
 | models | nothing | - |
 | integrator | this section; `docs/fixtures/assistant/` (`tools.json`, `chat_fake.json`); the #31 - #36 samples in `api_samples.json`; `requirements.txt` pins; `.env.example`; README connect steps + token risk | full `pytest` at merge |
 
+### Teammates + training routes (#37, #38; changes to #16, #23, #24, #25, #36, tools) - 2026-11-14
+Meeting 14 Nov: Claude (Claude Desktop via MCP) annotates and starts training; teammates get access by
+email. **This host has no CUDA GPU** (VERIFIED 2026-11-14: Intel Iris Xe only, no `nvidia-smi`, torch
+`2.15.0+cpu`, `torch.cuda.is_available()` False). So training runs on **Colab only** for now. Local-GPU
+training is **reserved**: its interface is fixed here so it can plug in later, but no local-training code is
+built in this contract.
+
+One model registry for both routes: the `trained_models` table, files in `data/weights/<pid>/` (the #24
+storage, unchanged). One split for both routes: `autolabel.export.train_package.split_sequences` via
+`build_train_package` (the #23 rule). A later local route **must** build its dataset with
+`build_train_package` and must not add a second split implementation, so a local and a Colab model of the
+same project (same reviewed images) are trained and validated on the same sequences.
+
+#### Registry: `trained_models` gets 3 columns (`schema.sql` + `migrate()`)
+| Column | Type | Rule |
+|---|---|---|
+| `source` | `TEXT NOT NULL DEFAULT 'colab' CHECK (source IN ('colab', 'local'))` | #24 and #38 store `colab`; `local` is reserved for the local route. Existing rows -> `colab`. |
+| `metrics` | `TEXT` (JSON or NULL) | the `metrics` object of the metrics file below, or NULL when none was given |
+| `split` | `TEXT` (JSON or NULL) | the `split` object of the metrics file (= the package's `split.json`), or NULL |
+
+**TrainedModel** (#24, #25, #38 responses) gets `"source"`, `"metrics"`, `"split"` (JSON values, `null` when
+NULL), after `uploaded_at`. `uploaded_at` is the model's date (Colab: the time it was imported).
+
+#### Metrics file (written by the notebook, read on import)
+`<run>_metrics.json` (`<run>` as in #23), UTF-8 JSON, at most 1 MB:
+```json
+{"format": "autolabel-metrics-1", "source": "colab", "task": "segment",
+ "split": {"rule": "by_sequence", "...": "the package's split.json, unchanged"},
+ "metrics": {"box": {"map50": 0.81, "map50_95": 0.55}, "mask": {"map50": 0.78, "map50_95": 0.49},
+             "epochs": 50, "imgsz": 960, "base_weights": "yolo11s-seg.pt",
+             "finished_at": "2026-11-14T09:30:00Z"}}
+```
+| Key | Rule |
+|---|---|
+| `format` | exactly `autolabel-metrics-1` |
+| `task` | must equal the import's `task` |
+| `metrics.box` | `{map50, map50_95}` floats in [0, 1] |
+| `metrics.mask` | same shape for `segment`; `null` for `detect` |
+| `epochs`, `imgsz` | positive ints; `base_weights` string; `finished_at` ISO UTC string |
+| other keys | ignored |
+
+Values come from `YOLO(best.pt).val(data=..., imgsz=..., split="val")`: `box` = `m.box.map50` / `m.box.map`,
+`mask` = `m.seg.map50` / `m.seg.map` (attributes VERIFIED in ultralytics 8.4.199 on this PC). With
+`val_is_train: true` the numbers are on the training images (the `split` says so).
+
+`autolabel/export/train_package.py` (export) adds
+`read_metrics(data: bytes, task: str) -> dict` returning `{"metrics": ..., "split": ...}`; any rule above broken
+-> raises `BadMetrics(message)`. Backend turns that into 400 `bad_metrics`.
+
+#### #23 change (notebook + optional fields)
+Body may also have `epochs` (int 1-500, default 100, unchanged), `imgsz` (int 320-2048, multiple of 32, default
+960) and `base_weights` (one of `yolo11n|s|m|l|x.pt` for `detect`, `yolo11n|s|m|l|x-seg.pt` for `segment`;
+default `yolo11s.pt` / `yolo11s-seg.pt`; a `-seg` name with `detect` or the reverse -> 400 `bad_request`).
+`build_train_package(..., epochs=EPOCHS, imgsz=IMGSZ, base_weights=None)` takes them (None = `BASE_WEIGHTS[task]`).
+Notebook still exactly 4 cells; changes:
+
+| # | Change |
+|---|---|
+| 3 | `YOLO("<base_weights>")`, `.train(..., imgsz=<imgsz>, epochs=<epochs>, ...)` from the request |
+| 4 | after the copy: `m = YOLO("/content/<run>_best.pt").val(data="/content/dataset/data.yaml", imgsz=<imgsz>, split="val")`, writes `/content/<run>_metrics.json` (format above; `split` read from `/content/dataset/split.json`), then `files.download` of the `.pt` **and** the `.json` |
+
+#### #24 change: optional `metrics` part
+| Part | Rule |
+|---|---|
+| `metrics` | optional, at most one, file name ending `.json`, 1 byte .. 1 MB; read with `read_metrics(data, task)` |
+
+Checked after the `task` check of the form and **before** loading the weights; bad -> 400 `bad_metrics` (nothing
+stored). Stored row: `source` `colab`, `metrics` / `split` from the file or NULL.
+
+Backend moves the body of `_store` into one function used by #24, #38 and (later) the local route:
+`store_weights(conn, data_dir, pid, src: Path, file_name: str, task: str, source: str, metrics: dict | None,
+inspect_weights) -> dict` (TrainedModel; same checks, order, naming, versioning as #24; copies `src`, never
+moves or deletes it unless it is #24's staging file).
+
+#### 37. POST /projects/{pid}/training
+One entry point for every training route.
+```json
+{"target": "colab", "task": "segment", "epochs": 50, "imgsz": 960, "base_weights": "yolo11s-seg.pt"}
+```
+| Field | Default | Rule |
+|---|---|---|
+| `target` | required | `colab` or `local` |
+| `task` | `"segment"` | `detect` or `segment` |
+| `epochs` | `50` | int 1-500 |
+| `imgsz` | `960` | as #23 |
+| `base_weights` | `yolo11s-seg.pt` / `yolo11s.pt` by task | as #23 |
+
+Errors, in order: unknown pid -> 404; bad body (any other field too) -> 400 `bad_request`; then by target:
+
+| `target` | Result |
+|---|---|
+| `local`, no CUDA (`app.state.cuda_available()` False) | **503 `no_gpu`**: "No CUDA GPU on this host, so local training is not possible. Use target \"colab\": it returns a training package for Google Colab; import the best.pt afterwards with POST /projects/{pid}/weights or the import_weights tool." |
+| `local`, CUDA present | **501 `not_implemented`**: "local GPU training is not built yet; use target \"colab\"" |
+| `colab` | the #23 checks (409s, 404 missing file) with these values, then **201**: |
+
+```json
+{"target": "colab", "task": "segment", "epochs": 50, "imgsz": 960, "base_weights": "yolo11s-seg.pt",
+ "package": {"download_url": "/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
+             "file_name": "eot_crane_train_segment.zip", "size_bytes": 48211234,
+             "expires_at": "2026-11-15T09:00:00Z"},
+ "split": {"rule": "by_sequence", "...": "split.json"},
+ "next_steps": ["Download the zip.", "Open train.ipynb in Google Colab (Runtime > Change runtime type > GPU).",
+                "Run the 3 code cells; it downloads <run>_best.pt and <run>_metrics.json.",
+                "Import both: Train panel upload (#24) or the import_weights tool (#38)."]}
+```
+The zip is stored like `make_train_package` (`data/assistant/downloads/<token>.zip`, served by #35 for 24 h).
+`next_steps` wording may change. `create_app(..., cuda_available=None)`: None = a function that imports `torch`
+lazily and returns `torch.cuda.is_available()` (False if torch cannot be imported); tests pass a fake.
+
+**Reserved for the local route (not built now):** `target: "local"` will answer 201 `{"target": "local", ...,
+"job": Job}` with a job of `kind` `train` (one at a time, progress = epoch/total, `result` with the latest
+box/mask mAP50 and mAP50-95, cancel via a `cancel_training` tool); finished weights go through `store_weights`
+with `source` `local` and the metrics/split of this contract. Job kind `train` and the tool name
+`cancel_training` are reserved; nothing else may use them.
+
+#### 38. POST /projects/{pid}/weights/import
+Import weights that are already on **the app host's disk** (e.g. the Google Drive for desktop folder).
+```json
+{"path": "G:\\My Drive\\autolabel\\eot_crane_segment_best.pt", "task": "segment", "metrics_path": null}
+```
+| Field | Rule |
+|---|---|
+| `path` | required, absolute; after `Path.resolve()` (symlinks followed) it must be a file inside one of the import folders, else 400 `path_not_allowed`; not a file -> 404 `not_found`; must end `.pt`, 1 byte .. 200 MB, else 400 `bad_request` |
+| `task` | required, `detect` or `segment` |
+| `metrics_path` | optional; same folder rule, `.json`. Absent or null: if `path` ends `_best.pt` and `<same folder>/<stem without _best>_metrics.json` exists, that file is used; else no metrics |
+
+Import folders: `AUTOLABEL_IMPORT_DIRS` in `.env` = absolute folders separated by `;`; default
+`<data dir>/inbox` (created at startup). Example: `AUTOLABEL_IMPORT_DIRS=D:\autoannotate\inbox;G:\My Drive\autolabel`
+(the Drive path depends on the Drive for desktop install: GUESS). The file is copied; the original stays.
+Then the same checks and storage as #24 via `store_weights` (`source` `colab`), metrics via `read_metrics`
+(400 `bad_metrics`). Response 201 TrainedModel. Owner: backend.
+
+**Security:** loading a `.pt` runs code inside it, on the app host. That is why #38 only reads from the import
+folders and why `import_weights` always needs `confirm`.
+
+#### #16 and #25 change
+#25: each TrainedModel now has `source`, `metrics`, `split`. #16 with `project_id` adds a key `trained`: that
+project's non-deleted trained models in version order, each `{"name", "source", "task", "uploaded_at",
+"metrics"}`. Without `project_id`: no `trained` key (unchanged).
+
+#### Tools: 19 (was 17)
+`tools.json` adds two write tools after `make_train_package` (exact schemas in the fixture):
+
+| Tool | Maps to | Risky | `data` / `details` |
+|---|---|---|---|
+| `start_training` | #37 | when `target` is `local` (reserved; today #37 errors first, so no confirmation is ever returned) | `data` = #37 response |
+| `import_weights` | #38 | **always** | `details` = `{"path", "task", "metrics_path", "project_id"}` (resolved metrics path or null); `data` = TrainedModel |
+
+Order rule unchanged: input check -> entry checks (404/400/409/503/501) -> confirmation -> run. So
+`import_weights` returns `path_not_allowed` / `not_found` before asking. Weights checks that need loading the
+file (`bad_weights`, `task_mismatch`, `class_mismatch`) run only after `confirm`. MCP annotations: both
+`read_only_hint: false, destructive_hint: false`. `list_models` data gets `trained` (#16 change).
+
+Final list: **read (8)** `list_projects`, `project_summary`, `list_images`, `get_annotations`, `list_classes`,
+`get_job`, `list_models`, `get_hook`; **write (11)** `add_class`, `run_detection`, `rerun_examples`,
+`set_annotation_status`, `update_annotation`, `delete_annotation`, `set_hook_point`, `make_train_package`,
+`start_training`, `import_weights`, `push_to_roboflow`.
+
+#### #36 change: per-teammate tokens
+Users file: `AUTOLABEL_MCP_USERS_FILE` in `.env`, default `<data dir>/mcp_users.json` (`data/` is gitignored,
+VERIFIED with `git check-ignore`). It stores **hashes only**:
+```json
+{"users": [{"email": "teammate@example.com", "token_sha256": "64 hex chars", "added_at": "2026-11-14T10:00:00Z"}]}
+```
+Token = `"alu_" + secrets.token_urlsafe(32)`. The server re-reads the file when its mtime changes (adding or
+removing a teammate needs no restart). Missing file = no users. Unreadable / bad JSON -> logged once (path only),
+treated as no users.
+
+Gate on `/mcp` and `/mcp/` (replaces the #36 token row; `/api` unchanged):
+
+| Request | Result |
+|---|---|
+| `Authorization: Bearer T`, sha256(T) matches a user (`hmac.compare_digest` on hex) | allowed, any client address; **user = that email**, `X-Autolabel-User` ignored |
+| bearer = `AUTOLABEL_MCP_TOKEN` (when set) | allowed, any address; user from `X-Autolabel-User` (unchanged) |
+| bearer given, matches nothing | **403 `forbidden`** "unknown or revoked token" |
+| no bearer (or not `Bearer ...`), `AUTOLABEL_MCP_TOKEN` set | 401 `unauthorized` "missing bearer token" (loopback too: unchanged) |
+| no bearer, no shared token, loopback client | allowed (unchanged); `Host` must be `127.0.0.1:*`, `localhost:*` or `[::1]:*`, else 403 |
+| no bearer, no shared token, not loopback, the users file has >= 1 user | **401 `unauthorized`** "missing bearer token" |
+| no bearer, no shared token, not loopback, no users | 403 `forbidden` (unchanged message) |
+
+The SDK's DNS-rebinding protection is turned **off** always; the `Host` check in the loopback row replaces it
+(it must be per request now that users can appear without a restart). The **wrong shared token** changes from
+401 to 403 (backend updates its existing test). Name rule: a user from a token is the email (lower-case, as
+stored); reviewer = `claude:<email>`; `assistant_actions` gets the email as the user. #31 `token_required` =
+shared token set **or** >= 1 user.
+
+**`scripts/add_teammate.py`** (owner: backend; runs on the app host, reads `.env` for the users-file path):
+
+| Command | Does |
+|---|---|
+| `python scripts/add_teammate.py EMAIL [--host IP] [--port 8000]` | email check (one `@`, a dot after it, <= 254 chars, lower-cased; bad -> exit 2); makes a token, stores its hash (an existing email gets a **new** token, the old one stops working), writes the file atomically; prints to stdout: the token (shown once, not recoverable), the Claude Desktop config block (stdio launcher, `--url http://IP:PORT/mcp/`, token in `env.AUTOLABEL_MCP_TOKEN`), the Claude Code `claude mcp add` line, and "send this privately; anyone with it can use the app as EMAIL". `IP` default = this PC's LAN IP (UDP socket "connect" to `192.0.2.1:9`, nothing is sent; fallback `127.0.0.1` with a warning) |
+| `--remove EMAIL` | deletes the entry (the token stops working at once); unknown -> exit 1 |
+| `--list` | emails + `added_at` only |
+
+Never writes the token to a log, the repo, or anywhere but stdout. Tests use a temp users file.
+
+**`mcp_stdio.py` change:** `--token TOKEN` (wins) or env `AUTOLABEL_MCP_TOKEN` -> `Authorization: Bearer`. With a
+token, `AUTOLABEL_USER` is optional (no warning). `add_teammate.py` puts the token in `env`, not `--token`
+(command-line arguments are visible to other local users in the process list).
+
+**Docs (README, integrator):** teammates need the app started with `uvicorn app.main:app --host 0.0.0.0 --port 8000`;
+Windows firewall, once, in an **admin** PowerShell:
+`New-NetFirewallRule -DisplayName "autolabel 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private`
+(the Wi-Fi / LAN network must be set to Private). Token risks: per-user tokens can be revoked one by one, but
+plain HTTP is still readable on the LAN, and `/api` (the web app) has no login.
+
+#### Claude chat page (`docs/claude_panel/index.html`)
+An unchanged copy of `D:\autoannotate\spikes\claude_panel\index.html` (integrator). Each teammate publishes their
+own copy; it links to `http://127.0.0.1:8000/` (`APP_URL`), which a teammate on another PC changes to the app
+host's LAN address in their copy. Nobody builds anything for it.
+
+#### Who builds what (teammates + training routes)
+| Role | Builds | Tests (must pass; no GPU, no network) |
+|---|---|---|
+| export | `read_metrics` + `BadMetrics`; #23 optional `epochs` / `imgsz` / `base_weights` (route + `build_train_package` kwargs); notebook cells 3-4 (val, metrics json, two downloads) | `tests/test_export_train_package.py` extended: kwargs reach cell 3; cell 4 has `.val(`, `_metrics.json`, two `files.download`; `-seg`/task mismatch -> 400; `read_metrics` good file, each bad rule, `detect` with `mask` null |
+| backend | migration (3 columns); `store_weights`; #24 `metrics` part; #25 / #16 fields; #37 (`cuda_available` injection, `no_gpu` / `not_implemented`, colab package); #38 + `AUTOLABEL_IMPORT_DIRS`; tools `start_training`, `import_weights`; users file + new gate; `scripts/add_teammate.py`; `mcp_stdio.py --token` | `test_api_training.py`: #37 colab ok (fake `cuda_available`), local without CUDA -> 503 `no_gpu` with "colab" in the message, local with CUDA -> 501, bad fields -> 400; `test_api_trained_models.py` extended: metrics part stored / `bad_metrics` / none -> nulls, `source` `colab`, #16 `trained`; `test_api_weights_import.py`: inside / outside import dirs (incl. `..` and a symlink out), sibling metrics picked up, original kept; `test_assistant_tools.py`: the new `tools.json` examples; `test_assistant_mcp.py`: remote no bearer -> 401, wrong -> 403, user token -> 200 and `claude:<email>` reviewer with a lying `X-Autolabel-User`, removed user -> 403 without restart, shared token still works, loopback without token unchanged, bad `Host` from loopback -> 403; `test_add_teammate.py`: stores hash not token, prints config with IP/port, re-add rotates, `--remove`, bad email exit 2; `test_assistant_stdio.py`: `--token` beats env; `test_assistant_secrets.py`: a user token never appears in responses, logs, `assistant_actions` |
+| ui | Train panel: optional metrics `.json` file next to the `.pt` upload (#24) and `bad_metrics` shown; model list shows source, date, box/mask mAP50 and mAP50-95 (from #25; "-" when null); a "Train on this PC (GPU)" button calling #37 `target: "local"` that shows the error message as is; same in `?mock=1` | manual check |
+| models | nothing | - |
+| integrator | this section; `tools.json` (19 tools + examples), `api_samples.json` (TrainedModel fields, #16 `trained`, #37, #38, 401/403 samples); `.env.example` (`AUTOLABEL_IMPORT_DIRS=`, `AUTOLABEL_MCP_USERS_FILE=`); README teammate + firewall steps; `docs/claude_panel/index.html` copy | full `pytest` at merge |
+
 ## 3. Detector interface (Python)
 
 The models session owns `autolabel/models/` and `autolabel/pipeline.py`. The types below go in
@@ -1583,11 +1804,11 @@ Rules:
 
 | Owner | Owns (creates and edits) | Tests |
 |---|---|---|
-| backend | `app/api/` (except `export.py`), `app/db/`, `app/worker/`, `app/main.py`, `app/assistant/` | `tests/test_api_*.py`, `tests/test_db_*.py`, `tests/test_worker_*.py`, `tests/test_assistant_*.py` |
+| backend | `app/api/` (except `export.py`), `app/db/`, `app/worker/`, `app/main.py`, `app/assistant/`, `scripts/add_teammate.py` | `tests/test_api_*.py`, `tests/test_db_*.py`, `tests/test_worker_*.py`, `tests/test_assistant_*.py` |
 | models | `autolabel/models/`, `autolabel/pipeline.py` | `tests/test_models_*.py`, `tests/test_pipeline_*.py` |
 | ui | `app/static/` (incl. the Claude sidebar) | (manual check against fixtures) |
 | export | `autolabel/export/`, `autolabel/importers/`, `app/api/export.py` | `tests/test_export_*.py`, `tests/test_importers_*.py` |
-| integrator | `CLAUDE.md`, `requirements.txt`, `pyproject.toml`, `README.md`, `.env.example`, `docs/CONTRACT.md`, `docs/fixtures/` | merges, runs full `pytest` |
+| integrator | `CLAUDE.md`, `requirements.txt`, `pyproject.toml`, `README.md`, `.env.example`, `docs/CONTRACT.md`, `docs/fixtures/`, `docs/claude_panel/` | merges, runs full `pytest` |
 
 Rules:
 - **Don't edit files you don't own.** If you need a change somewhere else, write it in your notes.
@@ -1603,6 +1824,7 @@ Rules:
   calls them.
 - No session runs anything on the GPU while the paused YOLO training (pid 3863) is holding it.
 - The `.env` keys (`ROBOFLOW_API_KEY`, `ANTHROPIC_API_KEY`, `AUTOLABEL_MCP_TOKEN`) are never printed, logged or committed.
+  Teammate tokens (`scripts/add_teammate.py`) are printed once to stdout and otherwise never logged or committed.
 
 ---
 

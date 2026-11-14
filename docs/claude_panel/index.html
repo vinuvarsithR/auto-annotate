@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-Annotate: Claude panel</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --line:#e3e2dc; --text:#1f1f1c; --muted:#6b6a63; --accent:#2b6cb0; --warn:#9a5b00; --err:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1b1b19; --card:#252522; --line:#3a3934; --text:#ecebe6; --muted:#a3a29a; --accent:#6aa5e8; --warn:#e0a84a; --err:#f2877b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); display:flex; flex-direction:column; height:100vh; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  #status { font-size:12px; color:var(--muted); }
+  #status.ok::before { content:"● "; color:#2e8b57; }
+  #status.bad::before { content:"● "; color:var(--err); }
+  header a { margin-left:auto; color:var(--accent); font-size:13px; }
+  #projects { padding:8px 16px; border-bottom:1px solid var(--line); font-size:12px; color:var(--muted); display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:2px 10px; color:var(--text); cursor:pointer; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:760px; padding:10px 12px; border-radius:10px; white-space:pre-wrap; word-wrap:break-word; }
+  .user { align-self:flex-end; background:var(--accent); color:#fff; }
+  .assistant { align-self:flex-start; background:var(--card); border:1px solid var(--line); }
+  .tool { align-self:flex-start; font-size:12px; color:var(--muted); font-family:ui-monospace,Consolas,monospace; }
+  .tool.err { color:var(--err); }
+  .note { align-self:center; font-size:12px; color:var(--warn); text-align:center; max-width:640px; }
+  form { display:flex; gap:8px; padding:12px 16px; border-top:1px solid var(--line); }
+  textarea { flex:1; resize:none; height:56px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); font:inherit; }
+  button { padding:0 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.secondary { background:transparent; color:var(--muted); border:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Auto-Annotate · Claude panel</h1>
+  <span id="status">Connecting…</span>
+  <a href="http://127.0.0.1:8000/" target="_blank" rel="noopener">Open the web app to review ↗</a>
+</header>
+<div id="projects"></div>
+<div id="log"></div>
+<form id="form">
+  <textarea id="input" placeholder="e.g. Run OWLv2 with SAM outlines on project 5, then tell me which images need review"></textarea>
+  <button id="send" type="submit">Send</button>
+  <button id="stop" type="button" class="secondary" disabled>Stop</button>
+  <button id="clear" type="button" class="secondary">Clear</button>
+</form>
+
+<script>
+const SERVER = "host:autolabel";
+const APP_URL = "http://127.0.0.1:8000/";
+const MAX_RESULT = 8000;
+
+const INSTRUCTIONS = `You are the assistant inside the team's locally hosted auto-annotation app (crane-camera dataset; classes include rb, sb, biax, Person).
+You act ONLY through the tools given. Rules:
+- Read before you write: check projects, models, images and jobs before starting work.
+- Tools with a "confirm" argument: first call WITHOUT confirm, show the human what would happen, and only call again with confirm=true after the human says yes in this chat. Never set confirm=true on your own.
+- Prefer set_annotation_status reject over delete_annotation.
+- After starting a job, report its job id and check progress with get_job when asked.
+- Humans verify results in the web app (${APP_URL}). Point them to the project and image ids to check.
+- Be short. Use plain English. Give ids and counts. If a tool fails, say what failed and what the human can do.`;
+
+const T = (name, description, properties, required) => ({ name, description, inputSchema: { type: "object", properties, required: required || [] } });
+const pid = { type: "integer", minimum: 1 };
+const confirm = { type: "boolean", default: false, description: "true only after the human has seen the needs_confirmation result and said yes" };
+const st = { type: "string", enum: ["auto_accepted", "needs_review", "accepted", "rejected", "edited"] };
+
+const TOOLS = [
+  T("list_projects", "List all projects with box counts by status.", {}),
+  T("project_summary", "One project: image counts by review status, box counts by class and status, the latest job.", { project_id: pid }, ["project_id"]),
+  T("list_images", "List a project's images (id order). status = images having at least one box with that status.", { project_id: pid, limit: { type: "integer", minimum: 1, maximum: 200, default: 50 }, offset: { type: "integer", minimum: 0, default: 0 }, review_status: { type: "string", enum: ["todo", "done", "empty"] }, status: st }, ["project_id"]),
+  T("get_annotations", "The image and its boxes (bbox [x, y, w, h] px, polygon normalized 0..1 or null).", { image_id: pid, status: st }, ["image_id"]),
+  T("list_classes", "The project's classes in project order (the YOLO export order).", { project_id: pid }, ["project_id"]),
+  T("list_models", "Detector names and their modes usable for run_detection in this project.", { project_id: pid }, ["project_id"]),
+  T("get_job", "A job's status, progress and result.", { job_id: pid }, ["job_id"]),
+  T("get_hook", "Hook-filter settings and the hook point of each video (sequence) of the project.", { project_id: pid }, ["project_id"]),
+  T("add_class", "Add one class at the end of the project's class list.", { project_id: pid, name: { type: "string", minLength: 1, maxLength: 100 }, description: { type: "string", maxLength: 500 }, min_score: { type: ["number", "null"], minimum: 0, maximum: 1 }, accept_score: { type: ["number", "null"], minimum: 0, maximum: 1 } }, ["project_id", "name"]),
+  T("run_detection", "Start a detect job. image_ids omitted = all images of the project. Needs confirm=true when it would run on more than 50 images.", { project_id: pid, model: { type: "string", minLength: 1 }, mode: { type: ["string", "null"] }, masks: { type: "string", enum: ["sam2", "none"] }, image_ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 10000 }, confirm }, ["project_id", "model"]),
+  T("rerun_examples", "Re-run the last examples-mode job on every image still in review_status todo. Needs confirm=true when that is more than 50 images.", { project_id: pid, confirm }, ["project_id"]),
+  T("set_annotation_status", "Approve (status accepted) or reject (status rejected) boxes. All or nothing. Needs confirm=true for more than 10 boxes.", { annotation_ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 500, uniqueItems: true }, action: { type: "string", enum: ["approve", "reject"] }, confirm }, ["annotation_ids", "action"]),
+  T("update_annotation", "Change one box: bbox px, polygon (normalized; null removes it), class by name, or status. Send at least one field.", { annotation_id: pid, bbox: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4 }, polygon: { type: ["array", "null"], minItems: 3, items: { type: "array", minItems: 2, maxItems: 2, items: { type: "number", minimum: 0, maximum: 1 } } }, class_name: { type: "string", minLength: 1 }, status: st }, ["annotation_id"]),
+  T("delete_annotation", "Permanently delete one box. Prefer set_annotation_status reject. Always needs confirm=true.", { annotation_id: pid, confirm }, ["annotation_id"]),
+  T("set_hook_point", "Set the hook point (x, y image pixels) of the video (sequence) that image_id belongs to.", { image_id: pid, x: { type: "number" }, y: { type: "number" } }, ["image_id", "x", "y"]),
+  T("make_train_package", "Build the Colab training package zip and return a download link for the human.", { project_id: pid, task: { type: "string", enum: ["detect", "segment"], default: "detect" } }, ["project_id"]),
+  T("push_to_roboflow", "Start a Roboflow push job for done/empty images not pushed yet. Always needs confirm=true.", { project_id: pid, statuses: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["auto_accepted", "needs_review", "accepted", "edited"] } }, confirm }, ["project_id"])
+];
+
+const $ = id => document.getElementById(id);
+const log = $("log");
+let history = [];
+let mcp = null, sample = null, busy = false, abort = null;
+
+function add(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.textContent = text;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+function setStatus(text, ok) { const s = $("status"); s.textContent = text; s.className = ok === undefined ? "" : (ok ? "ok" : "bad"); }
+
+function explain(e) {
+  const c = e && e.code;
+  if (c === "server_not_connected") return "The app's MCP server isn't reachable. Check that the app is running on port 8000, that Claude Desktop has the 'autolabel' server in its config, and that this page is open in the Claude desktop app.";
+  if (c === "cancelled") return "You declined this action in the Claude app, so it did not run.";
+  if (c === "not_in_manifest") return "This tool isn't allowed for this page, or you turned it off.";
+  if (c === "approval_required") return "This action needs your approval in the Claude app.";
+  if (c === "tool_error") return "The app reported an error: " + (e.message || "");
+  if (c === "server_unavailable") return "The app didn't answer in time. It may be busy; it may still have run the action, so check before repeating it.";
+  return (c ? c + ": " : "") + (e && e.message ? e.message : String(e));
+}
+
+async function callApp(name, input) {
+  const r = await mcp.callTool(SERVER, name, input || {});
+  return r.payload !== undefined ? r.payload : r.content;
+}
+
+function toolDefs() {
+  return TOOLS.map(t => ({
+    name: t.name, description: t.description, inputSchema: t.inputSchema,
+    execute: async (input) => {
+      const line = add("tool", "→ " + t.name + " " + JSON.stringify(input || {}));
+      try {
+        const out = await callApp(t.name, input);
+        let s = JSON.stringify(out);
+        if (s && s.length > MAX_RESULT) s = s.slice(0, MAX_RESULT) + " …[truncated; ask for fewer items]";
+        line.textContent += " ✓";
+        return s;
+      } catch (e) {
+        line.classList.add("err");
+        line.textContent += " ✗ " + explain(e);
+        throw new Error(explain(e));
+      }
+    }
+  }));
+}
+
+async function loadProjects() {
+  const box = $("projects");
+  try {
+    const p = await callApp("list_projects", {});
+    const list = Array.isArray(p) ? p : (p && (p.data || p.projects)) || [];
+    const arr = Array.isArray(list) ? list : (list.projects || []);
+    box.innerHTML = "";
+    const label = document.createElement("span"); label.textContent = "Projects:"; box.appendChild(label);
+    arr.forEach(pr => {
+      const c = document.createElement("span");
+      c.className = "chip";
+      c.textContent = "#" + pr.id + " " + (pr.name || "");
+      c.title = "Insert into message";
+      c.onclick = () => { $("input").value += (($("input").value ? " " : "") + "project " + pr.id); $("input").focus(); };
+      box.appendChild(c);
+    });
+    setStatus("Connected to the app", true);
+  } catch (e) {
+    box.textContent = "";
+    setStatus("App not reachable", false);
+    add("note", explain(e));
+  }
+}
+
+async function send(text) {
+  if (busy || !text.trim()) return;
+  busy = true; $("send").disabled = true; $("stop").disabled = false;
+  add("user", text);
+  history.push({ role: "user", content: text });
+  const msgs = history.map((m, i) => i === 0 ? { role: m.role, content: INSTRUCTIONS + "\n\nHuman: " + m.content } : m);
+  const bubble = add("assistant", "Thinking…");
+  abort = new AbortController();
+  try {
+    const res = await sample(msgs, {
+      tools: toolDefs(),
+      cache: false,
+      signal: abort.signal,
+      onText: ({ text }) => { bubble.textContent = text || "Thinking…"; log.scrollTop = log.scrollHeight; }
+    });
+    bubble.textContent = res.text || "(no answer)";
+    history.push({ role: "assistant", content: res.text || "(no answer)" });
+    if (res.truncated) add("note", "The answer was cut off. Ask Claude to continue.");
+  } catch (e) {
+    const partial = e && e.text;
+    bubble.textContent = partial || "(stopped)";
+    if (partial) history.push({ role: "assistant", content: partial });
+    else history.pop();
+    if (e && e.code === "not_granted") add("note", "Claude chat isn't allowed for this page. Allow it when the Claude app asks.");
+    else if (e && e.code === "rate_limited") add("note", "Your Claude usage limit is reached for now. Try again later.");
+    else if (e && e.name !== "AbortError" && e.code !== "cancelled") add("note", explain(e));
+  } finally {
+    busy = false; abort = null; $("send").disabled = false; $("stop").disabled = true;
+  }
+}
+
+$("form").addEventListener("submit", ev => { ev.preventDefault(); const v = $("input").value; $("input").value = ""; send(v); });
+$("input").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("form").requestSubmit(); } });
+$("stop").onclick = () => { if (abort) abort.abort(); };
+$("clear").onclick = () => { if (busy) return; history = []; log.innerHTML = ""; add("note", "New conversation."); };
+
+(async () => {
+  add("note", "Ask Claude to label, review or prepare training data. Check its work in the web app. Actions that change data ask for your OK first.");
+  const [m, s] = await Promise.all([claude.use("mcp"), claude.use("sample")]);
+  mcp = m; sample = s;
+  if (!sample) { setStatus("Claude chat unavailable", false); $("send").disabled = true; add("note", "Claude chat isn't available here. Open this page in the Claude desktop app."); return; }
+  if (!mcp) { setStatus("App tools unavailable", false); $("send").disabled = true; add("note", "App tools aren't available here. Open this page in the Claude desktop app on the PC where the 'autolabel' server is set up."); return; }
+  loadProjects();
+})();
+</script>
+</body>
+</html>

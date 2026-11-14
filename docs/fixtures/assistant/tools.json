@@ -480,6 +480,118 @@
    }
   },
   {
+   "name": "start_training",
+   "kind": "write",
+   "risky": "target local (reserved)",
+   "description": "Start training a model on the project's reviewed images (#37). target 'colab' returns a training package download link and the steps to run it on Google Colab; target 'local' (GPU on the app host) is not available on this host and returns an error that points to colab.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "target": {
+      "type": "string",
+      "enum": [
+       "colab",
+       "local"
+      ]
+     },
+     "task": {
+      "type": "string",
+      "enum": [
+       "detect",
+       "segment"
+      ],
+      "default": "segment"
+     },
+     "epochs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 50
+     },
+     "imgsz": {
+      "type": "integer",
+      "minimum": 320,
+      "maximum": 2048,
+      "multipleOf": 32,
+      "default": 960
+     },
+     "base_weights": {
+      "type": "string",
+      "enum": [
+       "yolo11n.pt",
+       "yolo11s.pt",
+       "yolo11m.pt",
+       "yolo11l.pt",
+       "yolo11x.pt",
+       "yolo11n-seg.pt",
+       "yolo11s-seg.pt",
+       "yolo11m-seg.pt",
+       "yolo11l-seg.pt",
+       "yolo11x-seg.pt"
+      ]
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "project_id",
+     "target"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "import_weights",
+   "kind": "write",
+   "risky": "always",
+   "description": "Import trained weights (a best.pt from Colab) that are on the app host's disk, inside an import folder such as the Google Drive folder (#38). Registers them like an upload: listed by list_models and usable by run_detection. Loading a .pt runs code, so always confirm.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "project_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "path": {
+      "type": "string",
+      "minLength": 1
+     },
+     "task": {
+      "type": "string",
+      "enum": [
+       "detect",
+       "segment"
+      ]
+     },
+     "metrics_path": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "default": null
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "project_id",
+     "path",
+     "task"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "name": "push_to_roboflow",
    "kind": "write",
    "risky": "always",
@@ -926,7 +1038,16 @@
         "examples"
        ],
        "eot_crane_v1": []
-      }
+      },
+      "trained": [
+       {
+        "name": "eot_crane_v1",
+        "source": "colab",
+        "task": "segment",
+        "uploaded_at": "2026-11-11T10:00:00Z",
+        "metrics": null
+       }
+      ]
      }
     }
    }
@@ -1441,6 +1562,182 @@
         "sb"
        ]
       }
+     }
+    }
+   }
+  ],
+  "start_training": [
+   {
+    "input": {
+     "project_id": 1,
+     "target": "colab",
+     "task": "segment"
+    },
+    "output": {
+     "ok": true,
+     "data": {
+      "target": "colab",
+      "task": "segment",
+      "epochs": 50,
+      "imgsz": 960,
+      "base_weights": "yolo11s-seg.pt",
+      "package": {
+       "download_url": "/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
+       "file_name": "eot_crane_train_segment.zip",
+       "size_bytes": 48211234,
+       "expires_at": "2026-11-15T09:00:00Z"
+      },
+      "split": {
+       "rule": "by_sequence",
+       "val_target": 0.2,
+       "val_is_train": false,
+       "train": {
+        "sequences": [
+         "biax__cam0_2026-09-29_18-48-25",
+         "rb_load__cam0_2026-09-29_18-34-11"
+        ],
+        "images": 40
+       },
+       "val": {
+        "sequences": [
+         "rb_load__cam0_2026-09-29_18-24-11"
+        ],
+        "images": 10
+       },
+       "classes_missing_in_train": [],
+       "classes_missing_in_val": [
+        "sb"
+       ]
+      },
+      "next_steps": [
+       "Download the zip.",
+       "Open train.ipynb in Google Colab (Runtime > Change runtime type > GPU).",
+       "Run the 3 code cells; it downloads eot_crane_segment_best.pt and eot_crane_segment_metrics.json.",
+       "Import both: Train panel upload (#24) or the import_weights tool (#38)."
+      ]
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "target": "local"
+    },
+    "state": "cuda_available returns False",
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "no_gpu",
+      "message": "No CUDA GPU on this host, so local training is not possible. Use target \"colab\": it returns a training package for Google Colab; import the best.pt afterwards with POST /projects/1/weights or the import_weights tool."
+     }
+    }
+   }
+  ],
+  "import_weights": [
+   {
+    "input": {
+     "project_id": 1,
+     "path": "D:\\autoannotate\\inbox\\eot_crane_segment_best.pt",
+     "task": "segment"
+    },
+    "state": "AUTOLABEL_IMPORT_DIRS=D:\\autoannotate\\inbox with both files in it",
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "import_weights",
+      "effect": "Load and register the weights file D:\\autoannotate\\inbox\\eot_crane_segment_best.pt as a new segment model of project 1. Loading a .pt runs code inside it: only import weights you trained.",
+      "details": {
+       "path": "D:\\autoannotate\\inbox\\eot_crane_segment_best.pt",
+       "task": "segment",
+       "metrics_path": "D:\\autoannotate\\inbox\\eot_crane_segment_metrics.json",
+       "project_id": 1
+      },
+      "arguments": {
+       "project_id": 1,
+       "path": "D:\\autoannotate\\inbox\\eot_crane_segment_best.pt",
+       "task": "segment"
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "path": "D:\\autoannotate\\inbox\\eot_crane_segment_best.pt",
+     "task": "segment",
+     "confirm": true
+    },
+    "state": "AUTOLABEL_IMPORT_DIRS=D:\\autoannotate\\inbox with both files in it; weights 1 exists",
+    "user": "dhyan",
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 2,
+      "project_id": 1,
+      "name": "eot_crane_v2",
+      "version": 2,
+      "task": "segment",
+      "class_names": [
+       "person",
+       "rb",
+       "sb",
+       "biax"
+      ],
+      "imgsz": 960,
+      "file_name": "eot_crane_segment_best.pt",
+      "size_bytes": 19876543,
+      "uploaded_at": "2026-11-14T10:00:00Z",
+      "source": "colab",
+      "metrics": {
+       "box": {
+        "map50": 0.81,
+        "map50_95": 0.55
+       },
+       "mask": {
+        "map50": 0.78,
+        "map50_95": 0.49
+       },
+       "epochs": 50,
+       "imgsz": 960,
+       "base_weights": "yolo11s-seg.pt",
+       "finished_at": "2026-11-14T09:30:00Z"
+      },
+      "split": {
+       "rule": "by_sequence",
+       "val_target": 0.2,
+       "val_is_train": false,
+       "train": {
+        "sequences": [
+         "biax__cam0_2026-09-29_18-48-25",
+         "rb_load__cam0_2026-09-29_18-34-11"
+        ],
+        "images": 40
+       },
+       "val": {
+        "sequences": [
+         "rb_load__cam0_2026-09-29_18-24-11"
+        ],
+        "images": 10
+       },
+       "classes_missing_in_train": [],
+       "classes_missing_in_val": [
+        "sb"
+       ]
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "path": "C:\\Windows\\evil.pt",
+     "task": "segment"
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "path_not_allowed",
+      "message": "C:\\Windows\\evil.pt is not inside an import folder (AUTOLABEL_IMPORT_DIRS)"
      }
     }
    }
