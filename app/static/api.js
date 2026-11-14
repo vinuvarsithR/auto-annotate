@@ -192,11 +192,12 @@ const realApi = {
 
   // ---- Train on Colab (#23 - #26)
   trainPackage: (pid, task) => postForZip(`/projects/${pid}/train-package`, { task }, `project_${pid}_train_${task}.zip`),
-  // #24: one .pt part + the task form field. Response 201 is a TrainedModel.
-  uploadWeights(pid, file, task, onProgress) {
+  // #24: one .pt part + the task form field (+ optional metrics .json part). Response 201 is a TrainedModel.
+  uploadWeights(pid, file, task, onProgress, metricsFile = null) {
     const form = new FormData();
     form.append("file", file, file.name);
     form.append("task", task);
+    if (metricsFile) form.append("metrics", metricsFile, metricsFile.name);
     return sendMultipart(`/api/projects/${pid}/weights`, form, onProgress);
   },
   listWeights: (pid) => http("GET", `/projects/${pid}/weights`),
@@ -220,9 +221,9 @@ const realApi = {
   async listModels(pid = null) {
     try {
       const d = await http("GET", pid ? `/models?project_id=${pid}` : "/models");
-      return { models: d.models, modes: d.modes || {}, fallback: false };
+      return { models: d.models, modes: d.modes || {}, trained: d.trained || [], fallback: false };
     } catch (e) {
-      if (e.httpStatus === 404) return { models: FALLBACK_MODELS.slice(), modes: {}, fallback: true };
+      if (e.httpStatus === 404) return { models: FALLBACK_MODELS.slice(), modes: {}, trained: [], fallback: true };
       throw e;
     }
   },
@@ -238,6 +239,7 @@ const MOCK_PREP_POLLS = 2;    // polls an examples job stays running at 0 while 
 const EXAMPLE_CAP = 30;       // contract #9: at most 30 examples per class
 const TRAIN_TASKS = ["detect", "segment"];        // #23 / #24
 const WEIGHTS_MAX_BYTES = 200 * 1024 * 1024;     // #24: at most 200 MB
+const METRICS_MAX_BYTES = 1024 * 1024;           // #24 metrics part: at most 1 MB
 const APPROVED = ["auto_accepted", "accepted", "edited"]; // statuses #14 / #23 export
 
 // ---------------------------------------------------------------- mock mode
@@ -258,7 +260,8 @@ async function loadMock() {
     annotations: clone(fx["all_annotations"]),
     jobs: [],
     // TrainedModel rows (+ deleted_at); the mock keeps no .pt file.
-    weights: clone((fx["GET /api/projects/1/weights"] || { weights: [] }).weights).map((w) => ({ ...w, deleted_at: null })),
+    weights: clone((fx["GET /api/projects/1/weights"] || { weights: [] }).weights)
+      .map((w) => ({ source: "colab", metrics: null, split: null, ...w, deleted_at: null })),
     pushed: new Set(),   // image ids "sent to Roboflow" by a mock push job (no SDK call in mock mode)
     // #27 - #30 per project id: {load_classes: null | [...], radius: null | number, points: [Point]}
     hooks: {},
@@ -285,6 +288,33 @@ function mockSafeName(name) { return String(name).replace(/[^A-Za-z0-9_-]+/g, "_
 
 function mockLiveWeights(db, pid) {
   return db.weights.filter((w) => w.project_id === Number(pid) && !w.deleted_at).sort((a, b) => a.version - b.version);
+}
+
+// The #24 metrics file rules (CONTRACT "Metrics file"), as read_metrics checks them; broken -> 400 bad_metrics.
+function mockReadMetrics(text, task) {
+  const bad = (msg) => new ApiError("bad_metrics", `metrics file: ${msg}`, 400);
+  let d;
+  try { d = JSON.parse(text); } catch (e) { throw bad("not valid JSON"); }
+  if (!d || typeof d !== "object" || Array.isArray(d)) throw bad("must be a JSON object");
+  if (d.format !== "autolabel-metrics-1") throw bad("format must be autolabel-metrics-1");
+  if (d.task !== task) throw bad(`task is "${d.task}", not "${task}"`);
+  const m = d.metrics;
+  if (!m || typeof m !== "object") throw bad("metrics must be an object");
+  const pair = (x, key) => {
+    if (!x || typeof x !== "object") throw bad(`metrics.${key} must be {map50, map50_95}`);
+    for (const k of ["map50", "map50_95"]) {
+      if (typeof x[k] !== "number" || x[k] < 0 || x[k] > 1) throw bad(`metrics.${key}.${k} must be a number in [0, 1]`);
+    }
+  };
+  pair(m.box, "box");
+  if (task === "segment") pair(m.mask, "mask");
+  else if (m.mask != null) throw bad("metrics.mask must be null for detect");
+  for (const k of ["epochs", "imgsz"]) {
+    if (!Number.isInteger(m[k]) || m[k] < 1) throw bad(`metrics.${k} must be a positive integer`);
+  }
+  if (typeof m.base_weights !== "string") throw bad("metrics.base_weights must be a string");
+  if (typeof m.finished_at !== "string" || isNaN(new Date(m.finished_at))) throw bad("metrics.finished_at must be an ISO UTC time");
+  return { metrics: clone(m), split: d.split === undefined ? null : clone(d.split) };
 }
 
 function stripWeights(w) {
@@ -898,7 +928,12 @@ The real server sends a zip here.
     if (pid == null) return out;
     const db = await loadMock();
     mockProject(db, pid);
-    for (const w of mockLiveWeights(db, pid)) { out.models.push(w.name); out.modes[w.name] = []; }
+    out.trained = [];
+    for (const w of mockLiveWeights(db, pid)) {
+      out.models.push(w.name);
+      out.modes[w.name] = [];
+      out.trained.push(clone({ name: w.name, source: w.source, task: w.task, uploaded_at: w.uploaded_at, metrics: w.metrics }));
+    }
     return out;
   },
 
@@ -922,13 +957,17 @@ The real server sends a zip with data.yaml, split.json, train.ipynb, images and 
   // #24 in mock mode. A browser cannot open a .pt, so the "checkpoint" is made up from the file name:
   // the task sent and the project's classes, unless the name contains "detect" / "segment" (that
   // task, for task_mismatch), "pose" (bad_weights) or "beam" (one class swapped, for class_mismatch).
-  async uploadWeights(pid, file, task, onProgress) {
+  async uploadWeights(pid, file, task, onProgress, metricsFile = null) {
     const db = await loadMock();
     const p = mockProject(db, pid);
     pid = Number(pid);
     if (!file || !/\.pt$/i.test(file.name)) throw new ApiError("bad_request", "file must be one .pt file", 400);
     if (!file.size || file.size > WEIGHTS_MAX_BYTES) throw new ApiError("bad_request", "file must be 1 byte .. 200 MB", 400);
     if (!TRAIN_TASKS.includes(task)) throw new ApiError("bad_request", `task must be detect or segment, got "${task}"`, 400);
+    if (metricsFile && (!/\.json$/i.test(metricsFile.name) || !metricsFile.size || metricsFile.size > METRICS_MAX_BYTES)) {
+      throw new ApiError("bad_request", "metrics must be one .json file, 1 byte .. 1 MB", 400);
+    }
+    const metricsRead = metricsFile ? mockReadMetrics(await metricsFile.text(), task) : { metrics: null, split: null };
     const project_classes = mockClasses(db, pid).map((c) => c.name);
     if (!project_classes.length) throw new ApiError("no_classes", "project has no classes", 400);
     for (let k = 1; k <= 4; k++) { if (onProgress) onProgress(k / 4); await mockDelay(120); }
@@ -949,7 +988,8 @@ The real server sends a zip with data.yaml, split.json, train.ipynb, images and 
     let name = `${mockSafeName(p.name)}_v${version}`;
     if (db.weights.some((w) => w.name === name)) name = `${mockSafeName(p.name)}_p${pid}_v${version}`;
     const w = { id: db.nextWeightsId++, project_id: pid, name, version, task, class_names: model_classes,
-                imgsz: 960, file_name: file.name, size_bytes: file.size, uploaded_at: now(), deleted_at: null };
+                imgsz: 960, file_name: file.name, size_bytes: file.size, uploaded_at: now(),
+                source: "colab", metrics: metricsRead.metrics, split: metricsRead.split, deleted_at: null };
     db.weights.push(w);
     return stripWeights(w);
   },

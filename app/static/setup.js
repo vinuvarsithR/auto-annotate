@@ -553,6 +553,34 @@ async function saveClasses() {
   if (pid === state.projectId) await openProject(pid); // review screen class lists + legend
 }
 
+// ------------------------------------------------------------ trained model info (#16 trained, #25)
+const SOURCE_LABELS = { colab: "Colab", local: "Local GPU" };
+const fmt2 = (x) => (typeof x === "number" ? x.toFixed(2) : "?");
+
+// A TrainedModel's metrics (CONTRACT "Metrics file") as "box 0.81 / 0.55 · mask 0.78 / 0.49" (mAP50 / mAP50-95).
+function fmtMetrics(m) {
+  if (!m || !m.box) return "no metrics";
+  let s = `box ${fmt2(m.box.map50)} / ${fmt2(m.box.map50_95)}`;
+  if (m.mask) s += ` · mask ${fmt2(m.mask.map50)} / ${fmt2(m.mask.map50_95)}`;
+  return s;
+}
+
+// Training details for a tooltip: epochs, image size, base weights, when it finished.
+function metricsTitle(m) {
+  if (!m) return "No metrics file was uploaded with this model.";
+  const parts = ["mAP50 / mAP50-95 on the validation images"];
+  if (m.epochs) parts.push(`${m.epochs} epochs`);
+  if (m.imgsz) parts.push(`image size ${m.imgsz}`);
+  if (m.base_weights) parts.push(`from ${m.base_weights}`);
+  if (m.finished_at) parts.push(`finished ${fmtDate(m.finished_at)}`);
+  return parts.join(", ");
+}
+
+// "Colab · 11 Nov 2026 · box 0.81 / 0.55" for one #16 `trained` entry or TrainedModel.
+function trainedSummary(t) {
+  return [SOURCE_LABELS[t.source] || t.source || "?", fmtDate(t.uploaded_at), fmtMetrics(t.metrics)].join(" · ");
+}
+
 // ------------------------------------------------------------ detection job
 // With a project open, #16 ?project_id= adds its uploaded models (#24) after the built-in detectors.
 async function loadModels() {
@@ -572,6 +600,8 @@ async function loadModels() {
   note.hidden = !(data && data.fallback);
   note.textContent = "Model list not available from the server (endpoint 16 missing); showing defaults.";
   setup.modes = (data && data.modes) || {};
+  setup.trained = {};
+  for (const t of (data && data.trained) || []) setup.trained[t.name] = t;
   renderModes();
   updateButtons();
 }
@@ -591,6 +621,12 @@ function renderModes() {
   }
   if (modes.includes(keep)) sel.value = keep;
   $("modeField").hidden = modes.length < 2;
+  // A trained model: its source, date and metrics next to the choice.
+  const t = (setup.trained || {})[$("modelSelect").value];
+  const info = $("modelInfo");
+  info.hidden = !t;
+  info.textContent = t ? trainedSummary(t) : "";
+  info.title = t ? metricsTitle(t.metrics) : "";
   renderMasks();
 }
 

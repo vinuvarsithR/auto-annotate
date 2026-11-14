@@ -9,7 +9,7 @@
 <script>
   // Cache busting: every CSS/JS file is loaded as file?v=ASSET_VERSION, so a browser never
   // mixes old and new files. Bump this one value whenever any CSS or JS file changes.
-  window.ASSET_VERSION = "2026-11-13.2";
+  window.ASSET_VERSION = "2026-11-14.1";
   document.write('<link rel="stylesheet" href="style.css?v=' + ASSET_VERSION + '">');
 </script>
 </head>
@@ -137,6 +137,7 @@
       <h2>Run detection</h2>
       <div class="row run-row">
         <label class="field">Model <select id="modelSelect"></select></label>
+        <span class="muted num-tab model-info" id="modelInfo" hidden></span>
         <label class="field" id="modeField" hidden>Mode <select id="modeSelect"></select></label>
         <label class="check" id="masksField" hidden title="SAM 2 draws an outline (polygon) around each box. Slower: about 2 s more per image on CPU.">
           <input id="masksCheck" type="checkbox"> Outlines (SAM 2)</label>
