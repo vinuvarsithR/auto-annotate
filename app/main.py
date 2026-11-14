@@ -8,7 +8,10 @@ Run it (from the repo root, inside .venv):
 * data/app.db and data/uploads/ are created on startup.
 * A background worker thread runs detect, roboflow_push and import jobs (app/worker/worker.py).
 * Claude connector (app/assistant/): #31 - #35 under /api/assistant, the MCP server at /mcp/
-  and /mcp (token / loopback gate on both), settings from .env read in the lifespan.
+  and /mcp (teammate token / shared token / loopback gate on both), settings from .env read in
+  the lifespan.
+* #37 training (Colab package; local = 503 no_gpu without CUDA), #38 weights import from
+  data/inbox or AUTOLABEL_IMPORT_DIRS.
 * create_app(...) lets tests use a temp folder, a fake detector and no thread.
 """
 
@@ -26,7 +29,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Route
 
-from app.api import annotations, classes, hook, images, imports, jobs, models, projects, weights
+from app.api import (annotations, classes, hook, images, imports, jobs, models, projects,
+                     training, weights)
 from app.api.errors import install_error_handlers
 from app.assistant import routes as assistant_routes
 from app.assistant.mcp_server import McpGate, McpNoSlash
@@ -44,8 +48,12 @@ def start_assistant(app: FastAPI, anthropic_client=None):
     from app.assistant.chat import ChatManager
     from app.assistant.settings import load_settings
 
+    from app.assistant.users import UsersFile
+
     settings = load_settings()
     app.state.assistant_settings = settings
+    app.state.mcp_users = UsersFile(settings.users_file
+                                    or Path(app.state.data_dir) / "mcp_users.json")
     downloads.cleanup(app.state.data_dir)
 
     def make_client():
@@ -58,7 +66,7 @@ def start_assistant(app: FastAPI, anthropic_client=None):
     try:
         from app.assistant.mcp_server import build_http_app, build_server
         server = build_server(app.state)
-        app.state.mcp_http_app = build_http_app(server, settings.token_required)
+        app.state.mcp_http_app = build_http_app(server)
     except ImportError:
         logging.getLogger("app").warning("mcp package not installed: /mcp/ is off")
         app.state.mcp_http_app = None
@@ -104,6 +112,18 @@ def default_register_trained(name: str, path: str, task: str, model=None) -> Non
     register_trained(name, path, task, model=model)
 
 
+def default_cuda_available() -> bool:
+    """#37: True when torch is installed and sees a CUDA GPU (torch imported only when asked)."""
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 - no torch (or a broken one) = no GPU
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def default_unregister_trained(name: str) -> None:
     try:
         from autolabel.models import unregister_trained
@@ -122,15 +142,18 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
                inspect_weights: Callable | None = None,
                register_trained: Callable | None = None,
                unregister_trained: Callable | None = None,
+               cuda_available: Callable[[], bool] | None = None,
                anthropic_client=None) -> FastAPI:
     """anthropic_client: None = built from ANTHROPIC_API_KEY on the first chat message;
-    tests pass a fake with .messages.create and .beta.messages.create."""
+    tests pass a fake with .messages.create and .beta.messages.create.
+    cuda_available: None = default_cuda_available (#37 target local)."""
     data_dir = Path(data_dir)
     db_path = data_dir / "app.db"
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         db.init_db(db_path)
+        (data_dir / "inbox").mkdir(parents=True, exist_ok=True)  # #38 default import folder
         conn = db.connect(db_path)
         try:
             db.fail_stale_jobs(conn)
@@ -157,13 +180,14 @@ def create_app(data_dir: str | Path = "data", *, start_worker: bool = True,
     app.state.inspect_weights = inspect_weights or default_inspect_weights
     app.state.register_trained = register_trained or default_register_trained
     app.state.unregister_trained = unregister_trained or default_unregister_trained
+    app.state.cuda_available = cuda_available or default_cuda_available
     app.state.worker = Worker(db_path, load_pipeline=load_pipeline, load_pusher=load_pusher,
                               load_importers=load_importers,
                               register_trained=app.state.register_trained)
 
     install_error_handlers(app)
-    for module in (projects, images, imports, classes, jobs, annotations, models, weights, hook,
-                   assistant_routes):
+    for module in (projects, images, imports, classes, jobs, annotations, models, weights,
+                   training, hook, assistant_routes):
         app.include_router(module.router, prefix="/api")
     gate = McpGate(app.state)  # #36; not under /api
     app.router.routes.append(Route("/mcp", McpNoSlash(gate)))  # exact /mcp, every method

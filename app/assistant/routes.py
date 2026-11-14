@@ -77,7 +77,14 @@ def status(request: Request):
     s = _settings(request)
     return {"chat_available": s.chat_available, "model": s.model,
             "max_tool_calls": s.max_tool_calls,
-            "mcp": {"path": "/mcp/", "token_required": s.token_required}}
+            "mcp": {"path": "/mcp/", "token_required": token_required(request.app.state)}}
+
+
+def token_required(state) -> bool:
+    """#31: the shared token is set, or the users file has at least one teammate."""
+    s = state.assistant_settings
+    users = getattr(state, "mcp_users", None)
+    return s.token_required or (users is not None and users.count() >= 1)
 
 
 @router.post("/assistant/chat")

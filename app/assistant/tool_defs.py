@@ -1,7 +1,7 @@
 """
 tool_defs.py - the Claude connector tool list (docs/CONTRACT.md "Claude connector").
 
-Copied from docs/fixtures/assistant/tools.json `tools` (17 tools, that order; names, descriptions
+Copied from docs/fixtures/assistant/tools.json `tools` (19 tools, that order; names, descriptions
 and input_schema exact). `kind` (read / write) and `risky` are contract metadata, never sent.
 tests/test_assistant_mcp.py checks this list is still identical to the fixture.
 """
@@ -227,6 +227,65 @@ TOOLS: list[dict] = [{'name': 'list_projects',
                                            'enum': ['detect', 'segment'],
                                            'default': 'detect'}},
                    'required': ['project_id'],
+                   'additionalProperties': False}},
+ {'name': 'start_training',
+  'kind': 'write',
+  'risky': 'target local (reserved)',
+  'description': "Start training a model on the project's reviewed images (#37). target 'colab' "
+                 'returns a training package download link and the steps to run it on Google '
+                 "Colab; target 'local' (GPU on the app host) is not available on this host and "
+                 'returns an error that points to colab.',
+  'input_schema': {'type': 'object',
+                   'properties': {'project_id': {'type': 'integer', 'minimum': 1},
+                                  'target': {'type': 'string', 'enum': ['colab', 'local']},
+                                  'task': {'type': 'string',
+                                           'enum': ['detect', 'segment'],
+                                           'default': 'segment'},
+                                  'epochs': {'type': 'integer',
+                                             'minimum': 1,
+                                             'maximum': 500,
+                                             'default': 50},
+                                  'imgsz': {'type': 'integer',
+                                            'minimum': 320,
+                                            'maximum': 2048,
+                                            'multipleOf': 32,
+                                            'default': 960},
+                                  'base_weights': {'type': 'string',
+                                                   'enum': ['yolo11n.pt',
+                                                            'yolo11s.pt',
+                                                            'yolo11m.pt',
+                                                            'yolo11l.pt',
+                                                            'yolo11x.pt',
+                                                            'yolo11n-seg.pt',
+                                                            'yolo11s-seg.pt',
+                                                            'yolo11m-seg.pt',
+                                                            'yolo11l-seg.pt',
+                                                            'yolo11x-seg.pt']},
+                                  'confirm': {'type': 'boolean',
+                                              'default': False,
+                                              'description': 'true only after the human has seen '
+                                                             'the needs_confirmation result and '
+                                                             'said yes'}},
+                   'required': ['project_id', 'target'],
+                   'additionalProperties': False}},
+ {'name': 'import_weights',
+  'kind': 'write',
+  'risky': 'always',
+  'description': "Import trained weights (a best.pt from Colab) that are on the app host's disk, "
+                 'inside an import folder such as the Google Drive folder (#38). Registers them '
+                 'like an upload: listed by list_models and usable by run_detection. Loading a .pt '
+                 'runs code, so always confirm.',
+  'input_schema': {'type': 'object',
+                   'properties': {'project_id': {'type': 'integer', 'minimum': 1},
+                                  'path': {'type': 'string', 'minLength': 1},
+                                  'task': {'type': 'string', 'enum': ['detect', 'segment']},
+                                  'metrics_path': {'type': ['string', 'null'], 'default': None},
+                                  'confirm': {'type': 'boolean',
+                                              'default': False,
+                                              'description': 'true only after the human has seen '
+                                                             'the needs_confirmation result and '
+                                                             'said yes'}},
+                   'required': ['project_id', 'path', 'task'],
                    'additionalProperties': False}},
  {'name': 'push_to_roboflow',
   'kind': 'write',

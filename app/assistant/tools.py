@@ -20,12 +20,10 @@ annotations.reviewer set it to "claude:<name>".
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
 import sqlite3
-import zipfile
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -41,9 +39,10 @@ from app.api import images as images_api
 from app.api import jobs as jobs_api
 from app.api import models as models_api
 from app.api import projects as projects_api
+from app.api import training as training_api
+from app.api import weights as weights_api
 from app.api.deps import require_project
 from app.api.errors import ApiError, not_found
-from app.assistant import downloads
 from app.assistant.settings import scrub
 from app.assistant.tool_defs import TOOLS
 from app.db import db
@@ -441,9 +440,6 @@ def _set_hook_point(run: _Run):
     return data
 
 
-_FILENAME = re.compile(r'filename="([^"]+)"')
-
-
 def _make_train_package(run: _Run):
     from app.api import export as export_api  # export's module: imported, never edited
 
@@ -451,15 +447,44 @@ def _make_train_package(run: _Run):
     pid = run.project_id = a["project_id"]
     task = a.get("task", "detect")
     response = export_api.train_package(pid, {"task": task}, run.conn)
-    blob = bytes(response.body)
-    m = _FILENAME.search(response.headers.get("content-disposition", ""))
-    file_name = m.group(1) if m else f"project_{pid}_train_{task}.zip"
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        split = json.loads(zf.read("split.json"))
-    token, expires_at = downloads.save(run.ctx.state.data_dir, blob, file_name)
-    run.summary = {"file_name": file_name, "size_bytes": len(blob)}
-    return {"download_url": f"/api/assistant/downloads/{token}", "file_name": file_name,
-            "size_bytes": len(blob), "expires_at": expires_at, "split": split}
+    data = training_api.package_download(run.ctx.state, response,
+                                         f"project_{pid}_train_{task}.zip")
+    run.summary = {"file_name": data["file_name"], "size_bytes": data["size_bytes"]}
+    return data
+
+
+TRAINING_FIELDS = ("target", "task", "epochs", "imgsz", "base_weights")
+
+
+def _start_training(run: _Run):
+    a, conn = run.args, run.conn
+    pid = run.project_id = a["project_id"]
+    require_project(conn, pid)
+    values = training_api.check_body({k: a[k] for k in TRAINING_FIELDS if k in a})
+    training_api.check_target(run.ctx.state, pid, values)  # local: 503 / 501 before any confirm
+    if values["target"] == "local" and not run.confirm:  # reserved: unreachable today
+        raise NeedsConfirmation(f"Train a {values['task']} model on this host's GPU.", values)
+    data = training_api.colab_package(run.ctx.state, conn, pid, values)
+    run.summary = {"target": values["target"], "file_name": data["package"]["file_name"]}
+    return data
+
+
+def _import_weights(run: _Run):
+    a, conn = run.args, run.conn
+    pid = run.project_id = a["project_id"]
+    plan = weights_api.plan_import(conn, run.ctx.state.data_dir, pid,
+                                   {k: a[k] for k in ("path", "task", "metrics_path") if k in a})
+    path = str(plan["path"])
+    metrics_path = str(plan["metrics_path"]) if plan["metrics_path"] is not None else None
+    if not run.confirm:  # always: loading a .pt runs code
+        raise NeedsConfirmation(
+            f"Load and register the weights file {path} as a new {plan['task']} model of "
+            f"project {pid}. Loading a .pt runs code inside it: only import weights you trained.",
+            {"path": path, "task": plan["task"], "metrics_path": metrics_path,
+             "project_id": pid})
+    data = weights_api.run_import(conn, run.ctx.state, pid, plan)
+    run.summary = {"weights_id": data["id"], "name": data["name"]}
+    return data
 
 
 def _push_to_roboflow(run: _Run):
@@ -513,6 +538,8 @@ HANDLERS: dict[str, Callable[[_Run], Any]] = {
     "delete_annotation": _delete_annotation,
     "set_hook_point": _set_hook_point,
     "make_train_package": _make_train_package,
+    "start_training": _start_training,
+    "import_weights": _import_weights,
     "push_to_roboflow": _push_to_roboflow,
 }
 assert list(HANDLERS) == [t["name"] for t in TOOLS], "HANDLERS must follow tool_defs order"

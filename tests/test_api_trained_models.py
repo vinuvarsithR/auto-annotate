@@ -15,6 +15,7 @@ from app.db import db
 from app.main import create_app
 from tests.test_api_fixture_keys import FIXTURES, same_keys
 from tests.test_api_helpers import FakePipeline, setup_project
+from tests.test_assistant_helpers import export_shims, metrics_file
 
 NAMES = ["person", "rb", "sb", "biax"]
 
@@ -240,9 +241,14 @@ def test_models_with_project_id(client):
     upload(client, a)
     got = client.get("/api/models", params={"project_id": a}).json()
     same_keys(got, FIXTURES["GET /api/models?project_id=1"])
+    trained = got.pop("trained")
     assert got == {"models": ["fake", "eot_crane_v1"],
                    "modes": {"fake": ["text", "examples"], "eot_crane_v1": []}}
+    assert [{k: t[k] for k in ("name", "source", "task", "metrics")} for t in trained] == [
+        {"name": "eot_crane_v1", "source": "colab", "task": "segment", "metrics": None}]
+    assert client.get("/api/models", params={"project_id": b}).json()["trained"] == []
     assert client.get("/api/models", params={"project_id": b}).json()["models"] == ["fake"]
+    assert "trained" not in client.get("/api/models").json()  # no project_id: unchanged
     assert client.get("/api/models").json()["models"] == ["fake"]
     err(client.get("/api/models", params={"project_id": 999}), 404, "not_found")
 
@@ -308,3 +314,89 @@ def test_delete_project_removes_weights(client, hooks):
     assert client.delete(f"/api/projects/{pid}").status_code == 204
     assert not weights_dir(client, pid).exists()
     assert sorted(hooks.unregistered) == ["eot_crane_v1", "eot_crane_v2"]
+
+
+# ------------------------------------------------------------------ 2026-11-14: metrics part, source
+
+
+def upload_with_metrics(c, pid, metrics: bytes, task="segment", name="eot_crane_segment_metrics.json"):
+    return c.post(f"/api/projects/{pid}/weights",
+                  files={"file": ("eot_crane_segment_best.pt", pt(task), "application/octet-stream"),
+                         "metrics": (name, metrics, "application/json")},
+                  data={"task": task})
+
+
+def test_upload_with_metrics_stores_them(client, monkeypatch):
+    export_shims(monkeypatch)
+    pid = setup_project(client, n_images=1)["pid"]
+    r = upload_with_metrics(client, pid, json.dumps(metrics_file()).encode())
+    assert r.status_code == 201, r.text
+    m = r.json()
+    same_keys(m, FIXTURES["POST /api/projects/1/weights (with metrics)"])
+    want = FIXTURES["metrics file (eot_crane_segment_metrics.json)"]
+    assert (m["source"], m["metrics"], m["split"]) == ("colab", want["metrics"], want["split"])
+    listed = client.get(f"/api/projects/{pid}/weights").json()["weights"]
+    assert listed[0]["metrics"] == want["metrics"] and listed[0]["split"] == want["split"]
+    trained = client.get("/api/models", params={"project_id": pid}).json()["trained"]
+    assert trained[0]["metrics"] == want["metrics"] and trained[0]["source"] == "colab"
+
+
+def test_upload_without_metrics_has_nulls(client):
+    pid = setup_project(client, n_images=1)["pid"]
+    m = upload(client, pid).json()
+    assert (m["source"], m["metrics"], m["split"]) == ("colab", None, None)
+
+
+def test_bad_metrics_stores_nothing_and_loads_nothing(client, hooks, monkeypatch):
+    export_shims(monkeypatch)
+    pid = setup_project(client, n_images=1)["pid"]
+    bad = dict(metrics_file(), format="nope")
+    body = err(upload_with_metrics(client, pid, json.dumps(bad).encode()), 400, "bad_metrics")
+    assert body == FIXTURES["error example (400 bad_metrics, #24)"]
+    err(upload_with_metrics(client, pid, json.dumps(metrics_file("detect")).encode()),
+        400, "bad_metrics")  # task detect in the file, segment in the form
+    err(upload_with_metrics(client, pid, b""), 400, "bad_metrics")
+    err(upload_with_metrics(client, pid, b"{" + b" " * (1024 * 1024 + 1) + b"}"), 400,
+        "bad_metrics")
+    assert hooks.inspected == []  # checked before the weights are loaded
+    assert client.get(f"/api/projects/{pid}/weights").json()["weights"] == []
+    assert not weights_dir(client, pid).exists() or list(weights_dir(client, pid).iterdir()) == []
+    assert [p.name for p in (Path(client.app.state.data_dir) / "weights").glob("staging_*")] == []
+
+
+def test_metrics_part_rules(client, monkeypatch):
+    export_shims(monkeypatch)
+    pid = setup_project(client, n_images=1)["pid"]
+    good = json.dumps(metrics_file()).encode()
+    err(upload_with_metrics(client, pid, good, name="metrics.txt"), 400, "bad_request")
+    r = client.post(f"/api/projects/{pid}/weights",
+                    files=[("file", ("best.pt", pt(), "application/octet-stream")),
+                           ("metrics", ("a_metrics.json", good, "application/json")),
+                           ("metrics", ("b_metrics.json", good, "application/json"))],
+                    data={"task": "segment"})
+    err(r, 400, "bad_request")
+
+
+def test_detect_metrics_with_null_mask(client, monkeypatch):
+    export_shims(monkeypatch)
+    pid = setup_project(client, n_images=1)["pid"]
+    r = upload_with_metrics(client, pid, json.dumps(metrics_file("detect")).encode(), task="detect")
+    assert r.status_code == 201, r.text
+    assert r.json()["metrics"]["mask"] is None
+
+
+def test_store_weights_copies_the_source(client, tmp_path):
+    from app.api.weights import store_weights
+
+    pid = setup_project(client, n_images=1)["pid"]
+    src = tmp_path / "keep_best.pt"
+    src.write_bytes(pt())
+    conn = db.connect(client.app.state.db_path)
+    try:
+        m = store_weights(conn, client.app.state.data_dir, pid, src, src.name, "segment", "colab",
+                          None, client.app.state.inspect_weights)
+    finally:
+        conn.close()
+    assert src.read_bytes() == pt()  # the original stays
+    assert (weights_dir(client, pid) / f"{m['name']}.pt").read_bytes() == pt()
+    assert (m["file_name"], m["source"]) == ("keep_best.pt", "colab")

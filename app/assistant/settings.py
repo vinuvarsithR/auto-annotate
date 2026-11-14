@@ -34,6 +34,7 @@ class AssistantSettings:
     effort: str = DEFAULT_EFFORT
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
     max_tokens: int = DEFAULT_MAX_TOKENS
+    users_file: str = ""  # AUTOLABEL_MCP_USERS_FILE; "" = <data dir>/mcp_users.json
 
     @property
     def chat_available(self) -> bool:
@@ -41,6 +42,7 @@ class AssistantSettings:
 
     @property
     def token_required(self) -> bool:
+        """The SHARED token is set (teammate tokens: see routes.status / McpGate)."""
         return bool(self.mcp_token)
 
     def secrets(self) -> list[str]:
@@ -75,6 +77,7 @@ def load_settings(env_file: Path | None = None) -> AssistantSettings:
         effort=(os.environ.get("AUTOLABEL_CLAUDE_EFFORT") or "").strip() or DEFAULT_EFFORT,
         max_tool_calls=_positive_int("AUTOLABEL_CLAUDE_MAX_TOOL_CALLS", DEFAULT_MAX_TOOL_CALLS),
         max_tokens=_positive_int("AUTOLABEL_CLAUDE_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+        users_file=(os.environ.get("AUTOLABEL_MCP_USERS_FILE") or "").strip(),
     )
 
 

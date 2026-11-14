@@ -33,7 +33,8 @@ CHAT_FIXTURE = json.loads((ROOT / "docs" / "fixtures" / "assistant" / "chat_fake
 FAKE_KEY = "sk-ant-test-fake-key"
 CONNECTOR_VARS = ("ANTHROPIC_API_KEY", "AUTOLABEL_MCP_TOKEN", "AUTOLABEL_CLAUDE_MODEL",
                   "AUTOLABEL_CLAUDE_EFFORT", "AUTOLABEL_CLAUDE_MAX_TOOL_CALLS",
-                  "AUTOLABEL_CLAUDE_MAX_TOKENS")
+                  "AUTOLABEL_CLAUDE_MAX_TOKENS", "AUTOLABEL_MCP_USERS_FILE",
+                  "AUTOLABEL_IMPORT_DIRS")
 DEFAULT_MODES = {"fake": ["text", "examples"]}
 JOB_SAMPLES = ("GET /api/jobs/5", "GET /api/jobs/6", "GET /api/jobs/8 (import done)",
                "GET /api/jobs/9 (import done, folder upload)", "GET /api/jobs/10 (detect, examples)",
@@ -50,12 +51,105 @@ def hermetic_env(monkeypatch, tmp_path, key: str = FAKE_KEY, token: str = "", **
         monkeypatch.setenv(name, value)
 
 
-def make_app(tmp_path, anthropic_client=None, detectors=("fake",), modes=None):
+def make_app(tmp_path, anthropic_client=None, detectors=("fake",), modes=None, **kw):
+    """kw goes to create_app (inspect_weights, cuda_available, ...). Default cuda_available:
+    False, so no test imports torch for it."""
     modes = DEFAULT_MODES if modes is None else modes
+    kw.setdefault("cuda_available", lambda: False)
     return create_app(tmp_path / "data", start_worker=False, static_dir=None,
                       list_detectors=lambda: list(detectors),
                       detector_modes=lambda name: list(modes.get(name, [])),
-                      anthropic_client=anthropic_client)
+                      anthropic_client=anthropic_client, **kw)
+
+
+# ------------------------------------------------------------------ teammates + training (#37, #38)
+
+class WeightsInfo:
+    def __init__(self, task, class_names, imgsz):
+        self.task, self.class_names, self.imgsz = task, class_names, imgsz
+
+
+def fake_inspect(path, model=None):
+    """inspect_weights stand-in: the .pt bytes are JSON {"task", "names", "imgsz"}; bytes
+    starting with b"bad" are an unloadable checkpoint."""
+    raw = Path(path).read_bytes()
+    if raw.startswith(b"bad"):
+        raise ValueError("not a loadable ultralytics checkpoint")
+    d = json.loads(raw)
+    return WeightsInfo(d["task"], d["names"], d.get("imgsz"))
+
+
+def fake_pt(task="segment", names=("person", "rb", "sb", "biax"), imgsz=960) -> bytes:
+    return json.dumps({"task": task, "names": list(names), "imgsz": imgsz}).encode()
+
+
+def metrics_file(task="segment") -> dict:
+    """The fixture's metrics file (a copy); detect: task detect, mask null."""
+    d = json.loads(json.dumps(SAMPLES["metrics file (eot_crane_segment_metrics.json)"]))
+    if task == "detect":
+        d["task"] = "detect"
+        d["metrics"]["mask"] = None
+    return d
+
+
+def export_has(name: str) -> bool:
+    """Whether export's side of the 2026-11-14 contract is merged yet."""
+    import inspect
+    from autolabel.export import train_package as tp
+    if name == "read_metrics":
+        return hasattr(tp, "read_metrics") and hasattr(tp, "BadMetrics")
+    if name == "train_options":
+        return "imgsz" in inspect.signature(tp.build_train_package).parameters
+    raise KeyError(name)
+
+
+def export_shims(monkeypatch) -> list[dict]:
+    """Stand-ins for export's not-yet-merged pieces, used ONLY while they are missing (after the
+    merge the real code runs): read_metrics / BadMetrics with the contract's format and task
+    rules, and a #23 route that accepts epochs / imgsz / base_weights (recorded in the returned
+    list) and builds with the task only."""
+    import app.api.export as export_api
+    from autolabel.export import train_package as tp
+
+    calls: list[dict] = []
+    if not export_has("read_metrics"):
+        class BadMetrics(ValueError):
+            pass
+
+        def read_metrics(data: bytes, task: str) -> dict:
+            try:
+                d = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise BadMetrics("metrics file: not valid JSON")
+            if not isinstance(d, dict) or d.get("format") != "autolabel-metrics-1":
+                raise BadMetrics("metrics file: format must be autolabel-metrics-1")
+            if d.get("task") != task:
+                raise BadMetrics(f"metrics file: task must be {task}")
+            return {"metrics": d.get("metrics"), "split": d.get("split")}
+
+        monkeypatch.setattr(tp, "BadMetrics", BadMetrics, raising=False)
+        monkeypatch.setattr(tp, "read_metrics", read_metrics, raising=False)
+    if not export_has("train_options"):
+        original = export_api.train_package
+
+        def train_package(pid, body=None, conn=None):
+            body = dict(body or {})
+            calls.append(body)
+            return original(pid, {"task": body.get("task", "detect")}, conn)
+
+        monkeypatch.setattr(export_api, "train_package", train_package)
+    return calls
+
+
+def swap(value, old: str, new: str):
+    """`value` with `old` replaced by `new` in every string (for fixture paths)."""
+    if isinstance(value, str):
+        return value.replace(old, new)
+    if isinstance(value, dict):
+        return {k: swap(v, old, new) for k, v in value.items()}
+    if isinstance(value, list):
+        return [swap(v, old, new) for v in value]
+    return value
 
 
 def open_client(app, client_host: str = "127.0.0.1", host: str = "localhost:8000") -> TestClient:

@@ -199,16 +199,24 @@ def test_no_token_dns_rebinding_protection_is_on(app_no_token):
 
 # ------------------------------------------------------------------ HTTP, token set
 
-@pytest.mark.parametrize("auth", [None, "Bearer wrong", f"Basic {TOKEN}", "Bearer ", TOKEN,
-                                  f"Bearer {TOKEN}x"])
-def test_token_set_needs_the_right_bearer(app_token, auth):
+@pytest.mark.parametrize("auth", [None, f"Basic {TOKEN}", "Bearer ", TOKEN])
+def test_token_set_needs_a_bearer(app_token, auth):
     _, c = app_token
     h = dict(JSON_HEADERS)
     if auth is not None:
         h["authorization"] = auth
     r = c.post("/mcp/", headers=h, json=INIT)
     assert r.status_code == 401
-    assert r.json() == SAMPLES["error example (401 unauthorized, /mcp/ bad token)"]
+    assert r.json() == SAMPLES["error example (401 unauthorized, /mcp/ no bearer)"]
+    assert TOKEN not in r.text
+
+
+@pytest.mark.parametrize("auth", ["Bearer wrong", f"Bearer {TOKEN}x"])
+def test_token_set_wrong_bearer_is_403(app_token, auth):
+    _, c = app_token
+    r = c.post("/mcp/", headers={**JSON_HEADERS, "authorization": auth}, json=INIT)
+    assert r.status_code == 403
+    assert r.json() == SAMPLES["error example (403 forbidden, /mcp/ wrong token)"]
     assert TOKEN not in r.text
 
 
@@ -270,3 +278,155 @@ def test_env_file_is_read_and_environment_wins(tmp_path, monkeypatch):
     s = settings.load_settings()
     assert (s.model, s.effort) == ("claude-from-file", "medium")
     monkeypatch.delenv("AUTOLABEL_CLAUDE_MODEL")  # load_dotenv put it in os.environ
+
+
+# ------------------------------------------------------------------ teammate tokens (2026-11-14)
+
+from app.assistant import users as users_mod  # noqa: E402
+
+H = {**JSON_HEADERS, "mcp-protocol-version": "2025-06-18"}
+
+
+@pytest.fixture
+def team(tmp_path, monkeypatch):
+    """No shared token, users file in a temp folder (AUTOLABEL_MCP_USERS_FILE); yields
+    (app, users file, LAN client)."""
+    users_file = tmp_path / "team" / "mcp_users.json"
+    hermetic_env(monkeypatch, tmp_path, token="", AUTOLABEL_MCP_USERS_FILE=str(users_file))
+    app = make_app(tmp_path)
+    with open_client(app, client_host="192.168.1.50", host="192.168.1.10:8000") as c:
+        load_fixture_data(app)
+        yield app, users_file, c
+
+
+def _approve_102(c, headers):
+    return c.post("/mcp/", headers=headers, json=_rpc("tools/call", {
+        "name": "set_annotation_status",
+        "arguments": {"annotation_ids": [102], "action": "approve"}}))
+
+
+def test_remote_without_teammates_is_403_with_teammates_401(team):
+    app, users_file, c = team
+    r = c.post("/mcp/", headers=JSON_HEADERS, json=INIT)
+    assert r.status_code == 403
+    assert r.json() == SAMPLES["error example (403 forbidden, /mcp/ no token set, not loopback)"]
+    users_mod.add_user(users_file, "dhyan@example.com")
+    r = c.post("/mcp/", headers=JSON_HEADERS, json=INIT)  # no restart
+    assert r.status_code == 401
+    assert r.json() == SAMPLES["error example (401 unauthorized, /mcp/ no bearer)"]
+    assert c.get("/api/assistant/status").json()["mcp"]["token_required"] is True
+
+
+def test_wrong_teammate_token_is_403(team):
+    _, users_file, c = team
+    users_mod.add_user(users_file, "dhyan@example.com")
+    r = c.post("/mcp/", headers={**JSON_HEADERS, "authorization": "Bearer alu_wrong"}, json=INIT)
+    assert r.status_code == 403
+    assert r.json() == SAMPLES["error example (403 forbidden, /mcp/ wrong token)"]
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_teammate_token_works_and_names_the_email(team, path):
+    app, users_file, c = team
+    token = users_mod.add_user(users_file, "Dhyan@Example.com".lower())
+    h = {**H, "authorization": f"Bearer {token}", "X-Autolabel-User": "someone-else"}
+    assert c.post(path, headers=h, json=INIT).status_code == 200
+    result = _approve_102(c, h).json()["result"]
+    assert result["isError"] is False, result
+    assert rows(app, "SELECT reviewer FROM annotations WHERE id=102") == [
+        {"reviewer": "claude:dhyan@example.com"}]
+    assert rows(app, "SELECT channel, actor FROM assistant_actions") == [
+        {"channel": "mcp", "actor": "claude:dhyan@example.com"}]
+
+
+def test_a_client_cannot_set_the_scope_user(team):
+    """Only the gate sets the user key; a shared-token or loopback request gets None there."""
+    app, users_file, c = team
+    users_mod.add_user(users_file, "a@example.com")
+    with open_client(app) as local:  # loopback, no bearer, no shared token
+        r = _approve_102(local, {**H, "X-Autolabel-User": "dhyan"})
+        assert r.json()["result"]["isError"] is False
+    assert rows(app, "SELECT actor FROM assistant_actions") == [{"actor": "claude:dhyan"}]
+
+
+def test_removed_teammate_is_403_without_restart(team):
+    _, users_file, c = team
+    token = users_mod.add_user(users_file, "dhyan@example.com")
+    users_mod.add_user(users_file, "other@example.com")
+    h = {**JSON_HEADERS, "authorization": f"Bearer {token}"}
+    assert c.post("/mcp/", headers=h, json=INIT).status_code == 200
+    assert users_mod.remove_user(users_file, "dhyan@example.com") is True
+    assert c.post("/mcp/", headers=h, json=INIT).status_code == 403
+
+
+def test_re_adding_rotates_the_token(team):
+    _, users_file, c = team
+    old = users_mod.add_user(users_file, "dhyan@example.com")
+    new = users_mod.add_user(users_file, "dhyan@example.com")
+    assert old != new
+    assert c.post("/mcp/", headers={**JSON_HEADERS, "authorization": f"Bearer {old}"},
+                  json=INIT).status_code == 403
+    assert c.post("/mcp/", headers={**JSON_HEADERS, "authorization": f"Bearer {new}"},
+                  json=INIT).status_code == 200
+
+
+def test_shared_token_still_works_next_to_teammates(tmp_path, monkeypatch):
+    users_file = tmp_path / "mcp_users.json"
+    hermetic_env(monkeypatch, tmp_path, token=TOKEN, AUTOLABEL_MCP_USERS_FILE=str(users_file))
+    app = make_app(tmp_path)
+    with open_client(app, client_host="192.168.1.50", host="192.168.1.10:8000") as c:
+        load_fixture_data(app)
+        mate = users_mod.add_user(users_file, "mate@example.com")
+        h = {**H, "authorization": f"Bearer {TOKEN}", "X-Autolabel-User": "dhyan"}
+        assert _approve_102(c, h).json()["result"]["isError"] is False
+        assert c.post("/mcp/", headers={**JSON_HEADERS, "authorization": f"Bearer {mate}"},
+                      json=INIT).status_code == 200
+        assert c.post("/mcp/", headers=JSON_HEADERS, json=INIT).status_code == 401
+        assert rows(app, "SELECT actor FROM assistant_actions") == [{"actor": "claude:dhyan"}]
+
+
+def test_loopback_without_token_unchanged_with_teammates(team):
+    app, users_file, _ = team
+    users_mod.add_user(users_file, "a@example.com")
+    for host in ("localhost:8000", "127.0.0.1:8000"):
+        with open_client(app, host=host) as local:
+            assert local.post("/mcp/", headers=JSON_HEADERS, json=INIT).status_code == 200
+
+
+@pytest.mark.parametrize("host", ["evil.example:8000", "192.168.1.10:8000", "localhost.evil:8000"])
+def test_loopback_with_a_foreign_host_is_403(tmp_path, monkeypatch, host):
+    hermetic_env(monkeypatch, tmp_path, token="")
+    app = make_app(tmp_path)
+    with open_client(app, host=host) as c:
+        r = c.post("/mcp/", headers=JSON_HEADERS, json=INIT)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "forbidden"
+
+
+def test_bad_users_file_is_no_users_and_logged_once(team, caplog):
+    _, users_file, c = team
+    users_file.parent.mkdir(parents=True, exist_ok=True)
+    users_file.write_text("{not json SECRETISH", encoding="utf-8")
+    for _ in range(3):
+        assert c.post("/mcp/", headers=JSON_HEADERS, json=INIT).status_code == 403
+    logged = [r.getMessage() for r in caplog.records if "users file" in r.getMessage()]
+    assert len(logged) == 1 and str(users_file) in logged[0]
+    assert "SECRETISH" not in caplog.text
+
+
+def test_users_file_default_is_in_the_data_dir(tmp_path, monkeypatch):
+    hermetic_env(monkeypatch, tmp_path, token="")
+    app = make_app(tmp_path)
+    with open_client(app, client_host="192.168.1.50", host="192.168.1.10:8000") as c:
+        token = users_mod.add_user(app.state.data_dir / "mcp_users.json", "a@example.com")
+        assert c.post("/mcp/", headers={**JSON_HEADERS, "authorization": f"Bearer {token}"},
+                      json=INIT).status_code == 200
+
+
+def test_users_file_stores_hashes_only(tmp_path):
+    f = tmp_path / "u.json"
+    token = users_mod.add_user(f, "a@example.com")
+    text = f.read_text(encoding="utf-8")
+    assert token not in text and token.startswith("alu_")
+    entry = json.loads(text)["users"][0]
+    assert entry["token_sha256"] == users_mod.token_hash(token)
+    assert set(entry) == set(SAMPLES["mcp_users.json (example)"]["users"][0])
