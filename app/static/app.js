@@ -1476,6 +1476,54 @@ document.addEventListener("keyup", (e) => {
 // A held key is never released if the window loses focus (Alt+Tab, click into devtools).
 window.addEventListener("blur", () => { canvas.setTempDraw(false); canvas.setHideAll(false); });
 
+// ------------------------------------------------------------ deep links (CONTRACT "E2E gaps" item 6)
+// #project-<pid> opens the Review page of that project (first image of the current filter);
+// #project-<pid>/image-<iid> opens it on that image. Handled on page load and on hashchange.
+const LINK_RE = /^#project-(\d+)(?:\/image-(\d+))?$/;
+let linkToken = 0;   // a newer link wins over one still loading
+
+// Returns true when the link opened a project (false: no link, or the project was not found).
+async function openLink() {
+  const m = LINK_RE.exec(location.hash);
+  if (!m) return false;
+  // Drop the hash so clicking the same link again fires hashchange again (replaceState fires nothing).
+  history.replaceState(null, "", location.pathname + location.search);
+  const token = ++linkToken;
+  const pid = Number(m[1]);
+  const iid = m[2] != null ? Number(m[2]) : null;
+  const data = await guard(() => api.listProjects());
+  if (!data || token !== linkToken) return false;
+  fillProjectPicker(data.projects);
+  if (!data.projects.some((p) => p.id === pid)) {
+    showScreen("projects");
+    showBanner(`Project ${pid} not found`);
+    return false;
+  }
+  showScreen("review");
+  if (iid == null || state.projectId !== pid) await openProject(pid);
+  if (iid != null && token === linkToken) await openImageById(pid, iid, token);
+  return true;
+}
+
+// Open image iid of the open project: from the loaded list, else clear the filter and page through #5.
+async function openImageById(pid, iid, token) {
+  const i = state.images.findIndex((img) => img.id === iid);
+  if (i >= 0) return openImage(i);
+  $("statusFilter").value = "";
+  for (let offset = 0; ; offset += PAGE) {
+    const data = await guard(() => api.listImages(pid, { offset, limit: PAGE }));
+    if (token !== linkToken || state.projectId !== pid) return;
+    if (!data) break;
+    const k = data.images.findIndex((img) => img.id === iid);
+    if (k >= 0) return loadImages(offset, k);
+    if (!data.images.length || offset + data.images.length >= data.total) break;
+  }
+  showBanner(`Image ${iid} is not in project ${pid}`);
+  await loadImages(0);   // the project's first image, filter cleared
+}
+
+window.addEventListener("hashchange", () => openLink());
+
 // ------------------------------------------------------------ start
 (function init() {
   $("mockBadge").hidden = !api.mock;
@@ -1488,5 +1536,6 @@ window.addEventListener("blur", () => { canvas.setTempDraw(false); canvas.setHid
   renderHistory();
   renderZoom(1, 1);
   showScreen("projects"); // the start page
-  loadProjects();
+  if (LINK_RE.test(location.hash)) openLink().then((opened) => { if (!opened && state.projectId == null) loadProjects(); });
+  else loadProjects();
 })();
