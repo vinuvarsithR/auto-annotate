@@ -6,7 +6,8 @@ Plain-English summary
 * A Segmenter turns boxes into masks. The real one is SAM 2.1 tiny (ultralytics, CPU); tests use
   FakeSegmenter (an ellipse inside each box), so no weights are needed.
 * clean_mask (step 3): SAM gives 3 candidate masks per box. Keep the best-scoring one that stays
-  inside the box, cut thin strands (cables) with a 5 px morphological opening, clear pixels outside the box.
+  inside the box, cut thin strands (cables) with a 5 px morphological opening, rejoin pieces a cable split
+  apart with a 25 px closing, clear pixels outside the box.
 * largest_polygon (step 4): mask -> the outline of its largest part, as a 0..1 polygon.
 * add_polygons: steps 3 + 4 for all boxes of one image. A box whose mask gives no usable polygon
   is kept as a plain box (polygon None).
@@ -33,6 +34,7 @@ DEFAULT_WEIGHTS = Path(__file__).resolve().parents[2] / "models" / "sam2.1_t.pt"
 INSIDE_FRAC = 0.9      # share of a mask's pixels that must be inside the grown box
 INSIDE_PAD = 5         # px the box is grown by on each side for that check
 OPEN_PX = 5            # opening kernel size (ellipse)
+CLOSE_PX = 25          # closing kernel size (ellipse) after the opening; 0 = off (CONTRACT, 2026-11-13)
 
 
 class Segmenter(Protocol):
@@ -117,13 +119,14 @@ def _inside_fraction(mask: np.ndarray, bbox: tuple, pad: float) -> float:
     return float(mask[r0:r1 + 1, c0:c1 + 1].sum()) / total
 
 
-def clean_mask(masks, scores, bbox: tuple, open_px: int = OPEN_PX) -> np.ndarray:
+def clean_mask(masks, scores, bbox: tuple, open_px: int = OPEN_PX, close_px: int = CLOSE_PX) -> np.ndarray:
     """Step 3. masks: k x H x W, scores: k, bbox (x, y, w, h) px. Returns one bool H x W mask.
 
     Pick: among non-empty masks with >= 90% of pixels inside the box grown by 5 px, the highest
     score (first on a tie); none qualifies -> the highest inside fraction. Opening with an
-    open_px x open_px ellipse (kept unopened if that empties it). Clip to the box
-    (floor(x0)..ceil(x1), floor(y0)..ceil(y1), inclusive)."""
+    open_px x open_px ellipse (kept unopened if that empties it). Closing with a close_px x close_px
+    ellipse, so pieces of one object split by a cable join before step 4 (0 = no closing). Clip to
+    the box (floor(x0)..ceil(x1), floor(y0)..ceil(y1), inclusive)."""
     import cv2
 
     masks = np.asarray(masks).astype(bool)
@@ -140,6 +143,9 @@ def clean_mask(masks, scores, bbox: tuple, open_px: int = OPEN_PX) -> np.ndarray
         opened = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(bool)
         if opened.any():
             mask = opened
+    if close_px and mask.any():
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px))
+        mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
     x, y, w, h = bbox
     keep = np.zeros_like(mask)
     keep[max(0, math.floor(y)):math.ceil(y + h) + 1, max(0, math.floor(x)):math.ceil(x + w) + 1] = True
