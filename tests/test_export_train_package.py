@@ -589,3 +589,160 @@ def test_route_bad_option_unknown_project_is_404(tmp_path):
     with _client(tmp_path) as c:
         r = c.post("/api/projects/99/train-package", json={"epochs": 0})
         assert r.status_code == 404
+
+
+# ------------------------------------------------------------------ E2E gaps (2026-11-15): one video, warnings
+
+def one_video(frames, cid_of=lambda f: 1, seq="vid", pad=True):
+    """One image per frame number (ids in the given order), one box each (cid_of(frame) or None)."""
+    images, anns = [], []
+    for iid, f in enumerate(frames, start=1):
+        name = f"{seq}_{f:05d}.jpg" if pad else f"{seq}_{f}.jpg"
+        images.append({**img(iid, seq, 0), "file_name": name})
+        cid = cid_of(f)
+        if cid:
+            anns.append(ann(iid, iid, cid))
+    return images, anns
+
+
+def same_split_keys(s, sample):
+    """same_keys, but each warning is compared with the fixture warning of the same code."""
+    same_keys({k: v for k, v in s.items() if k != "warnings"},
+              {k: v for k, v in sample.items() if k != "warnings"})
+    assert set(s) == set(sample)
+    known = {w["code"]: w for w in FIXTURES["split.json (with warnings, one sequence)"]["warnings"]
+             + FIXTURES["split.json (one video, last_frames)"]["warnings"]}
+    for w in s["warnings"]:
+        same_keys(w, known[w["code"]])
+
+
+def _codes(s):
+    return [w["code"] for w in s["warnings"]]
+
+
+def test_one_video_50_frames_last_10_by_frame_number(tp):
+    # unpadded numbers: file-name order (vid_10 < vid_9) differs from frame order; ids shuffled
+    frames = list(range(1, 51))
+    import random
+    random.Random(4).shuffle(frames)
+    images, anns = one_video(frames, pad=False)
+    z = build(tp, images, anns)
+    s = split_of(z)
+    assert s["rule"] == "last_frames" and s["val_is_train"] is False
+    assert s["train"] == {"sequences": ["vid"], "images": 40}
+    assert s["val"] == {"sequences": ["vid"], "images": 10}
+    assert s["val_frames"] == {"first": "vid_41.jpg", "last": "vid_50.jpg"}
+    assert {n.split("/")[2] for n in z.namelist() if n.startswith("images/val/")} == \
+        {f"vid_{f}.jpg" for f in range(41, 51)}
+    assert {n.split("/")[2] for n in z.namelist() if n.startswith("labels/val/")} == \
+        {f"vid_{f}.txt" for f in range(41, 51)}
+    assert "val: images/val\n" in z.read("data.yaml").decode()
+    assert s["warnings"][0] == {
+        "code": "val_same_video",
+        "message": FIXTURES["split.json (one video, last_frames)"]["warnings"][0]["message"]}
+    same_split_keys(s, FIXTURES["split.json (one video, last_frames)"])
+
+
+def test_one_video_frames_without_numbers_go_last(tp):
+    images, anns = one_video(range(1, 10))
+    images.append({**img(10, "vid", 0), "file_name": "vid.jpg"})   # no frame number -> sequence "vid"
+    s = split_of(build(tp, images, anns))
+    assert s["rule"] == "last_frames"
+    assert s["val_frames"] == {"first": "vid_00009.jpg", "last": "vid.jpg"}
+
+
+def test_one_video_10_images_is_last_frames(tp):
+    images, anns = one_video(range(10))
+    s = split_of(build(tp, images, anns))
+    assert s["rule"] == "last_frames" and s["val"]["images"] == 2
+    assert s["val_frames"] == {"first": "vid_00008.jpg", "last": "vid_00009.jpg"}
+
+
+def test_one_video_9_images_val_is_train(tp):
+    images, anns = one_video(range(9))
+    z = build(tp, images, anns)
+    s = split_of(z)
+    assert s["rule"] == "val_is_train" and s["val_is_train"] is True
+    assert s["val"] == {"sequences": [], "images": 0} and s["val_frames"] is None
+    assert s["classes_missing_in_val"] == []
+    assert s["warnings"][0]["code"] == "val_is_train"
+    assert not [n for n in z.namelist() if n.startswith(("images/val/", "labels/val/"))]
+    assert "val: images/train\n" in z.read("data.yaml").decode()
+    same_split_keys(s, FIXTURES["split.json (with warnings, one sequence)"])
+
+
+def test_two_videos_by_sequence_val_frames_null(tp):
+    images, anns = seqs([("seqA", 10, 1), ("seqB", 3, 1)])
+    s = split_of(build(tp, images, anns, classes=CLASSES[:1]))
+    assert s["rule"] == "by_sequence" and s["val_frames"] is None
+    assert s["warnings"] == []
+
+
+def test_class_warnings_in_project_order(tp):
+    # person (1) + biax (4) on frames 0-7; sb (3) only on frames 8-9 = the val block; rb (2) no boxes
+    images, anns = one_video(range(10), cid_of=lambda f: 3 if f >= 8 else (1 if f % 2 else 4))
+    z = build(tp, images, anns)
+    s = split_of(z)
+    assert _codes(s) == ["val_same_video", "class_without_train_labels",
+                         "class_without_train_labels"]
+    rb, sb = s["warnings"][1:]
+    assert (rb["class"], rb["boxes_in_package"]) == ("rb", 0)
+    assert (sb["class"], sb["boxes_in_package"]) == ("sb", 2)
+    assert "rb" in rb["message"] and "sb" in sb["message"] and "2" in sb["message"]
+    assert s["classes_missing_in_train"] == ["sb"]
+    same_keys(rb, FIXTURES["split.json (with warnings, one sequence)"]["warnings"][1])
+    # class order and nc never change
+    assert "nc: 4\n" in z.read("data.yaml").decode()
+    assert 'names: ["person", "rb", "sb", "biax"]' in z.read("data.yaml").decode()
+
+
+def test_by_sequence_class_only_in_val_warns(tp):
+    # guard impossible: rb only in seqB, which goes to val
+    images, anns = seqs([("seqA", 10, 1), ("seqB", 8, 2)])
+    s = split_of(build(tp, images, anns, classes=CLASSES[:2]))
+    assert s["rule"] == "by_sequence"
+    (w,) = s["warnings"]
+    assert w["code"] == "class_without_train_labels" and w["class"] == "rb"
+    assert w["boxes_in_package"] == 8
+
+
+@pytest.mark.parametrize("spec", ["two", "one50", "one9", "segment"])
+def test_plan_equals_zip_split(tp, spec):
+    task = "detect"
+    if spec == "two":
+        images, anns = seqs([("seqA", 10, 1), ("seqB", 3, 2), ("seqC", 2, 1)])
+    elif spec == "one50":
+        images, anns = one_video(range(50, 0, -1), pad=False)
+    elif spec == "one9":
+        images, anns = one_video(range(9))
+    else:
+        images, anns = one_video(range(12))
+        anns[0]["polygon"], task = TRIANGLE, "segment"
+    plan = tp.plan_train_package("eot crane", task, images, CLASSES, anns)
+    assert plan == split_of(build(tp, images, anns, task=task))
+
+
+def test_plan_errors(tp):
+    images, anns = seqs([("seqA", 3, 1)])
+    with pytest.raises(tp.NothingToExport):
+        tp.plan_train_package("p", "detect", [img(1, "seqA", 0, "todo")], CLASSES, [])
+    with pytest.raises(tp.NoPolygons):
+        tp.plan_train_package("p", "segment", images, CLASSES, anns)
+    with pytest.raises(ValueError):
+        tp.plan_train_package("p", "pose", images, CLASSES, anns)
+
+
+def test_notebook_intro_names_last_frames(tp):
+    images, anns = one_video(range(20))
+    intro = _cells(build(tp, images, anns))[0]
+    assert "last 4 frames" in intro
+
+
+def test_route_warnings_header(tmp_path):
+    with _client(tmp_path) as c:
+        s = _done_project(c)
+        r = c.post(f"/api/projects/{s['pid']}/train-package")
+        assert r.status_code == 200, r.text
+        n = len(split_of(zipfile.ZipFile(io.BytesIO(r.content)))["warnings"])
+        assert n >= 1
+        assert r.headers["x-autolabel-warnings"] == str(n)

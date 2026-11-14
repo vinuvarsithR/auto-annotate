@@ -35,7 +35,7 @@ from autolabel.export.select import (
     boxes_for_image,
     exportable_images,
 )
-from autolabel.sequences import sequence_of
+from autolabel.sequences import parse_frame_name, sequence_of
 
 TRAIN_TASKS = ("detect", "segment")
 VAL_TARGET = 0.2
@@ -231,6 +231,9 @@ def notebook(project_name: str, task: str, split: dict, epochs: int = EPOCHS,
     if split["val_is_train"]:
         counts = (f"{split['train']['images']} images, one sequence only: "
                   "validation uses the training images.")
+    elif split.get("rule") == "last_frames":
+        counts = (f"one video only: train {split['train']['images']} images, "
+                  f"val its last {split['val']['images']} frames.")
     else:
         counts = (f"train {split['train']['images']} images "
                   f"({len(split['train']['sequences'])} sequences), "
@@ -239,7 +242,7 @@ def notebook(project_name: str, task: str, split: dict, epochs: int = EPOCHS,
     intro = (
         f"# Train {task} model: {project_name}\n"
         "\n"
-        f"Task: **{task}**. Split by sequence: {counts}\n"
+        f"Task: **{task}**. Split: {counts}\n"
         "\n"
         "First set the GPU: **Runtime > Change runtime type > GPU**.\n"
         "\n"
@@ -305,16 +308,24 @@ def notebook(project_name: str, task: str, split: dict, epochs: int = EPOCHS,
 
 # ------------------------------------------------------------------ package
 
-def build_train_package(project_name: str, task: str,
-                        images: list[dict], classes: list[dict], annotations: list[dict],
-                        image_bytes: Callable[[dict], bytes], *, epochs: int = EPOCHS,
-                        imgsz: int = IMGSZ, base_weights: str | None = None) -> bytes:
-    """
-    API JSON shapes in (as build_zip); returns the #23 zip. Raises ValueError (bad task or
-    option), NothingToExport (no done/empty image), NoPolygons. Calls image_bytes only for
-    exported images, and only after every check passed. base_weights None = BASE_WEIGHTS[task].
-    """
-    base_weights = check_train_options(task, epochs, imgsz, base_weights)
+WARN_VAL_SAME_VIDEO = ("Only one video: validation uses its last 20% of frames (one block). "
+                       "Neighbouring frames look alike, so validation mAP will look better than "
+                       "on a new video.")
+WARN_VAL_IS_TRAIN = ("Only one video with fewer than 10 images: there is no validation set, "
+                     "validation mAP is measured on the training images and means little.")
+ONE_VIDEO_MIN_IMAGES = 10
+
+
+def _frame_order(im: dict) -> tuple:
+    """(frame is None, frame, file_name): the one-video order of E2E gaps item 4."""
+    frame = parse_frame_name(im["file_name"])[1]
+    return (frame is None, frame if frame is not None else -1, im["file_name"])
+
+
+def _plan(task: str, images: list[dict], classes: list[dict], annotations: list[dict]) -> dict:
+    """Checks + split without reading image files. Returns the pieces the zip needs."""
+    if task not in TRAIN_TASKS:
+        raise ValueError(f"task must be one of {list(TRAIN_TASKS)}")
     chosen = exportable_images(images)
     if not chosen:
         raise NothingToExport("no image has review_status done or empty")
@@ -328,35 +339,105 @@ def build_train_package(project_name: str, task: str,
     labels = {im["id"]: files[f"labels/{PurePosixPath(names[im['id']]).stem}.txt"]
               for im in chosen}
     # exported box = a label line actually written (a box clipped to nothing is left out)
-    image_classes = {iid: {int(line.split()[0]) for line in text.splitlines() if line.strip()}
-                     for iid, text in labels.items()}
+    image_boxes = {iid: [int(line.split()[0]) for line in text.splitlines() if line.strip()]
+                   for iid, text in labels.items()}
+    image_classes = {iid: set(b) for iid, b in image_boxes.items()}
     image_seq = {im["id"]: sequence_of(im["file_name"]) for im in chosen}
+    all_seqs = sorted(set(image_seq.values()))
 
-    train_seqs, val_seqs, val_is_train = split_sequences(image_seq, image_classes)
-    part_of = {iid: ("val" if seq in val_seqs else "train") for iid, seq in image_seq.items()}
+    val_frames = None
+    if len(all_seqs) >= 2:
+        rule = "by_sequence"
+        train_seqs, val_seqs, _ = split_sequences(image_seq, image_classes)
+        part_of = {iid: ("val" if seq in val_seqs else "train") for iid, seq in image_seq.items()}
+    elif len(chosen) >= ONE_VIDEO_MIN_IMAGES:
+        rule = "last_frames"
+        ordered = sorted(chosen, key=_frame_order)
+        n_val = max(1, round(VAL_TARGET * len(chosen)))
+        val_ims = ordered[-n_val:]
+        part_of = {im["id"]: "train" for im in ordered}
+        part_of.update({im["id"]: "val" for im in val_ims})
+        train_seqs, val_seqs = list(all_seqs), list(all_seqs)
+        val_frames = {"first": names[val_ims[0]["id"]], "last": names[val_ims[-1]["id"]]}
+    else:
+        rule = "val_is_train"
+        train_seqs, val_seqs = list(all_seqs), []
+        part_of = {iid: "train" for iid in image_seq}
+    val_is_train = rule == "val_is_train"
 
     class_names = [c["name"] for c in classes]
-    def classes_in(part: str) -> set[int]:
-        return set().union(*(c for iid, c in image_classes.items() if part_of[iid] == part))
-    with_boxes = set().union(*image_classes.values())
-    missing_train = [class_names[i] for i in range(len(classes))
-                     if i in with_boxes and i not in classes_in("train")]
-    missing_val = [] if val_is_train else [class_names[i] for i in range(len(classes))
-                                           if i in with_boxes and i not in classes_in("val")]
+
+    def boxes_in(part: str | None) -> dict[int, int]:
+        count: dict[int, int] = {}
+        for iid, boxes in image_boxes.items():
+            if part is None or part_of[iid] == part:
+                for c in boxes:
+                    count[c] = count.get(c, 0) + 1
+        return count
+    in_all, in_train, in_val = boxes_in(None), boxes_in("train"), boxes_in("val")
+    missing_train = [n for i, n in enumerate(class_names) if in_all.get(i) and not in_train.get(i)]
+    missing_val = [] if val_is_train else [n for i, n in enumerate(class_names)
+                                           if in_all.get(i) and not in_val.get(i)]
+
+    warnings: list[dict] = []
+    if rule == "last_frames":
+        warnings.append({"code": "val_same_video", "message": WARN_VAL_SAME_VIDEO})
+    elif rule == "val_is_train":
+        warnings.append({"code": "val_is_train", "message": WARN_VAL_IS_TRAIN})
+    for i, name in enumerate(class_names):
+        if in_train.get(i):
+            continue
+        n = in_all.get(i, 0)
+        msg = (f"Class {name} has no labelled boxes in the training images: the model cannot "
+               "learn it." if n == 0 else
+               f"Class {name} has {n} boxes, all in validation: the model cannot learn it.")
+        warnings.append({"code": "class_without_train_labels", "class": name,
+                         "boxes_in_package": n, "message": msg})
+
     split = {
-        "rule": "by_sequence",
+        "rule": rule,
         "val_target": VAL_TARGET,
         "val_is_train": val_is_train,
         "train": {"sequences": train_seqs,
                   "images": sum(1 for p in part_of.values() if p == "train")},
         "val": {"sequences": val_seqs, "images": sum(1 for p in part_of.values() if p == "val")},
+        "val_frames": val_frames,
         "classes_missing_in_train": missing_train,
         "classes_missing_in_val": missing_val,
+        "warnings": warnings,
     }
+    return {"split": split, "chosen": chosen, "names": names, "labels": labels,
+            "part_of": part_of, "class_names": class_names}
+
+
+def plan_train_package(project_name: str, task: str, images: list[dict], classes: list[dict],
+                       annotations: list[dict]) -> dict:
+    """
+    The split.json dict of the package build_train_package would make, without reading image
+    files or building the zip. Raises ValueError (bad task), NothingToExport, NoPolygons.
+    """
+    return _plan(task, images, classes, annotations)["split"]
+
+
+def build_train_package(project_name: str, task: str,
+                        images: list[dict], classes: list[dict], annotations: list[dict],
+                        image_bytes: Callable[[dict], bytes], *, epochs: int = EPOCHS,
+                        imgsz: int = IMGSZ, base_weights: str | None = None) -> bytes:
+    """
+    API JSON shapes in (as build_zip); returns the #23 zip. Raises ValueError (bad task or
+    option), NothingToExport (no done/empty image), NoPolygons. Calls image_bytes only for
+    exported images, and only after every check passed. base_weights None = BASE_WEIGHTS[task].
+    Its split.json equals plan_train_package(...) for the same input.
+    """
+    base_weights = check_train_options(task, epochs, imgsz, base_weights)
+    plan = _plan(task, images, classes, annotations)
+    split, part_of, names, labels = plan["split"], plan["part_of"], plan["names"], plan["labels"]
+    class_names = plan["class_names"]
+    # names / nc = ALL project classes in project order, also those with 0 boxes (E2E gaps 5)
     data_yaml = "\n".join([
         "path: /content/dataset",
         "train: images/train",
-        "val: " + ("images/train" if val_is_train else "images/val"),
+        "val: " + ("images/train" if split["val_is_train"] else "images/val"),
         f"nc: {len(class_names)}",
         "names: " + json.dumps(class_names),
         "",
@@ -368,7 +449,7 @@ def build_train_package(project_name: str, task: str,
         zf.writestr("split.json", json.dumps(split, indent=1))
         zf.writestr("train.ipynb", json.dumps(notebook(project_name, task, split, epochs, imgsz,
                                                          base_weights), indent=1))
-        for im in chosen:
+        for im in plan["chosen"]:
             part, name = part_of[im["id"]], names[im["id"]]
             zf.writestr(f"labels/{part}/{PurePosixPath(name).stem}.txt", labels[im["id"]])
             zf.writestr(f"images/{part}/{name}", image_bytes(im))

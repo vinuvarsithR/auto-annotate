@@ -8,7 +8,10 @@ zip layout) live there. #21 only checks and queues the job; the worker does the 
 
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -144,9 +147,12 @@ def train_package(pid: int, body: Any = Body(default=None),
     except ValueError as e:
         raise ApiError(400, "bad_request", str(e))
 
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        n_warnings = len(json.loads(zf.read("split.json"))["warnings"])
     fname = f"{safe_name(project['name'])}_train_{task}.zip"
     return Response(blob, media_type="application/zip",
-                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                             "X-Autolabel-Warnings": str(n_warnings)})
 
 
 @router.post("/projects/{pid}/roboflow/push", status_code=202)
