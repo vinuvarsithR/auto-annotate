@@ -146,3 +146,11 @@ Read-only check (D:\autoannotate\spikes\owl_sam_check, real OWLv2 + SAM 2.1 tiny
 with one-load rule box F1 0.72 / mask F1 0.74; without it 0.71 / 0.72 (= spike v2 largest-part result).
 The rule only changes biax (0.40 -> 0.53 mask F1, no true positive lost). 7.6 s/img CPU (OWLv2 5.4 + SAM 1.8),
 peak RAM 1.94 GB in one process.
+
+## 2026-11-14 - contract-owl-sam-close: 25 px closing in step 3
+- `sam.CLOSE_PX = 25`; `clean_mask(..., close_px=CLOSE_PX)`: pick -> 5 px opening -> 25 px closing (MORPH_ELLIPSE) -> clip; 0 = off.
+- Tests (fake masks): closing joins two parts 20 px apart, `close_px=0` leaves two, closing never adds pixels outside the box,
+  CLOSE_PX value; the two-part test now uses parts 27 px apart (more than the closing joins).
+- owl_sam_check rerun (built pipeline, 40 test frames, real OWLv2 + SAM 2.1 tiny, VERIFIED): with one-load rule box F1 0.76 /
+  mask F1 0.78 (was 0.72 / 0.74); rb 0.92 / 0.92 (median IoU 0.78 -> 0.83), sb 0.90 / 1.00 (was 0.80 / 0.80), biax 0.67 / 0.67,
+  person 0.69 / 0.71. Same as the gap spike's close25 row.
