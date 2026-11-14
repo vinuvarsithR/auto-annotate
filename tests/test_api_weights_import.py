@@ -10,7 +10,7 @@ import pytest
 
 from tests.test_api_fixture_keys import FIXTURES, same_keys
 from tests.test_assistant_helpers import (
-    export_shims, fake_inspect, fake_pt, hermetic_env, load_fixture_data, make_app, metrics_file,
+    fake_inspect, fake_pt, hermetic_env, load_fixture_data, make_app, metrics_file,
     open_client,
 )
 
@@ -28,7 +28,6 @@ class Spy:
 def env(tmp_path, monkeypatch):
     """(client, inbox, outside folder, spy); AUTOLABEL_IMPORT_DIRS = inbox only."""
     hermetic_env(monkeypatch, tmp_path)
-    export_shims(monkeypatch)
     inbox = (tmp_path / "inbox").resolve()
     outside = (tmp_path / "outside").resolve()
     inbox.mkdir()
@@ -169,7 +168,6 @@ def test_bad_metrics_and_weights_checks(env):
 
 def test_default_import_folder_is_data_inbox(tmp_path, monkeypatch):
     hermetic_env(monkeypatch, tmp_path)
-    export_shims(monkeypatch)
     app = make_app(tmp_path, inspect_weights=fake_inspect)
     with open_client(app) as c:
         load_fixture_data(app)
@@ -183,7 +181,6 @@ def test_default_import_folder_is_data_inbox(tmp_path, monkeypatch):
 
 def test_several_import_folders(tmp_path, monkeypatch):
     hermetic_env(monkeypatch, tmp_path)
-    export_shims(monkeypatch)
     a, b = (tmp_path / "a").resolve(), (tmp_path / "b b").resolve()
     a.mkdir()
     b.mkdir()

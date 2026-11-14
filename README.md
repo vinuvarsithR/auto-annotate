@@ -195,6 +195,76 @@ someone sniffing the LAN can copy the token. Names are whatever each client send
 app (`/api`, the web UI) has no protection at all once it listens on `0.0.0.0`. To rotate: change
 `AUTOLABEL_MCP_TOKEN`, restart, send the new value. Without a token, MCP only works on the app machine.
 
+### Teammate access (one token per email)
+
+Preferred over the shared token: each teammate gets their own token, every write they make is logged
+as `claude:<their email>`, and one teammate can be removed without touching the others.
+
+**1. On the app machine, once: open port 8000 and listen on the LAN.**
+In an **admin** PowerShell (the Wi-Fi / LAN network must be set to *Private* in Windows settings):
+```
+New-NetFirewallRule -DisplayName "autolabel 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private
+```
+Then start the app with `uvicorn app.main:app --host 0.0.0.0 --port 8000` (plain `uvicorn app.main:app`
+only listens on the machine itself).
+
+**2. On the app machine: add the teammate.** Inside `.venv`, from the repo root:
+```
+python scripts/add_teammate.py TEAMMATE_EMAIL
+```
+| Command | Does |
+|---|---|
+| `add_teammate.py EMAIL [--host IP] [--port 8000]` | makes a token and prints it **once**, with a ready Claude Desktop config block (this PC's LAN IP; `--host` to override) and a Claude Code command. Running it again for the same email gives a new token and stops the old one. |
+| `add_teammate.py --remove EMAIL` | the token stops working at once |
+| `add_teammate.py --list` | emails and dates only |
+
+Only a hash of each token is stored (`data/mcp_users.json`, gitignored; `AUTOLABEL_MCP_USERS_FILE` in
+`.env` to move it). The running app picks up changes without a restart. Send the printed block to the
+teammate privately: anyone holding the token acts as that email.
+
+**3. On the teammate's PC: Claude Desktop.** Install Python 3.11+ and `pip install mcp==2.3.0`, copy
+`app/assistant/mcp_stdio.py` to e.g. `C:\autolabel\`, open Settings > Developer > Edit Config, paste the
+block `add_teammate.py` printed (it has the token in `env.AUTOLABEL_MCP_TOKEN`; no `AUTOLABEL_USER` needed),
+fix the `python.exe` path if needed, then quit Claude Desktop fully (tray icon > Quit) and start it again.
+Claude Code users run the printed `claude mcp add` line instead. (End-to-end with Claude Desktop: not
+tested yet.)
+
+**4. The Claude chat page.** `docs/claude_panel/index.html` is a chat page for Claude. Each teammate
+publishes **their own copy**. Its "Open the web app" link points to `http://127.0.0.1:8000/` (`APP_URL`
+in the file); on a PC other than the app machine, change that to `http://APP_MACHINE_IP:8000/` in your copy.
+
+| Who can reach `/mcp/` | When |
+|---|---|
+| the app machine itself | always without a token (unless `AUTOLABEL_MCP_TOKEN` is set) |
+| another PC, teammate token | user = the token's email (`X-Autolabel-User` is ignored) |
+| another PC, shared `AUTOLABEL_MCP_TOKEN` | still works; user = `X-Autolabel-User` |
+| another PC, no token | 401; wrong or removed token: 403 |
+
+Still true with per-user tokens: the app speaks plain HTTP (tokens can be sniffed on the LAN) and `/api`
+(the web UI) has no login.
+
+### Training: Colab now, local GPU later
+
+This PC has no CUDA GPU, so training runs on Google Colab. `start_training` with target `colab` (or the
+Train panel) gives a package zip; the Colab notebook downloads `<run>_best.pt` and `<run>_metrics.json`.
+Target `local` answers "no GPU on this host, use Colab".
+
+Bring the weights back in either way; both register the model the same way (listed by `list_models` with
+source, date and mAP, usable by `run_detection`):
+
+| Way | How |
+|---|---|
+| Upload | Train panel (`.pt`; the `_metrics.json` field comes with the next UI merge) or `POST /api/projects/ID/weights` with parts `file`, `task` and optional `metrics` |
+| From a folder on the app machine | Claude's `import_weights` tool (always asks to confirm) or `POST /api/projects/ID/weights/import` |
+
+`import_weights` only reads from folders listed in `AUTOLABEL_IMPORT_DIRS` in `.env` (absolute paths,
+separated by `;`; default `data/inbox`), e.g.
+```
+AUTOLABEL_IMPORT_DIRS=D:\autoannotate\inbox;G:\My Drive\autolabel
+```
+(the Google Drive for desktop path depends on your install). A `_metrics.json` next to a `_best.pt` is
+picked up automatically. A `.pt` file runs code when loaded: only import weights you trained yourself.
+
 ---
 
 ## Repo layout

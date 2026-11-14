@@ -15,7 +15,7 @@ import app.api.export as export_api
 from app.assistant import downloads
 from app.assistant.tools import READ_TOOLS, WRITE_TOOLS, ToolContext, call_tool
 from tests.test_assistant_helpers import (
-    TOOLS_FIXTURE, add_images, connect, export_shims, fake_inspect, fake_pt,
+    TOOLS_FIXTURE, add_images, connect, fake_inspect, fake_pt,
     hermetic_env, load_fixture_data, make_app, metrics_file, open_client, rows, same_keys, swap,
 )
 
@@ -49,14 +49,9 @@ def _roboflow_ready(app, monkeypatch):
 FIXTURE_INBOX = "D:\\autoannotate\\inbox"
 
 
-def _shims(app, monkeypatch):
-    export_shims(monkeypatch)
-
-
 def _inbox(app, monkeypatch):
     """AUTOLABEL_IMPORT_DIRS = a temp inbox with the fixture's .pt and metrics json; the
     fixture's D:\\autoannotate\\inbox paths are swapped for it."""
-    export_shims(monkeypatch)
     inbox = (Path(app.state.data_dir).parent / "inbox").resolve()
     inbox.mkdir(parents=True, exist_ok=True)
     (inbox / "eot_crane_segment_best.pt").write_bytes(fake_pt())
@@ -75,7 +70,6 @@ STATES = {
     ("set_annotation_status", 1): {"setup": _boxes_201_212},
     ("push_to_roboflow", 0): {"setup": _roboflow_ready},
     ("push_to_roboflow", 1): {"setup": _roboflow_ready},
-    ("start_training", 0): {"setup": _shims},
     ("start_training", 1): {"app": {"cuda_available": lambda: False}},
     ("import_weights", 0): {"setup": _inbox, "app": {"inspect_weights": fake_inspect}},
     ("import_weights", 1): {"setup": _inbox, "app": {"inspect_weights": fake_inspect}},
@@ -549,7 +543,6 @@ def test_start_training_checks(tmp_path, env, monkeypatch):
         assert got["error"]["code"] == "bad_request"
         assert call(app, "start_training", {"project_id": 1, "target": "colab", "imgsz": 330}
                     )["error"]["code"] == "bad_request"
-        export_shims(monkeypatch)
         got = call(app, "start_training", {"project_id": 1, "target": "colab"})
         assert got["ok"] and got["data"]["package"]["download_url"].startswith(
             "/api/assistant/downloads/")
@@ -561,7 +554,6 @@ def test_start_training_checks(tmp_path, env, monkeypatch):
 @pytest.fixture
 def importing(tmp_path, env, monkeypatch):
     """(app, inbox) with AUTOLABEL_IMPORT_DIRS = inbox and a spying fake inspect_weights."""
-    export_shims(monkeypatch)
     inbox = (tmp_path / "inbox").resolve()
     inbox.mkdir()
     monkeypatch.setenv("AUTOLABEL_IMPORT_DIRS", str(inbox))

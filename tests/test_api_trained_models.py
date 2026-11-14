@@ -15,7 +15,7 @@ from app.db import db
 from app.main import create_app
 from tests.test_api_fixture_keys import FIXTURES, same_keys
 from tests.test_api_helpers import FakePipeline, setup_project
-from tests.test_assistant_helpers import export_shims, metrics_file
+from tests.test_assistant_helpers import metrics_file
 
 NAMES = ["person", "rb", "sb", "biax"]
 
@@ -327,7 +327,6 @@ def upload_with_metrics(c, pid, metrics: bytes, task="segment", name="eot_crane_
 
 
 def test_upload_with_metrics_stores_them(client, monkeypatch):
-    export_shims(monkeypatch)
     pid = setup_project(client, n_images=1)["pid"]
     r = upload_with_metrics(client, pid, json.dumps(metrics_file()).encode())
     assert r.status_code == 201, r.text
@@ -348,7 +347,6 @@ def test_upload_without_metrics_has_nulls(client):
 
 
 def test_bad_metrics_stores_nothing_and_loads_nothing(client, hooks, monkeypatch):
-    export_shims(monkeypatch)
     pid = setup_project(client, n_images=1)["pid"]
     bad = dict(metrics_file(), format="nope")
     body = err(upload_with_metrics(client, pid, json.dumps(bad).encode()), 400, "bad_metrics")
@@ -365,7 +363,6 @@ def test_bad_metrics_stores_nothing_and_loads_nothing(client, hooks, monkeypatch
 
 
 def test_metrics_part_rules(client, monkeypatch):
-    export_shims(monkeypatch)
     pid = setup_project(client, n_images=1)["pid"]
     good = json.dumps(metrics_file()).encode()
     err(upload_with_metrics(client, pid, good, name="metrics.txt"), 400, "bad_request")
@@ -378,7 +375,6 @@ def test_metrics_part_rules(client, monkeypatch):
 
 
 def test_detect_metrics_with_null_mask(client, monkeypatch):
-    export_shims(monkeypatch)
     pid = setup_project(client, n_images=1)["pid"]
     r = upload_with_metrics(client, pid, json.dumps(metrics_file("detect")).encode(), task="detect")
     assert r.status_code == 201, r.text

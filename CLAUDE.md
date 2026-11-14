@@ -90,6 +90,10 @@ Next:
   app/assistant/ (backend) for an MCP server at /mcp/ (teammates' own Claude) and a sidebar chat (server's
   ANTHROPIC_API_KEY, model AUTOLABEL_CLAUDE_MODEL default claude-sonnet-5-5). ui = sidebar. Installed in .venv:
   mcp 2.3.0 (2.x API: no FastMCP), anthropic 2.8.0. Secrets: ANTHROPIC_API_KEY, AUTOLABEL_MCP_TOKEN (.env only).
+- 2026-11-14 contract "Teammates + training routes" (#37, #38, 19 tools): this host has NO CUDA, so Colab only;
+  target "local" reserved (503 no_gpu). Per-teammate MCP tokens (scripts/add_teammate.py, data/mcp_users.json).
+  Merged on main 2026-11-14 (export + backend). Open: ui (metrics upload, model list mAP, local button);
+  change request from backend: add start_training + import_weights to chat_fake.json tool_names.
 
 ## Phase 1 state
 

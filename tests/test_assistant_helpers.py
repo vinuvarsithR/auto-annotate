@@ -92,55 +92,6 @@ def metrics_file(task="segment") -> dict:
     return d
 
 
-def export_has(name: str) -> bool:
-    """Whether export's side of the 2026-11-14 contract is merged yet."""
-    import inspect
-    from autolabel.export import train_package as tp
-    if name == "read_metrics":
-        return hasattr(tp, "read_metrics") and hasattr(tp, "BadMetrics")
-    if name == "train_options":
-        return "imgsz" in inspect.signature(tp.build_train_package).parameters
-    raise KeyError(name)
-
-
-def export_shims(monkeypatch) -> list[dict]:
-    """Stand-ins for export's not-yet-merged pieces, used ONLY while they are missing (after the
-    merge the real code runs): read_metrics / BadMetrics with the contract's format and task
-    rules, and a #23 route that accepts epochs / imgsz / base_weights (recorded in the returned
-    list) and builds with the task only."""
-    import app.api.export as export_api
-    from autolabel.export import train_package as tp
-
-    calls: list[dict] = []
-    if not export_has("read_metrics"):
-        class BadMetrics(ValueError):
-            pass
-
-        def read_metrics(data: bytes, task: str) -> dict:
-            try:
-                d = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                raise BadMetrics("metrics file: not valid JSON")
-            if not isinstance(d, dict) or d.get("format") != "autolabel-metrics-1":
-                raise BadMetrics("metrics file: format must be autolabel-metrics-1")
-            if d.get("task") != task:
-                raise BadMetrics(f"metrics file: task must be {task}")
-            return {"metrics": d.get("metrics"), "split": d.get("split")}
-
-        monkeypatch.setattr(tp, "BadMetrics", BadMetrics, raising=False)
-        monkeypatch.setattr(tp, "read_metrics", read_metrics, raising=False)
-    if not export_has("train_options"):
-        original = export_api.train_package
-
-        def train_package(pid, body=None, conn=None):
-            body = dict(body or {})
-            calls.append(body)
-            return original(pid, {"task": body.get("task", "detect")}, conn)
-
-        monkeypatch.setattr(export_api, "train_package", train_package)
-    return calls
-
-
 def swap(value, old: str, new: str):
     """`value` with `old` replaced by `new` in every string (for fixture paths)."""
     if isinstance(value, str):
