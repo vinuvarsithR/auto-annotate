@@ -6,6 +6,7 @@ import json
 import zipfile
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +15,8 @@ import app.api.export as export_api
 from app.assistant import downloads
 from app.assistant.tools import READ_TOOLS, WRITE_TOOLS, ToolContext, call_tool
 from tests.test_assistant_helpers import (
-    TOOLS_FIXTURE, add_images, connect, hermetic_env, load_fixture_data, make_app, open_client,
-    rows, same_keys,
+    TOOLS_FIXTURE, add_images, connect, export_shims, fake_inspect, fake_pt,
+    hermetic_env, load_fixture_data, make_app, metrics_file, open_client, rows, same_keys, swap,
 )
 
 FAKE_SETTINGS = SimpleNamespace(workspace="w", project="p", api_key="rf-fake")
@@ -45,6 +46,26 @@ def _roboflow_ready(app, monkeypatch):
     monkeypatch.setattr(export_api, "roboflow_settings", lambda: FAKE_SETTINGS)
 
 
+FIXTURE_INBOX = "D:\\autoannotate\\inbox"
+
+
+def _shims(app, monkeypatch):
+    export_shims(monkeypatch)
+
+
+def _inbox(app, monkeypatch):
+    """AUTOLABEL_IMPORT_DIRS = a temp inbox with the fixture's .pt and metrics json; the
+    fixture's D:\\autoannotate\\inbox paths are swapped for it."""
+    export_shims(monkeypatch)
+    inbox = (Path(app.state.data_dir).parent / "inbox").resolve()
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "eot_crane_segment_best.pt").write_bytes(fake_pt())
+    (inbox / "eot_crane_segment_metrics.json").write_text(json.dumps(metrics_file()),
+                                                          encoding="utf-8")
+    monkeypatch.setenv("AUTOLABEL_IMPORT_DIRS", str(inbox))
+    return {FIXTURE_INBOX: str(inbox)}
+
+
 # (tool, example index) -> the example's "state"
 STATES = {
     ("run_detection", 0): OWL,
@@ -54,6 +75,10 @@ STATES = {
     ("set_annotation_status", 1): {"setup": _boxes_201_212},
     ("push_to_roboflow", 0): {"setup": _roboflow_ready},
     ("push_to_roboflow", 1): {"setup": _roboflow_ready},
+    ("start_training", 0): {"setup": _shims},
+    ("start_training", 1): {"app": {"cuda_available": lambda: False}},
+    ("import_weights", 0): {"setup": _inbox, "app": {"inspect_weights": fake_inspect}},
+    ("import_weights", 1): {"setup": _inbox, "app": {"inspect_weights": fake_inspect}},
 }
 EXAMPLES = [(tool, i, ex) for tool, items in TOOLS_FIXTURE["examples"].items()
             for i, ex in enumerate(items)]
@@ -82,7 +107,7 @@ def call(app, name, args, user="tester", channel="mcp", button=False):
 def test_every_tool_has_an_example():
     names = [t["name"] for t in TOOLS_FIXTURE["tools"]]
     assert list(TOOLS_FIXTURE["examples"]) == names
-    assert len(READ_TOOLS) == 8 and len(WRITE_TOOLS) == 9
+    assert len(READ_TOOLS) == 8 and len(WRITE_TOOLS) == 11
 
 
 @pytest.mark.parametrize("tool,index,example", EXAMPLES,
@@ -91,13 +116,15 @@ def test_fixture_example(tmp_path, monkeypatch, env, tool, index, example):
     state = STATES.get((tool, index), {})
     if "state" in example:  # (the push examples also need Roboflow .env settings, faked here)
         assert state, "every example with a 'state' needs a STATES entry"
-    app = make_app(tmp_path, detectors=state.get("detectors", ("fake",)), modes=state.get("modes"))
+    app = make_app(tmp_path, detectors=state.get("detectors", ("fake",)), modes=state.get("modes"),
+                   **state.get("app", {}))
+    want, args = example["output"], example["input"]
     with open_client(app):
         load_fixture_data(app)
         if state.get("setup"):
-            state["setup"](app, monkeypatch)
-        got = call(app, tool, example["input"], user=example.get("user", "tester"))
-    want = example["output"]
+            for old, new in (state["setup"](app, monkeypatch) or {}).items():
+                args, want = swap(args, old, new), swap(want, old, new)
+        got = call(app, tool, args, user=example.get("user", "tester"))
     assert got["ok"] == want["ok"], got
     if "error" in want:
         assert set(got) == {"ok", "error"} and got["error"]["code"] == want["error"]["code"], got
@@ -493,3 +520,111 @@ def test_old_downloads_deleted_on_new_package_and_at_startup(tmp_path, env):
     app2 = make_app(tmp_path)  # same data folder, new start
     with open_client(app2):
         assert list(downloads.folder(app2.state.data_dir).glob("*")) == []
+
+
+# ------------------------------------------------------------------ start_training, import_weights
+
+def test_start_training_local_errors_without_a_confirmation(tmp_path, env):
+    for cuda, code in ((False, "no_gpu"), (True, "not_implemented")):
+        app = make_app(tmp_path / str(cuda), cuda_available=lambda cuda=cuda: cuda)
+        with open_client(app):
+            load_fixture_data(app)
+            got = call(app, "start_training", {"project_id": 1, "target": "local",
+                                               "confirm": True})
+            assert got["error"]["code"] == code
+            got = call(app, "start_training", {"project_id": 1, "target": "local"})
+            assert got["error"]["code"] == code and "needs_confirmation" not in got
+            assert [r["outcome"] for r in rows(app, "SELECT outcome FROM assistant_actions")] == [
+                "error", "error"]
+
+
+def test_start_training_checks(tmp_path, env, monkeypatch):
+    app = make_app(tmp_path)
+    with open_client(app):
+        load_fixture_data(app)
+        assert call(app, "start_training", {"project_id": 99, "target": "colab"}
+                    )["error"]["code"] == "not_found"
+        got = call(app, "start_training", {"project_id": 1, "target": "colab", "task": "detect",
+                                           "base_weights": "yolo11s-seg.pt"})
+        assert got["error"]["code"] == "bad_request"
+        assert call(app, "start_training", {"project_id": 1, "target": "colab", "imgsz": 330}
+                    )["error"]["code"] == "bad_request"
+        export_shims(monkeypatch)
+        got = call(app, "start_training", {"project_id": 1, "target": "colab"})
+        assert got["ok"] and got["data"]["package"]["download_url"].startswith(
+            "/api/assistant/downloads/")
+        row = rows(app, "SELECT tool, outcome, summary FROM assistant_actions")[-1]
+        assert (row["tool"], row["outcome"]) == ("start_training", "ok")
+        assert json.loads(row["summary"])["target"] == "colab"
+
+
+@pytest.fixture
+def importing(tmp_path, env, monkeypatch):
+    """(app, inbox) with AUTOLABEL_IMPORT_DIRS = inbox and a spying fake inspect_weights."""
+    export_shims(monkeypatch)
+    inbox = (tmp_path / "inbox").resolve()
+    inbox.mkdir()
+    monkeypatch.setenv("AUTOLABEL_IMPORT_DIRS", str(inbox))
+    seen = []
+
+    def inspect(path, model=None):
+        seen.append(path)
+        return fake_inspect(path, model)
+
+    app = make_app(tmp_path, inspect_weights=inspect)
+    with open_client(app):
+        load_fixture_data(app)
+        yield app, inbox, seen
+
+
+def test_import_weights_path_errors_come_before_the_confirmation(importing, tmp_path):
+    app, inbox, seen = importing
+    outside = tmp_path / "evil.pt"
+    outside.write_bytes(fake_pt())
+    got = call(app, "import_weights", {"project_id": 1, "path": str(outside), "task": "segment"})
+    assert got["error"]["code"] == "path_not_allowed"
+    got = call(app, "import_weights", {"project_id": 1, "path": str(inbox / "none.pt"),
+                                       "task": "segment"})
+    assert got["error"]["code"] == "not_found"
+    assert call(app, "import_weights", {"project_id": 99, "path": str(inbox / "none.pt"),
+                                        "task": "segment"})["error"]["code"] == "not_found"
+    assert seen == []
+
+
+def test_import_weights_always_confirms_and_loads_only_after(importing):
+    app, inbox, seen = importing
+    det = inbox / "det.pt"
+    det.write_bytes(fake_pt(task="detect"))
+    got = call(app, "import_weights", {"project_id": 1, "path": str(det), "task": "segment"})
+    nc = got["needs_confirmation"]
+    assert nc["details"] == {"path": str(det), "task": "segment", "metrics_path": None,
+                             "project_id": 1}
+    assert "runs code" in nc["effect"] and seen == []
+    got = call(app, "import_weights", {"project_id": 1, "path": str(det), "task": "segment",
+                                       "confirm": True})
+    assert got["error"]["code"] == "task_mismatch" and len(seen) == 1
+    good = inbox / "good.pt"
+    good.write_bytes(fake_pt())
+    got = call(app, "import_weights", {"project_id": 1, "path": str(good), "task": "segment",
+                                       "confirm": True}, user="dhyan")
+    assert got["ok"] and got["data"]["name"] == "eot_crane_v2" and good.exists()
+    assert [m["name"] for m in call(app, "list_models", {"project_id": 1})["data"]["trained"]] == [
+        "eot_crane_v1", "eot_crane_v2"]
+    last = rows(app, "SELECT actor, outcome, confirmed FROM assistant_actions")[-1]
+    assert last == {"actor": "claude:dhyan", "outcome": "ok", "confirmed": 1}
+
+
+def test_import_weights_bad_metrics_before_the_confirmation(importing):
+    app, inbox, seen = importing
+    (inbox / "x_best.pt").write_bytes(fake_pt())
+    (inbox / "x_metrics.json").write_text(json.dumps(metrics_file("detect")), encoding="utf-8")
+    got = call(app, "import_weights", {"project_id": 1, "path": str(inbox / "x_best.pt"),
+                                       "task": "segment"})
+    assert got["error"]["code"] == "bad_metrics" and seen == []
+
+
+def test_new_tool_annotations_are_not_destructive():
+    from app.assistant.mcp_server import tool_annotations
+    for name in ("start_training", "import_weights"):
+        a = tool_annotations(name, "write")
+        assert a.read_only_hint is False and a.destructive_hint is False

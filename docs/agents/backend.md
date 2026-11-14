@@ -122,3 +122,31 @@ Decisions the contract leaves open, tell me if any is wrong:
 4. The worker imports `pipeline.prepare_examples` and `Example` only when an examples job runs, and
    without `detector_modes` in autolabel.models every detector has no modes. So merge models with or
    before backend: until then `mode: "examples"` is 400 `unknown_mode` and #16 shows `[]`.
+
+## Teammates + training routes (#37, #38, 2026-11-14)
+
+Built: trained_models `source` / `metrics` / `split` (+ migrate), `store_weights` in app/api/weights.py
+(#24 and #38 use it), #24 optional `metrics` part, #25 / #16 fields (`trained`), #37 in app/api/training.py
+(`create_app(cuda_available=...)`), #38 `POST /projects/{pid}/weights/import` (AUTOLABEL_IMPORT_DIRS,
+default data/inbox, created at startup), tools `start_training` + `import_weights` (19 tools), per-teammate
+tokens (app/assistant/users.py, gate in mcp_server.py), scripts/add_teammate.py, mcp_stdio.py `--token`.
+
+Decisions the contract leaves open, tell me if any is wrong:
+1. #37 calls export's #23 route function with `{task, epochs, imgsz, base_weights}`, and #24 / #38 call
+   export's `read_metrics`. Until export's side is merged, `tests/test_assistant_helpers.export_shims`
+   stands in for both (only while they are missing); after the merge the real code runs in the same tests.
+2. #38: a relative `path` is 400 `path_not_allowed` (not inside any folder). A metrics file that is too big
+   (> 1 MB) or empty is 400 `bad_metrics`; a `metrics` part not named `.json`, or two of them, is 400
+   `bad_request`. A sibling `_metrics.json` that resolves outside the folders (symlink) is `path_not_allowed`.
+3. `import_weights` checks the metrics file (`bad_metrics`) before asking for confirmation (reading JSON
+   runs no code); `no_classes` / `bad_weights` / `task_mismatch` / `class_mismatch` come after `confirm`.
+   `details.path` / `metrics_path` are the resolved paths.
+4. Loopback Host rule: `127.0.0.1`, `localhost` or `[::1]`, with or without a port.
+5. add_teammate's Claude Code line uses the HTTP transport with an `Authorization` header (no launcher
+   needed); exact `claude mcp add` flags are a GUESS (not run here).
+
+### Change request (integrator)
+`docs/fixtures/assistant/chat_fake.json` `expect_requests.tool_names` still lists the 17 tools of
+2026-11-13. The chat sends all 19 (tools.json). `tests/test_assistant_chat.py` now checks the request
+against tools.json and that the 17 fixture names appear in that order; please add `start_training` and
+`import_weights` after `make_train_package` in the fixture.

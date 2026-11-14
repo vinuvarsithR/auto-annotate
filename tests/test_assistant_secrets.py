@@ -1,6 +1,7 @@
 """Neither secret (ANTHROPIC_API_KEY, AUTOLABEL_MCP_TOKEN) may leave the server: not in any
 response body or header, log record, assistant_actions row or jobs row. Fake values only."""
 
+import json
 import logging
 
 import anthropic
@@ -66,7 +67,7 @@ def test_no_secret_leaves_the_server(tmp_path, monkeypatch, caplog):
 
         # MCP: wrong token, right token, a write and a read
         assert keep(c.post("/mcp/", headers={**RPC, "authorization": "Bearer nope"},
-                           json=INIT)).status_code == 401
+                           json=INIT)).status_code == 403  # wrong token: 403 since teammates
         auth = {**RPC, "authorization": f"Bearer {TOKEN}", "mcp-protocol-version": "2025-06-18",
                 "X-Autolabel-User": "dhyan"}
         assert keep(c.post("/mcp/", headers=auth, json=INIT)).status_code == 200
@@ -118,3 +119,39 @@ def test_client_is_built_with_the_key_only(tmp_path, monkeypatch):
     with open_client(app):
         client = app.state.assistant_chat.client
     assert isinstance(client, Recorder) and set(seen) == {"api_key"} and seen["api_key"] == KEY
+
+
+def test_a_teammate_token_never_leaves_the_server(tmp_path, monkeypatch, caplog):
+    """The token add_teammate prints: not in any response, log record or assistant_actions row
+    (neither when it works nor after it was revoked)."""
+    from app.assistant import users as users_mod
+
+    caplog.set_level(logging.DEBUG)
+    users_file = tmp_path / "mcp_users.json"
+    hermetic_env(monkeypatch, tmp_path, key=KEY, token="", AUTOLABEL_MCP_USERS_FILE=str(users_file))
+    mate = users_mod.add_user(users_file, "mate@example.com")
+    app = make_app(tmp_path)
+    texts = []
+    with open_client(app, client_host="192.168.1.20", host="192.168.1.10:8000") as c:
+        load_fixture_data(app)
+        auth = {**RPC, "authorization": f"Bearer {mate}", "mcp-protocol-version": "2025-06-18",
+                "X-Autolabel-User": "liar"}
+        for r in (
+            c.post("/mcp/", headers=auth, json=INIT),
+            c.post("/mcp/", headers=auth, json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                                "params": {"name": "add_class", "arguments": {
+                                                    "project_id": 1, "name": "hook"}}}),
+            c.post("/mcp/", headers=auth, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                "params": {"name": "get_job",
+                                                           "arguments": {"job_id": 999}}}),
+            c.get("/api/assistant/status"),
+        ):
+            texts.append(r.text + str(dict(r.headers)))
+        users_mod.remove_user(users_file, "mate@example.com")
+        r = c.post("/mcp/", headers=auth, json=INIT)
+        assert r.status_code == 403
+        texts.append(r.text + str(dict(r.headers)))
+    db_text = json.dumps(rows(app, "SELECT * FROM assistant_actions"))
+    assert "claude:mate@example.com" in db_text and "liar" not in db_text
+    for where, text in [("responses", " ".join(texts)), ("logs", caplog.text), ("db", db_text)]:
+        assert mate not in text, where

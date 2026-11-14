@@ -4,19 +4,28 @@ mcp_server.py - MCP server #36 (docs/CONTRACT.md "MCP server").
 * mcp 2.x low-level Server ("autolabel") with tools/list + tools/call over the tool layer.
 * Streamable HTTP, stateless, JSON responses, mounted at /mcp, so the URL is http://HOST:PORT/mcp/.
 * create_app builds a NEW Server per app and runs its session manager inside the app's lifespan.
-* McpGate (ASGI, /mcp only) checks access before the SDK sees the request:
-    AUTOLABEL_MCP_TOKEN set   -> "Authorization: Bearer <token>" (hmac.compare_digest), else 401;
-                                 the SDK's DNS-rebinding protection is off (LAN host names vary)
-    token empty / unset       -> loopback clients only (127.0.0.1, ::1), else 403; the SDK's
-                                 DNS-rebinding protection on for 127.0.0.1 / localhost / [::1]
-* Who: the X-Autolabel-User header (name rule in tools.clean_name). No or bad name -> read tools
-  work, write tools return error bad_request.
+* McpGate (ASGI, /mcp only) checks access before the SDK sees the request (#36 + teammates):
+    bearer = a teammate token (sha256 in the users file)  -> allowed; user = that email
+    bearer = AUTOLABEL_MCP_TOKEN (shared, when set)       -> allowed; user from X-Autolabel-User
+    bearer given, matches nothing                         -> 403 "unknown or revoked token"
+    no bearer, shared token set                           -> 401
+    no bearer, loopback client                            -> allowed if Host is 127.0.0.1 /
+                                                             localhost / [::1] (any port), else 403
+    no bearer, LAN client, >= 1 teammate                  -> 401
+    no bearer, LAN client, no teammates                   -> 403 (local-only)
+  The SDK's DNS-rebinding protection is off; the Host check above replaces it (per request, as
+  teammates can appear without a restart).
+* Who: the email of a teammate token (X-Autolabel-User ignored), else the X-Autolabel-User
+  header (name rule in tools.clean_name). No or bad name -> read tools work, write tools return
+  error bad_request. The gate passes the email in the ASGI scope key USER_SCOPE_KEY, which it
+  always overwrites, so a client cannot set it.
 """
 
 from __future__ import annotations
 
 import hmac
 import json
+import re
 from typing import Any
 
 import anyio
@@ -28,7 +37,11 @@ from app.assistant.tools import TOOLS, ToolContext, call_tool, clean_name
 DESTRUCTIVE = ("delete_annotation", "push_to_roboflow")
 USER_HEADER = "x-autolabel-user"
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
-UNAUTHORIZED = "missing or wrong bearer token"
+USER_SCOPE_KEY = "autolabel.user"
+UNAUTHORIZED = "missing bearer token"
+REVOKED = "unknown or revoked token"
+BAD_HOST = "Host header must be 127.0.0.1, localhost or [::1] for MCP without a token"
+_LOOPBACK_HOST = re.compile(r"^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$", re.I)
 FORBIDDEN = "MCP is local-only: set AUTOLABEL_MCP_TOKEN in .env to allow LAN clients"
 
 
@@ -66,7 +79,9 @@ def build_server(state: Any):
 
     async def on_call_tool(ctx, params):
         request = getattr(ctx, "request", None)  # None for an in-process mcp.Client
-        user = clean_name(request.headers.get(USER_HEADER)) if request is not None else None
+        user = None
+        if request is not None:
+            user = request.scope.get(USER_SCOPE_KEY) or clean_name(request.headers.get(USER_HEADER))
         envelope = await anyio.to_thread.run_sync(
             call_tool, ToolContext(state, "mcp", user), params.name, params.arguments)
         return envelope_result(envelope)
@@ -74,17 +89,12 @@ def build_server(state: Any):
     return Server("autolabel", on_list_tools=on_list_tools, on_call_tool=on_call_tool)
 
 
-def build_http_app(server, token_required: bool):
-    """The SDK's Streamable HTTP app for `server`, to be wrapped by McpGate at /mcp."""
+def build_http_app(server):
+    """The SDK's Streamable HTTP app for `server`, to be wrapped by McpGate at /mcp. The SDK's
+    DNS-rebinding protection is off: McpGate checks the Host of tokenless loopback requests."""
     from mcp.server.transport_security import TransportSecuritySettings
 
-    if token_required:
-        security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    else:
-        security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"])
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return server.streamable_http_app(streamable_http_path="/", stateless_http=True,
                                       json_response=True, transport_security=security)
 
@@ -99,11 +109,46 @@ def _bearer(scope) -> str:
     return ""
 
 
+def _header(scope, name: bytes) -> str | None:
+    for key, value in scope.get("headers") or []:
+        if key.lower() == name:
+            return value.decode("latin-1")
+    return None
+
+
+def _deny(status: int, code: str, message: str, **headers) -> JSONResponse:
+    return JSONResponse(error_body(code, message), status_code=status, headers=headers or None)
+
+
 class McpGate:
     """ASGI app mounted at /mcp: access check, then the SDK app built in the lifespan."""
 
     def __init__(self, state: Any):
         self.state = state
+
+    def check(self, scope) -> tuple[JSONResponse | None, str | None]:
+        """(refusal or None, teammate email or None)."""
+        settings = self.state.assistant_settings
+        users = getattr(self.state, "mcp_users", None)
+        token = _bearer(scope)
+        if token:
+            email = users.match(token) if users is not None else None
+            if email is not None:
+                return None, email
+            if settings.token_required and hmac.compare_digest(token.encode(),
+                                                               settings.mcp_token.encode()):
+                return None, None
+            return _deny(403, "forbidden", REVOKED), None
+        if settings.token_required:
+            return _deny(401, "unauthorized", UNAUTHORIZED, **{"WWW-Authenticate": "Bearer"}), None
+        client = scope.get("client")
+        if client and client[0] in LOOPBACK:
+            if not _LOOPBACK_HOST.match(_header(scope, b"host") or ""):
+                return _deny(403, "forbidden", BAD_HOST), None
+            return None, None
+        if users is not None and users.count() >= 1:
+            return _deny(401, "unauthorized", UNAUTHORIZED, **{"WWW-Authenticate": "Bearer"}), None
+        return _deny(403, "forbidden", FORBIDDEN), None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
@@ -114,17 +159,10 @@ class McpGate:
             response = JSONResponse(error_body("assistant_unavailable", "MCP is not running"),
                                     status_code=503)
             return await response(scope, receive, send)
-        if settings.token_required:
-            given = _bearer(scope).encode()
-            if not hmac.compare_digest(given, settings.mcp_token.encode()):
-                response = JSONResponse(error_body("unauthorized", UNAUTHORIZED), status_code=401,
-                                        headers={"WWW-Authenticate": "Bearer"})
-                return await response(scope, receive, send)
-        else:
-            client = scope.get("client")
-            if not client or client[0] not in LOOPBACK:
-                response = JSONResponse(error_body("forbidden", FORBIDDEN), status_code=403)
-                return await response(scope, receive, send)
+        refusal, email = self.check(scope)
+        if refusal is not None:
+            return await refusal(scope, receive, send)
+        scope[USER_SCOPE_KEY] = email  # always set: a client cannot smuggle its own
         await inner(scope, receive, send)
 
 

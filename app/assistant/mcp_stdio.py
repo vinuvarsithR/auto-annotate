@@ -7,11 +7,14 @@ to the app's /mcp/ URL (Streamable HTTP) and returns the upstream results unchan
 
 Needs Python >= 3.11 and `pip install mcp==2.3.0`.
 
-    python mcp_stdio.py --url http://HOST:8000/mcp/
+    python mcp_stdio.py --url http://HOST:8000/mcp/ [--token TOKEN]
 
 Environment (set in claude_desktop_config.json "env"):
-    AUTOLABEL_MCP_TOKEN   sent as "Authorization: Bearer ..." when set (never printed or logged)
-    AUTOLABEL_USER        sent as "X-Autolabel-User" (your name; write tools need it)
+    AUTOLABEL_MCP_TOKEN   your teammate token (or the shared token), sent as
+                          "Authorization: Bearer ..." (never printed or logged). --token wins over
+                          it, but prefer the env: other local users can see command-line arguments.
+    AUTOLABEL_USER        sent as "X-Autolabel-User" (your name). Needed for write tools only
+                          without a teammate token (the server then uses the token's email).
 
 Upstream unreachable -> the tool call returns is_error with a one-line message.
 """
@@ -45,6 +48,10 @@ class Upstream:
         self._token = token
         self.user = user
         self._connect = connect or self._http_connect
+
+    @property
+    def has_token(self) -> bool:
+        return bool(self._token)
 
     def headers(self) -> dict:
         h = {}
@@ -94,10 +101,11 @@ def build_server(upstream: Upstream) -> Server:
     return Server("autolabel", on_list_tools=on_list_tools, on_call_tool=on_call_tool)
 
 
-def upstream_from_env(url: str, env=None) -> Upstream:
+def upstream_from_env(url: str, env=None, token: str | None = None) -> Upstream:
+    """`token` (from --token) wins over AUTOLABEL_MCP_TOKEN."""
     env = os.environ if env is None else env
-    return Upstream(url, token=(env.get("AUTOLABEL_MCP_TOKEN") or "").strip(),
-                    user=(env.get("AUTOLABEL_USER") or "").strip())
+    token = (token or "").strip() or (env.get("AUTOLABEL_MCP_TOKEN") or "").strip()
+    return Upstream(url, token=token, user=(env.get("AUTOLABEL_USER") or "").strip())
 
 
 async def serve(upstream: Upstream) -> None:
@@ -109,9 +117,11 @@ async def serve(upstream: Upstream) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="stdio MCP launcher for the autolabel app")
     parser.add_argument("--url", required=True, help="the app's MCP URL, e.g. http://HOST:8000/mcp/")
+    parser.add_argument("--token", default=None,
+                        help="bearer token (wins over AUTOLABEL_MCP_TOKEN; the env is safer)")
     args = parser.parse_args(argv)
-    upstream = upstream_from_env(args.url)
-    if not upstream.user:
+    upstream = upstream_from_env(args.url, token=args.token)
+    if not upstream.user and not upstream.has_token:
         print("warning: AUTOLABEL_USER is not set; write tools will refuse", file=sys.stderr)
     asyncio.run(serve(upstream))
     return 0

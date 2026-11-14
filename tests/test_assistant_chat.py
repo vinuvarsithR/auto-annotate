@@ -129,7 +129,11 @@ def test_scenario(make, name):
             if k in exp:
                 assert req[k] == exp[k], k
         if "tool_names" in exp:
-            assert [t["name"] for t in req["tools"]] == exp["tool_names"]
+            # chat_fake.json still lists the 17 tools of 2026-11-13; tools.json (19) is the
+            # contract's list since 2026-11-14 (change request in docs/agents/backend.md)
+            names = [t["name"] for t in req["tools"]]
+            assert names == [t["name"] for t in TOOLS_FIXTURE["tools"]]
+            assert [n for n in names if n in exp["tool_names"]] == exp["tool_names"]
         if exp.get("no_confirm_property"):
             assert all("confirm" not in t["input_schema"]["properties"] for t in req["tools"])
     if "second_request_ends_with" in exp:
@@ -212,7 +216,7 @@ def test_chat_tools_are_the_fixture_without_confirm():
         schema["properties"].pop("confirm", None)
         assert got == {"name": want["name"], "description": want["description"],
                        "input_schema": schema}
-    assert len(CHAT_TOOLS) == 17
+    assert len(CHAT_TOOLS) == 19
 
 
 @pytest.mark.parametrize("model,beta", [("claude-sonnet-5-5", True), ("claude-opus-5-5", True),

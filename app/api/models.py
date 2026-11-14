@@ -5,7 +5,8 @@ models.py - endpoint 16: the detector names and modes that POST .../jobs accepts
 function endpoint 9 uses to check the "model" field). `modes` has one key per model, default
 mode first, [] when the detector has no modes.
 With ?project_id=N (Train on Colab): that project's non-deleted trained models are added at
-the end, in version order, each with modes [] (unknown project -> 404).
+the end, in version order, each with modes [] (unknown project -> 404), and a key `trained`
+lists them as {name, source, task, uploaded_at, metrics}.
 """
 
 from __future__ import annotations
@@ -26,13 +27,18 @@ def list_models(request: Request, project_id: int | None = None):
         conn = db.connect(request.app.state.db_path)
         try:
             require_project(conn, project_id)
-            trained = [r["name"] for r in conn.execute(
-                "SELECT name FROM trained_models WHERE project_id=? AND deleted_at IS NULL "
-                "ORDER BY version", (project_id,))]
+            rows = conn.execute(
+                "SELECT * FROM trained_models WHERE project_id=? AND deleted_at IS NULL "
+                "ORDER BY version", (project_id,)).fetchall()
         finally:
             conn.close()
-        for name in trained:
-            if name not in modes:
-                models.append(name)
-            modes[name] = []
+        trained = []
+        for r in rows:
+            if r["name"] not in modes:
+                models.append(r["name"])
+            modes[r["name"]] = []
+            t = db.trained_model_dict(r)
+            trained.append({k: t[k] for k in ("name", "source", "task", "uploaded_at",
+                                              "metrics")})
+        return {"models": models, "modes": modes, "trained": trained}
     return {"models": models, "modes": modes}

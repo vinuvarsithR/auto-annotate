@@ -72,6 +72,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     | #27   | hook_points table        | (new table, created if missing) |
     | #30   | projects.load_classes, projects.hook_radius | NULL (= defaults) |
     | #31   | assistant_actions table  | (new table, created if missing) |
+    | #37/#38 | trained_models.source, .metrics, .split | 'colab', NULL, NULL |
     """
     migrate_jobs(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)")}
@@ -92,6 +93,14 @@ def migrate(conn: sqlite3.Connection) -> None:
         if m is None:
             raise RuntimeError(f"schema.sql has no CREATE TABLE {table}")
         conn.execute(m.group(0).replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+    tm_cols = {r["name"] for r in conn.execute("PRAGMA table_info(trained_models)")}
+    if "source" not in tm_cols:
+        conn.execute("ALTER TABLE trained_models ADD COLUMN source TEXT NOT NULL DEFAULT 'colab' "
+                     "CHECK (source IN ('colab', 'local'))")
+    if "metrics" not in tm_cols:
+        conn.execute("ALTER TABLE trained_models ADD COLUMN metrics TEXT")
+    if "split" not in tm_cols:
+        conn.execute("ALTER TABLE trained_models ADD COLUMN split TEXT")
     proj_cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
     if "load_classes" not in proj_cols:
         conn.execute("ALTER TABLE projects ADD COLUMN load_classes TEXT")
@@ -135,7 +144,12 @@ def trained_model_dict(row: sqlite3.Row) -> dict:
             "version": row["version"], "task": row["task"],
             "class_names": json.loads(row["class_names"]), "imgsz": row["imgsz"],
             "file_name": row["file_name"], "size_bytes": row["size_bytes"],
-            "uploaded_at": row["uploaded_at"]}
+            "uploaded_at": row["uploaded_at"], "source": row["source"],
+            "metrics": _json_or_none(row["metrics"]), "split": _json_or_none(row["split"])}
+
+
+def _json_or_none(text: str | None):
+    return json.loads(text) if text is not None else None
 
 
 def trained_model(conn: sqlite3.Connection, pid: int, name: str) -> sqlite3.Row | None:

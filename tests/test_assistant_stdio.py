@@ -163,3 +163,48 @@ def test_end_to_end_through_the_real_app(live_app):
     assert result.is_error is False and result.structured_content["ok"] is True
     assert rows(app, "SELECT channel, actor, tool FROM assistant_actions") == [
         {"channel": "mcp", "actor": "claude:dhyan", "tool": "add_class"}]
+
+
+# ------------------------------------------------------------------ --token (2026-11-14)
+
+def _main_upstream(monkeypatch, argv):
+    """Run main(argv) with serve() replaced; returns the Upstream it would have served."""
+    got = []
+
+    async def fake_serve(upstream):
+        got.append(upstream)
+
+    monkeypatch.setattr(mcp_stdio, "serve", fake_serve)
+    assert mcp_stdio.main(argv) == 0
+    return got[0]
+
+
+def test_token_flag_beats_the_env(monkeypatch, capsys):
+    monkeypatch.setenv("AUTOLABEL_MCP_TOKEN", "from-env")
+    monkeypatch.delenv("AUTOLABEL_USER", raising=False)
+    up = _main_upstream(monkeypatch, ["--url", "http://h/mcp/", "--token", TOKEN])
+    assert up.headers() == {"Authorization": f"Bearer {TOKEN}"}
+    err = capsys.readouterr().err
+    assert "warning" not in err and TOKEN not in err  # with a token the name is optional
+
+
+def test_env_token_without_flag_and_no_warning(monkeypatch, capsys):
+    monkeypatch.setenv("AUTOLABEL_MCP_TOKEN", TOKEN)
+    monkeypatch.delenv("AUTOLABEL_USER", raising=False)
+    up = _main_upstream(monkeypatch, ["--url", "http://h/mcp/"])
+    assert up.headers() == {"Authorization": f"Bearer {TOKEN}"}
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_no_token_no_user_still_warns(monkeypatch, capsys):
+    monkeypatch.delenv("AUTOLABEL_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("AUTOLABEL_USER", raising=False)
+    _main_upstream(monkeypatch, ["--url", "http://h/mcp/"])
+    assert "AUTOLABEL_USER" in capsys.readouterr().err
+
+
+def test_upstream_from_env_token_argument():
+    up = mcp_stdio.upstream_from_env("http://h/mcp/", {"AUTOLABEL_MCP_TOKEN": "env"}, token=" t ")
+    assert up.headers() == {"Authorization": "Bearer t"}
+    up = mcp_stdio.upstream_from_env("http://h/mcp/", {"AUTOLABEL_MCP_TOKEN": "env"}, token="")
+    assert up.headers() == {"Authorization": "Bearer env"}

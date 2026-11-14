@@ -79,6 +79,9 @@ CREATE TABLE trained_models (            -- #24 - #26; migrate() creates it if m
   size_bytes   INTEGER NOT NULL,
   uploaded_at  TEXT NOT NULL,
   deleted_at   TEXT,                     -- set by #26; the row is kept
+  source       TEXT NOT NULL DEFAULT 'colab' CHECK (source IN ('colab', 'local')),  -- #37/#38
+  metrics      TEXT,                     -- JSON: the metrics file's `metrics`, or NULL
+  split        TEXT,                     -- JSON: the metrics file's `split`, or NULL
   UNIQUE (project_id, version)
 );
 CREATE TABLE hook_points (               -- #27 - #30 (OWLv2 + SAM 2); migrate() creates it if missing
