@@ -1166,6 +1166,7 @@
    ],
    "images": 10
   },
+  "val_frames": null,
   "classes_missing_in_train": [],
   "classes_missing_in_val": [
    "sb"
@@ -1829,6 +1830,7 @@
     ],
     "images": 10
    },
+   "val_frames": null,
    "classes_missing_in_train": [],
    "classes_missing_in_val": [
     "sb"
@@ -1857,6 +1859,7 @@
     ],
     "images": 10
    },
+   "val_frames": null,
    "classes_missing_in_train": [],
    "classes_missing_in_val": [
     "sb"
@@ -1911,6 +1914,7 @@
     ],
     "images": 10
    },
+   "val_frames": null,
    "classes_missing_in_train": [],
    "classes_missing_in_val": [
     "sb"
@@ -1990,6 +1994,7 @@
     ],
     "images": 10
    },
+   "val_frames": null,
    "classes_missing_in_train": [],
    "classes_missing_in_val": [
     "sb"
@@ -2032,7 +2037,7 @@
   ]
  },
  "split.json (with warnings, one sequence)": {
-  "rule": "by_sequence",
+  "rule": "val_is_train",
   "val_target": 0.2,
   "val_is_train": true,
   "train": {
@@ -2045,17 +2050,50 @@
    "sequences": [],
    "images": 0
   },
+  "val_frames": null,
   "classes_missing_in_train": [],
   "classes_missing_in_val": [],
   "warnings": [
    {
     "code": "val_is_train",
-    "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+    "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
    },
    {
-    "code": "class_without_labels",
+    "code": "class_without_train_labels",
     "class": "rb",
-    "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+    "boxes_in_package": 0,
+    "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
+   }
+  ]
+ },
+ "split.json (one video, last_frames)": {
+  "rule": "last_frames",
+  "val_target": 0.2,
+  "val_is_train": false,
+  "train": {
+   "sequences": [
+    "biax__cam0_2026-09-29_18-48-25"
+   ],
+   "images": 40
+  },
+  "val": {
+   "sequences": [
+    "biax__cam0_2026-09-29_18-48-25"
+   ],
+   "images": 10
+  },
+  "val_frames": {
+   "first": "biax__cam0_2026-09-29_18-48-25_00281.jpg",
+   "last": "biax__cam0_2026-09-29_18-48-25_00290.jpg"
+  },
+  "classes_missing_in_train": [],
+  "classes_missing_in_val": [
+   "person"
+  ],
+  "warnings": [
+   {
+    "code": "val_same_video",
+    "message": "Only one video: validation uses its last 20% of frames (one block). Neighbouring frames look alike, so validation mAP will look better than on a new video."
    }
   ]
  }

@@ -914,7 +914,7 @@ so every frame of one video lands in the same split.
 | Order | sequences by image count ascending, then by name |
 | Pick | walk that order; a sequence goes to val when (a) val images + its images <= `T`, (b) at least one sequence stays in train, and (c) every class with >= 1 exported box keeps >= 1 box in train |
 | Nothing picked | the first sequence in the order that meets (b) and (c) goes to val alone; if none meets (c), the first that meets (b) (then `classes_missing_in_train` is not empty) |
-| One sequence only | no split possible: every image is in `images/train`, `data.yaml` has `val: images/train`, `val_is_train: true`; there is no `images/val` or `labels/val` |
+| One sequence only | **changed 2026-11-15**: see *E2E gaps* item 4 (`last_frames` from 10 images, `val_is_train` below 10) |
 
 `split.json`:
 ```json
@@ -1260,8 +1260,8 @@ names, descriptions and `input_schema`s (JSON Schema, `additionalProperties: fal
 `get_hook`) and 9 write tools (`add_class`, `run_detection`, `rerun_examples`, `set_annotation_status`,
 `update_annotation`, `delete_annotation`, `set_hook_point`, `make_train_package`, `push_to_roboflow`).
 Since 2026-11-14: **19 tools**, `start_training` and `import_weights` added (see *Teammates + training routes*).
-Since 2026-11-15: **21 tools**, `set_review_status` and `add_annotation` added, `list_images` limit max 50 (see
-*E2E gaps*).
+Since 2026-11-15: **21 tools**, `set_review_status` and `add_annotation` added, `list_images` limit max 50, `web_url` on
+projects / images / boxes in tool results (see *E2E gaps*).
 
 | Rule | Value |
 |---|---|
@@ -1706,27 +1706,75 @@ response).
 Schema: `limit` maximum **50** (was 200), default 50. A larger value -> `bad_request` from the input check. The
 50,000-character result cap is unchanged.
 
-#### 4. Training package warnings (#23, #37, `make_train_package`, `start_training`)
-Export computes a `warnings` list and puts it in `split.json` (new key, always present, `[]` when none):
+#### 4. Split for a project with ONE video (#23 split rule, shared by #23, #37 and both tools)
+Changes the "One sequence only" row of #23. `split_sequences` stays the one shared split function (export may
+change its signature; #23 and #37 both go through `build_train_package` / `plan_train_package`).
 
-| Order | When | Warning |
+| Sequences in the package | N = exported images | Rule (`split.json.rule`) |
 |---|---|---|
-| 1 | `val_is_train` is true (one sequence only) | `{"code": "val_is_train", "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."}` |
-| 2.. | a project class (#7, project order) has **0 exported boxes** (approved statuses, `done`/`empty` images; for `segment` after the yolo-seg rule) | `{"code": "class_without_labels", "class": "sb", "message": "Class sb has 0 labelled boxes in the package: the model cannot learn it."}` |
+| 2 or more | any | `by_sequence`: unchanged (#23 table) |
+| 1 | **>= 10** | `last_frames`: order the images by `(frame is None, frame, file_name)` (`frame` from `autolabel.sequences.parse_frame_name`); the **last** `V = max(1, round(0.2 x N))` images are val (one contiguous block), the rest train. `val_is_train: false`; `images/val` + `labels/val` exist; `data.yaml` `val: images/val`. Warning `val_same_video`. |
+| 1 | **< 10** | `val_is_train` (last resort, as before): every image in train, `data.yaml` `val: images/train`, no `images/val`. Warning `val_is_train`. |
 
-`message` wording may change; `code` and `class` are exact.
+`split.json` for `last_frames` (the video's name in both lists; `val_frames` = first and last val file name in the
+order above, the zip names from `export_names`; `null` for the other rules):
+```json
+{"rule": "last_frames", "val_target": 0.2, "val_is_train": false,
+ "train": {"sequences": ["biax__cam0_2026-09-29_18-48-25"], "images": 40},
+ "val": {"sequences": ["biax__cam0_2026-09-29_18-48-25"], "images": 10},
+ "val_frames": {"first": "biax__cam0_2026-09-29_18-48-25_00281.jpg", "last": "biax__cam0_2026-09-29_18-48-25_00290.jpg"},
+ "classes_missing_in_train": [], "classes_missing_in_val": ["person"],
+ "warnings": [{"code": "val_same_video", "message": "..."}]}
+```
+`split.json` always has `val_frames` and `warnings` now (for `by_sequence`: `val_frames: null`). With rule
+`val_is_train`, `val` = `{"sequences": [], "images": 0}` and `classes_missing_in_val` = `[]`, as before.
+
+#### 5. Package warnings (#23, #37, `make_train_package`, `start_training`)
+`split.json.warnings`, always present (`[]` when none), in this order:
+
+| Order | When | Warning (`message` wording may change; `code`, `class`, `boxes_in_package` exact) |
+|---|---|---|
+| 1 | rule `last_frames` | `{"code": "val_same_video", "message": "Only one video: validation uses its last 20% of frames (one block). Neighbouring frames look alike, so validation mAP will look better than on a new video."}` |
+| 1 | rule `val_is_train` | `{"code": "val_is_train", "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."}` |
+| 2.. | a project class (#7 order) with **0 boxes in train** | `{"code": "class_without_train_labels", "class": "rb", "boxes_in_package": 0, "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."}` (`boxes_in_package` > 0: "... has N boxes, all in validation ...") |
+
+Boxes = exported boxes (approved statuses, `done`/`empty` images; `segment` after the yolo-seg rule). Class order and
+`nc` never change: `data.yaml` `names` = **all** project classes in project order (#7), also those with 0 boxes, so
+YOLO class indexes stay the same as in #14 and every earlier package.
 
 Export adds `plan_train_package(project_name, task, images, classes, annotations) -> dict`: the `split.json` dict
-(with `warnings`) **without reading image files or building the zip**; same `NothingToExport` / `NoPolygons` as
+**without reading image files or building the zip**; same `NothingToExport` / `NoPolygons` as
 `build_train_package`, whose `split.json` must equal it.
 
 | Entry | Change |
 |---|---|
-| #23 | zip unchanged except `split.json.warnings`. Also the response header `X-Autolabel-Warnings: <n>` (count). |
+| #23 | zip as before plus `split.json` keys above; response header `X-Autolabel-Warnings: <n>` (count) |
 | #37 `colab` | response gets `"warnings"` (= `split.warnings`), right after `split` |
-| `make_train_package`, `start_training` (`colab`) | **risky when `warnings` is not empty**: after the entry's own checks, without `confirm` -> `needs_confirmation` with `details` = `{"warnings": [...], "split": {...}, "task": "segment"}` and an `effect` that lists every warning message; nothing is built. With `confirm: true` -> built as before; `data` also has `warnings`. No warnings -> never risky (unchanged). |
-| Claude | the tool descriptions say: "If the result is needs_confirmation, show every warning to the human and call again with confirm=true only after they agree." The sidebar's `SYSTEM` text already covers confirmations. |
-| UI (optional, not required here) | none in this contract |
+| `make_train_package`, `start_training` (`colab`) | **risky when `warnings` is not empty**: after the entry's own checks, without `confirm` -> `needs_confirmation`, `details` = `{"warnings": [...], "split": {...}, "task": "segment"}`, `effect` lists every warning message; nothing is built. With `confirm: true` -> built; `data` also has `warnings`. No warnings -> never risky. |
+| Claude | both tool descriptions: "If the result is needs_confirmation, show every warning to the human and call again with confirm=true only after they agree." |
+
+#### 6. Web-app links
+The UI has **no deep links today** (VERIFIED: no `location.hash` / `hashchange` handling in `app/static/`). New links:
+
+| Link | Opens |
+|---|---|
+| `BASE/#project-<pid>` | the Review page of project `pid` (first image of the current filter) |
+| `BASE/#project-<pid>/image-<iid>` | the Review page of project `pid` on image `iid`. If `iid` is not in the loaded list the UI clears the filters and pages through #5 until it finds it; not found -> "Image iid is not in project pid" and the project's first image. |
+
+Unknown project -> the projects list with "Project pid not found". Links work on page load and on `hashchange` (a
+second link clicked while the app is open). They point at the web app (`BASE/`), never at `/api/...`.
+
+`BASE` = `AUTOLABEL_PUBLIC_URL` in `.env` (e.g. `http://192.168.1.20:8000`, trailing `/` removed). Unset: MCP over
+HTTP -> `http://` + the request's `Host` header; sidebar chat -> the #32 request's base URL; in-process calls (tests,
+`mcp.Client(server)`) -> `http://localhost:8000`.
+
+Tool results only (REST responses unchanged): every **Project** object in `data` gets `"web_url": "BASE/#project-<pid>"`
+(`list_projects`, `project_summary`), every **Image** object gets `"web_url": "BASE/#project-<pid>/image-<iid>"`
+(`list_images`, `set_review_status`), every **Annotation** object gets its image's `web_url` (`get_annotations`,
+`set_annotation_status`, `update_annotation`, `add_annotation`). `web_url` is the last key. `download_url` in
+`make_train_package` / `start_training` results becomes absolute: `BASE/api/assistant/downloads/<token>` (a file
+download, so `/api` is right there). The sidebar `SYSTEM` text adds: "When you mention an image or project, give
+its web_url so the human can open it in the app."
 
 #### Tools: 21
 `tools.json` order: ... `update_annotation`, `add_annotation` (after it), `delete_annotation`, `set_hook_point`,
@@ -1742,11 +1790,11 @@ Final list: **read (8)** `list_projects`, `project_summary`, `list_images`, `get
 #### Who builds what (E2E gaps)
 | Role | Builds | Tests (must pass) |
 |---|---|---|
-| export | `warnings` in `split.json` (rules above); `plan_train_package`; #23 header `X-Autolabel-Warnings` | `tests/test_export_train_package.py`: one sequence -> `val_is_train` warning first; a class with 0 boxes (and one with boxes only on `todo` images) -> `class_without_labels` in project order; no warnings -> `[]`; `plan_train_package` == the zip's `split.json`; header count |
-| backend | tools `set_review_status`, `add_annotation` (rules above, all-or-nothing, `claude:<name>`); `list_images` max 50; #37 `warnings`; `make_train_package` / `start_training` risky on warnings (via `plan_train_package`, before building) | `tests/test_assistant_tools.py`: every new `tools.json` example; 11 images -> confirmation with `from` counts; an `empty` conflict changes nothing; `add_annotation` on an `empty` image -> `conflict`, other project's class -> `bad_class_id`, `needs_review` row; `list_images` `limit` 51 -> `bad_request`; warnings package -> `needs_confirmation`, nothing written to downloads; `test_api_training.py`: #37 `warnings`; MCP/chat tool lists = 21 |
-| ui | nothing | - |
+| export | one-video split (`last_frames`, `val_is_train` under 10), `val_frames`, `warnings` (item 5), `plan_train_package`, #23 header `X-Autolabel-Warnings`; `names`/`nc` unchanged | `tests/test_export_train_package.py`: 1 video x 50 frames -> last 10 by frame in val (frames out of file order too), `val_same_video`; 1 video x 9 -> `val_is_train` + warning; 2 videos -> `by_sequence`, `val_frames` null; class with 0 boxes and class with boxes only in val -> `class_without_train_labels` in project order with `boxes_in_package`; `data.yaml` names/nc = all classes; `plan_train_package` == the zip's `split.json`; header count; existing `split.json` fixture-key test updated |
+| backend | tools `set_review_status`, `add_annotation`; `list_images` max 50; #37 `warnings`; `make_train_package` / `start_training` risky on warnings (via `plan_train_package`, before building); `BASE` + `web_url` on Project/Image/Annotation in tool results; absolute `download_url` in tool results; `SYSTEM` line | `tests/test_assistant_tools.py`: every new/changed `tools.json` example (adds a STATES entry for the 11-image example); `empty` conflict changes nothing; `add_annotation` on an `empty` image -> `conflict`, other project's class -> `bad_class_id`; `limit` 51 -> `bad_request`; warnings package -> `needs_confirmation` and no zip written; `AUTOLABEL_PUBLIC_URL` wins, MCP HTTP uses `Host`; `test_api_training.py`: #37 `warnings`; MCP/chat/stdio tool lists = 21 |
+| ui | deep links `#project-<pid>` and `#project-<pid>/image-<iid>` (load + `hashchange`, paging to the image, the two not-found messages), same in `?mock=1` | manual check |
 | models | nothing | - |
-| integrator | this section; `tools.json` (21 tools + examples), `chat_fake.json` `tool_names`, `api_samples.json` (`split.warnings`, #37 `warnings`) | full `pytest` at merge |
+| integrator | this section; `tools.json` (21 tools, examples with `web_url`), `chat_fake.json` `tool_names`, `api_samples.json` (`split.json` keys, #37 `warnings`, one-video sample), `.env.example` `AUTOLABEL_PUBLIC_URL=` | full `pytest` at merge |
 
 ## 3. Detector interface (Python)
 

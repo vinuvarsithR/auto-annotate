@@ -750,7 +750,8 @@
          "accepted": 2,
          "rejected": 1,
          "edited": 1
-        }
+        },
+        "web_url": "http://localhost:8000/#project-1"
        }
       ]
      }
@@ -776,7 +777,8 @@
         "accepted": 2,
         "rejected": 1,
         "edited": 1
-       }
+       },
+       "web_url": "http://localhost:8000/#project-1"
       },
       "images_by_review_status": {
        "todo": 2,
@@ -915,7 +917,8 @@
          "accepted": 0,
          "rejected": 1,
          "edited": 0
-        }
+        },
+        "web_url": "http://localhost:8000/#project-1/image-10"
        },
        {
         "id": 12,
@@ -932,7 +935,8 @@
          "accepted": 0,
          "rejected": 0,
          "edited": 0
-        }
+        },
+        "web_url": "http://localhost:8000/#project-1/image-12"
        }
       ],
       "total": 2,
@@ -991,7 +995,8 @@
         "accepted": 0,
         "rejected": 1,
         "edited": 0
-       }
+       },
+       "web_url": "http://localhost:8000/#project-1/image-10"
       },
       "annotations": [
        {
@@ -1013,7 +1018,8 @@
         "job_id": 5,
         "reviewer": null,
         "created_at": "2026-10-30T14:03:00Z",
-        "updated_at": "2026-10-30T14:03:00Z"
+        "updated_at": "2026-10-30T14:03:00Z",
+        "web_url": "http://localhost:8000/#project-1/image-10"
        },
        {
         "id": 102,
@@ -1034,7 +1040,8 @@
         "job_id": 5,
         "reviewer": null,
         "created_at": "2026-10-30T14:03:00Z",
-        "updated_at": "2026-10-30T14:03:00Z"
+        "updated_at": "2026-10-30T14:03:00Z",
+        "web_url": "http://localhost:8000/#project-1/image-10"
        },
        {
         "id": 103,
@@ -1055,7 +1062,8 @@
         "job_id": 5,
         "reviewer": "dhyan",
         "created_at": "2026-10-30T14:03:00Z",
-        "updated_at": "2026-10-30T14:06:00Z"
+        "updated_at": "2026-10-30T14:06:00Z",
+        "web_url": "http://localhost:8000/#project-1/image-10"
        }
       ]
      }
@@ -1432,7 +1440,8 @@
         "job_id": 5,
         "reviewer": "claude:dhyan",
         "created_at": "2026-10-30T14:03:00Z",
-        "updated_at": "2026-11-13T11:05:00Z"
+        "updated_at": "2026-11-13T11:05:00Z",
+        "web_url": "http://localhost:8000/#project-1/image-10"
        },
        {
         "id": 102,
@@ -1453,7 +1462,8 @@
         "job_id": 5,
         "reviewer": "claude:dhyan",
         "created_at": "2026-10-30T14:03:00Z",
-        "updated_at": "2026-11-13T11:05:00Z"
+        "updated_at": "2026-11-13T11:05:00Z",
+        "web_url": "http://localhost:8000/#project-1/image-10"
        }
       ]
      }
@@ -1555,7 +1565,8 @@
       "job_id": 5,
       "reviewer": "claude:dhyan",
       "created_at": "2026-10-30T14:03:00Z",
-      "updated_at": "2026-11-13T11:06:00Z"
+      "updated_at": "2026-11-13T11:06:00Z",
+      "web_url": "http://localhost:8000/#project-1/image-12"
      }
     }
    },
@@ -1606,7 +1617,8 @@
       "job_id": null,
       "reviewer": "claude:dhyan",
       "created_at": "2026-10-30T14:07:00Z",
-      "updated_at": "2026-10-30T14:07:00Z"
+      "updated_at": "2026-10-30T14:07:00Z",
+      "web_url": "http://localhost:8000/#project-1/image-10"
      }
     }
    },
@@ -1665,7 +1677,8 @@
       "job_id": null,
       "reviewer": "claude:dhyan",
       "created_at": "2026-10-30T14:07:00Z",
-      "updated_at": "2026-10-30T14:07:00Z"
+      "updated_at": "2026-10-30T14:07:00Z",
+      "web_url": "http://localhost:8000/#project-1/image-10"
      }
     }
    },
@@ -1802,7 +1815,8 @@
          "accepted": 0,
          "rejected": 1,
          "edited": 0
-        }
+        },
+        "web_url": "http://localhost:8000/#project-1/image-10"
        },
        {
         "id": 12,
@@ -1819,7 +1833,8 @@
          "accepted": 0,
          "rejected": 0,
          "edited": 0
-        }
+        },
+        "web_url": "http://localhost:8000/#project-1/image-12"
        }
       ]
      }
@@ -1922,21 +1937,22 @@
      "ok": false,
      "needs_confirmation": {
       "tool": "make_train_package",
-      "effect": "Build a segment training package for project 1 despite 2 warnings: Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is. Class rb has 0 labelled boxes in the package: the model cannot learn it.",
+      "effect": "Build a segment training package for project 1 despite 2 warnings: Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little. Class rb has no labelled boxes in the training images: the model cannot learn it.",
       "details": {
        "warnings": [
         {
          "code": "val_is_train",
-         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+         "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
         },
         {
-         "code": "class_without_labels",
+         "code": "class_without_train_labels",
          "class": "rb",
-         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+         "boxes_in_package": 0,
+         "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
         }
        ],
        "split": {
-        "rule": "by_sequence",
+        "rule": "val_is_train",
         "val_target": 0.2,
         "val_is_train": true,
         "train": {
@@ -1949,17 +1965,19 @@
          "sequences": [],
          "images": 0
         },
+        "val_frames": null,
         "classes_missing_in_train": [],
         "classes_missing_in_val": [],
         "warnings": [
          {
           "code": "val_is_train",
-          "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+          "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
          },
          {
-          "code": "class_without_labels",
+          "code": "class_without_train_labels",
           "class": "rb",
-          "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+          "boxes_in_package": 0,
+          "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
          }
         ]
        },
@@ -1982,12 +2000,12 @@
     "output": {
      "ok": true,
      "data": {
-      "download_url": "/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
+      "download_url": "http://localhost:8000/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
       "file_name": "eot_crane_train_segment.zip",
       "size_bytes": 48211234,
       "expires_at": "2026-11-14T11:08:00Z",
       "split": {
-       "rule": "by_sequence",
+       "rule": "val_is_train",
        "val_target": 0.2,
        "val_is_train": true,
        "train": {
@@ -2000,29 +2018,32 @@
         "sequences": [],
         "images": 0
        },
+       "val_frames": null,
        "classes_missing_in_train": [],
        "classes_missing_in_val": [],
        "warnings": [
         {
          "code": "val_is_train",
-         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+         "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
         },
         {
-         "code": "class_without_labels",
+         "code": "class_without_train_labels",
          "class": "rb",
-         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+         "boxes_in_package": 0,
+         "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
         }
        ]
       },
       "warnings": [
        {
         "code": "val_is_train",
-        "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+        "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
        },
        {
-        "code": "class_without_labels",
+        "code": "class_without_train_labels",
         "class": "rb",
-        "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+        "boxes_in_package": 0,
+        "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
        }
       ]
      }
@@ -2040,21 +2061,22 @@
      "ok": false,
      "needs_confirmation": {
       "tool": "start_training",
-      "effect": "Build a segment training package for project 1 despite 2 warnings: Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is. Class rb has 0 labelled boxes in the package: the model cannot learn it.",
+      "effect": "Build a segment training package for project 1 despite 2 warnings: Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little. Class rb has no labelled boxes in the training images: the model cannot learn it.",
       "details": {
        "warnings": [
         {
          "code": "val_is_train",
-         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+         "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
         },
         {
-         "code": "class_without_labels",
+         "code": "class_without_train_labels",
          "class": "rb",
-         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+         "boxes_in_package": 0,
+         "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
         }
        ],
        "split": {
-        "rule": "by_sequence",
+        "rule": "val_is_train",
         "val_target": 0.2,
         "val_is_train": true,
         "train": {
@@ -2067,17 +2089,19 @@
          "sequences": [],
          "images": 0
         },
+        "val_frames": null,
         "classes_missing_in_train": [],
         "classes_missing_in_val": [],
         "warnings": [
          {
           "code": "val_is_train",
-          "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+          "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
          },
          {
-          "code": "class_without_labels",
+          "code": "class_without_train_labels",
           "class": "rb",
-          "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+          "boxes_in_package": 0,
+          "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
          }
         ]
        },
@@ -2108,13 +2132,13 @@
       "imgsz": 960,
       "base_weights": "yolo11s-seg.pt",
       "package": {
-       "download_url": "/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
+       "download_url": "http://localhost:8000/api/assistant/downloads/Xb3k9QpLr2T0aZ1vYw8sNg",
        "file_name": "eot_crane_train_segment.zip",
        "size_bytes": 48211234,
        "expires_at": "2026-11-15T09:00:00Z"
       },
       "split": {
-       "rule": "by_sequence",
+       "rule": "val_is_train",
        "val_target": 0.2,
        "val_is_train": true,
        "train": {
@@ -2127,29 +2151,32 @@
         "sequences": [],
         "images": 0
        },
+       "val_frames": null,
        "classes_missing_in_train": [],
        "classes_missing_in_val": [],
        "warnings": [
         {
          "code": "val_is_train",
-         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+         "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
         },
         {
-         "code": "class_without_labels",
+         "code": "class_without_train_labels",
          "class": "rb",
-         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+         "boxes_in_package": 0,
+         "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
         }
        ]
       },
       "warnings": [
        {
         "code": "val_is_train",
-        "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+        "message": "Only one video with fewer than 10 images: there is no validation set, validation mAP is measured on the training images and means little."
        },
        {
-        "code": "class_without_labels",
+        "code": "class_without_train_labels",
         "class": "rb",
-        "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+        "boxes_in_package": 0,
+        "message": "Class rb has no labelled boxes in the training images: the model cannot learn it."
        }
       ],
       "next_steps": [
@@ -2262,10 +2289,12 @@
         ],
         "images": 10
        },
+       "val_frames": null,
        "classes_missing_in_train": [],
        "classes_missing_in_val": [
         "sb"
-       ]
+       ],
+       "warnings": []
       }
      }
     }
