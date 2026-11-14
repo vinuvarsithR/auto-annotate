@@ -70,7 +70,7 @@
      "limit": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 200,
+      "maximum": 50,
       "default": 50
      }
     },
@@ -402,6 +402,63 @@
    }
   },
   {
+   "name": "add_annotation",
+   "kind": "write",
+   "risky": "never",
+   "description": "Draw a new box on an image (#12): class by name, bbox [x, y, w, h] in pixels, or a polygon (normalized 0..1 points; then bbox is computed). source human; status accepted (default) or needs_review. Refused on an image marked empty.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "image_id": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "class_name": {
+      "type": "string",
+      "minLength": 1
+     },
+     "bbox": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 4,
+      "maxItems": 4
+     },
+     "polygon": {
+      "type": [
+       "array",
+       "null"
+      ],
+      "minItems": 3,
+      "items": {
+       "type": "array",
+       "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       },
+       "minItems": 2,
+       "maxItems": 2
+      }
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "accepted",
+       "needs_review"
+      ],
+      "default": "accepted"
+     }
+    },
+    "required": [
+     "image_id",
+     "class_name"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "name": "delete_annotation",
    "kind": "write",
    "risky": "always",
@@ -453,10 +510,49 @@
    }
   },
   {
+   "name": "set_review_status",
+   "kind": "write",
+   "risky": "more than 10 images",
+   "description": "Set the review status of images (#20): todo, done (reviewed) or empty (reviewed, no objects; refused while an image has a box that is not rejected). All or nothing. Needs confirm=true for more than 10 images.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "image_ids": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "minItems": 1,
+      "maxItems": 500,
+      "uniqueItems": true
+     },
+     "review_status": {
+      "type": "string",
+      "enum": [
+       "todo",
+       "done",
+       "empty"
+      ]
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
+     }
+    },
+    "required": [
+     "image_ids",
+     "review_status"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "name": "make_train_package",
    "kind": "write",
-   "risky": "never",
-   "description": "Build the Colab training package zip (#23) and return a download link for the human.",
+   "risky": "when the package has warnings",
+   "description": "Build the Colab training package zip (#23) and return a download link for the human. The result lists warnings (one video only: no real validation set; a class with 0 labels). If the result is needs_confirmation, show every warning to the human and call again with confirm=true only after they agree.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -471,6 +567,11 @@
        "segment"
       ],
       "default": "detect"
+     },
+     "confirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "true only after the human has seen the needs_confirmation result and said yes"
      }
     },
     "required": [
@@ -482,8 +583,8 @@
   {
    "name": "start_training",
    "kind": "write",
-   "risky": "target local (reserved)",
-   "description": "Start training a model on the project's reviewed images (#37). target 'colab' returns a training package download link and the steps to run it on Google Colab; target 'local' (GPU on the app host) is not available on this host and returns an error that points to colab.",
+   "risky": "colab: when the package has warnings; local: always (reserved)",
+   "description": "Start training a model on the project's reviewed images (#37). target 'colab' returns a training package download link and the steps to run it on Google Colab; target 'local' (GPU on the app host) is not available on this host and returns an error that points to colab. The colab result lists warnings (one video only: no real validation set; a class with 0 labels). If the result is needs_confirmation, show every warning to the human and call again with confirm=true only after they agree.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -850,6 +951,19 @@
      "error": {
       "code": "bad_request",
       "message": "limit: must be <= 200"
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "limit": 51
+    },
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_request",
+      "message": "limit: 51 is greater than the maximum of 50"
      }
     }
    }
@@ -1458,6 +1572,138 @@
     }
    }
   ],
+  "add_annotation": [
+   {
+    "input": {
+     "image_id": 10,
+     "class_name": "person",
+     "bbox": [
+      100,
+      200,
+      40,
+      50
+     ]
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 109,
+      "image_id": 10,
+      "class_id": 1,
+      "class_name": "person",
+      "bbox": [
+       100.0,
+       200.0,
+       40.0,
+       50.0
+      ],
+      "mask": null,
+      "polygon": null,
+      "score": null,
+      "source": "human",
+      "status": "accepted",
+      "job_id": null,
+      "reviewer": "claude:dhyan",
+      "created_at": "2026-10-30T14:07:00Z",
+      "updated_at": "2026-10-30T14:07:00Z"
+     }
+    }
+   },
+   {
+    "input": {
+     "image_id": 10,
+     "class_name": "sb",
+     "polygon": [
+      [
+       0.1,
+       0.2
+      ],
+      [
+       0.3,
+       0.2
+      ],
+      [
+       0.2,
+       0.4
+      ]
+     ],
+     "status": "needs_review"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": true,
+     "data": {
+      "id": 109,
+      "image_id": 10,
+      "class_id": 3,
+      "class_name": "sb",
+      "bbox": [
+       128.0,
+       144.0,
+       256.0,
+       144.0
+      ],
+      "mask": null,
+      "polygon": [
+       [
+        0.1,
+        0.2
+       ],
+       [
+        0.3,
+        0.2
+       ],
+       [
+        0.2,
+        0.4
+       ]
+      ],
+      "score": null,
+      "source": "human",
+      "status": "needs_review",
+      "job_id": null,
+      "reviewer": "claude:dhyan",
+      "created_at": "2026-10-30T14:07:00Z",
+      "updated_at": "2026-10-30T14:07:00Z"
+     }
+    }
+   },
+   {
+    "input": {
+     "image_id": 10,
+     "class_name": "crane",
+     "bbox": [
+      1,
+      2,
+      3,
+      4
+     ]
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_class_id",
+      "message": "class crane is not a class of project 1"
+     }
+    }
+   },
+   {
+    "input": {
+     "image_id": 10,
+     "class_name": "person"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "bad_request",
+      "message": "send bbox or polygon"
+     }
+    }
+   }
+  ],
   "delete_annotation": [
    {
     "input": {
@@ -1527,12 +1773,212 @@
     }
    }
   ],
+  "set_review_status": [
+   {
+    "input": {
+     "image_ids": [
+      10,
+      12
+     ],
+     "review_status": "done"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": true,
+     "data": {
+      "images": [
+       {
+        "id": 10,
+        "project_id": 1,
+        "file_name": "rb_load__cam0_2026-09-29_18-34-11_00049.jpg",
+        "width": 1280,
+        "height": 720,
+        "url": "/api/images/10/file",
+        "uploaded_at": "2026-10-30T14:01:00Z",
+        "review_status": "done",
+        "counts": {
+         "auto_accepted": 1,
+         "needs_review": 1,
+         "accepted": 0,
+         "rejected": 1,
+         "edited": 0
+        }
+       },
+       {
+        "id": 12,
+        "project_id": 1,
+        "file_name": "sb_evener__cam0_2026-09-29_18-57-19_00003.jpg",
+        "width": 1280,
+        "height": 720,
+        "url": "/api/images/12/file",
+        "uploaded_at": "2026-10-30T14:01:00Z",
+        "review_status": "done",
+        "counts": {
+         "auto_accepted": 1,
+         "needs_review": 1,
+         "accepted": 0,
+         "rejected": 0,
+         "edited": 0
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "input": {
+     "image_ids": [
+      12,
+      10
+     ],
+     "review_status": "empty"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "conflict",
+      "message": "cannot mark images 10, 12 empty: they have boxes that are not rejected; nothing changed"
+     }
+    }
+   },
+   {
+    "input": {
+     "image_ids": [
+      10,
+      999
+     ],
+     "review_status": "done"
+    },
+    "user": "dhyan",
+    "output": {
+     "ok": false,
+     "error": {
+      "code": "not_found",
+      "message": "image 999 not found; nothing changed"
+     }
+    }
+   },
+   {
+    "input": {
+     "image_ids": [
+      1000,
+      1001,
+      1002,
+      1003,
+      1004,
+      1005,
+      1006,
+      1007,
+      1008,
+      1009,
+      1010
+     ],
+     "review_status": "done"
+    },
+    "state": "add_images(app, 11, start_id=1000): images 1000-1010, review_status todo",
+    "user": "dhyan",
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "set_review_status",
+      "effect": "Set review_status done on 11 images (now: 11 todo).",
+      "details": {
+       "images": 11,
+       "review_status": "done",
+       "from": {
+        "todo": 11,
+        "done": 0,
+        "empty": 0
+       }
+      },
+      "arguments": {
+       "image_ids": [
+        1000,
+        1001,
+        1002,
+        1003,
+        1004,
+        1005,
+        1006,
+        1007,
+        1008,
+        1009,
+        1010
+       ],
+       "review_status": "done"
+      }
+     }
+    }
+   }
+  ],
   "make_train_package": [
    {
     "input": {
      "project_id": 1,
      "task": "segment"
     },
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "make_train_package",
+      "effect": "Build a segment training package for project 1 despite 2 warnings: Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is. Class rb has 0 labelled boxes in the package: the model cannot learn it.",
+      "details": {
+       "warnings": [
+        {
+         "code": "val_is_train",
+         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+        },
+        {
+         "code": "class_without_labels",
+         "class": "rb",
+         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+        }
+       ],
+       "split": {
+        "rule": "by_sequence",
+        "val_target": 0.2,
+        "val_is_train": true,
+        "train": {
+         "sequences": [
+          "biax__cam0_2026-09-29_18-48-25"
+         ],
+         "images": 1
+        },
+        "val": {
+         "sequences": [],
+         "images": 0
+        },
+        "classes_missing_in_train": [],
+        "classes_missing_in_val": [],
+        "warnings": [
+         {
+          "code": "val_is_train",
+          "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+         },
+         {
+          "code": "class_without_labels",
+          "class": "rb",
+          "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+         }
+        ]
+       },
+       "task": "segment"
+      },
+      "arguments": {
+       "project_id": 1,
+       "task": "segment"
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "task": "segment",
+     "confirm": true
+    },
+    "user": "dhyan",
     "output": {
      "ok": true,
      "data": {
@@ -1543,25 +1989,42 @@
       "split": {
        "rule": "by_sequence",
        "val_target": 0.2,
-       "val_is_train": false,
+       "val_is_train": true,
        "train": {
         "sequences": [
-         "biax__cam0_2026-09-29_18-48-25",
-         "rb_load__cam0_2026-09-29_18-34-11"
+         "biax__cam0_2026-09-29_18-48-25"
         ],
-        "images": 40
+        "images": 1
        },
        "val": {
-        "sequences": [
-         "rb_load__cam0_2026-09-29_18-24-11"
-        ],
-        "images": 10
+        "sequences": [],
+        "images": 0
        },
        "classes_missing_in_train": [],
-       "classes_missing_in_val": [
-        "sb"
+       "classes_missing_in_val": [],
+       "warnings": [
+        {
+         "code": "val_is_train",
+         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+        },
+        {
+         "code": "class_without_labels",
+         "class": "rb",
+         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+        }
        ]
-      }
+      },
+      "warnings": [
+       {
+        "code": "val_is_train",
+        "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+       },
+       {
+        "code": "class_without_labels",
+        "class": "rb",
+        "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+       }
+      ]
      }
     }
    }
@@ -1573,6 +2036,69 @@
      "target": "colab",
      "task": "segment"
     },
+    "output": {
+     "ok": false,
+     "needs_confirmation": {
+      "tool": "start_training",
+      "effect": "Build a segment training package for project 1 despite 2 warnings: Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is. Class rb has 0 labelled boxes in the package: the model cannot learn it.",
+      "details": {
+       "warnings": [
+        {
+         "code": "val_is_train",
+         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+        },
+        {
+         "code": "class_without_labels",
+         "class": "rb",
+         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+        }
+       ],
+       "split": {
+        "rule": "by_sequence",
+        "val_target": 0.2,
+        "val_is_train": true,
+        "train": {
+         "sequences": [
+          "biax__cam0_2026-09-29_18-48-25"
+         ],
+         "images": 1
+        },
+        "val": {
+         "sequences": [],
+         "images": 0
+        },
+        "classes_missing_in_train": [],
+        "classes_missing_in_val": [],
+        "warnings": [
+         {
+          "code": "val_is_train",
+          "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+         },
+         {
+          "code": "class_without_labels",
+          "class": "rb",
+          "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+         }
+        ]
+       },
+       "task": "segment"
+      },
+      "arguments": {
+       "project_id": 1,
+       "target": "colab",
+       "task": "segment"
+      }
+     }
+    }
+   },
+   {
+    "input": {
+     "project_id": 1,
+     "target": "colab",
+     "task": "segment",
+     "confirm": true
+    },
+    "user": "dhyan",
     "output": {
      "ok": true,
      "data": {
@@ -1590,25 +2116,42 @@
       "split": {
        "rule": "by_sequence",
        "val_target": 0.2,
-       "val_is_train": false,
+       "val_is_train": true,
        "train": {
         "sequences": [
-         "biax__cam0_2026-09-29_18-48-25",
-         "rb_load__cam0_2026-09-29_18-34-11"
+         "biax__cam0_2026-09-29_18-48-25"
         ],
-        "images": 40
+        "images": 1
        },
        "val": {
-        "sequences": [
-         "rb_load__cam0_2026-09-29_18-24-11"
-        ],
-        "images": 10
+        "sequences": [],
+        "images": 0
        },
        "classes_missing_in_train": [],
-       "classes_missing_in_val": [
-        "sb"
+       "classes_missing_in_val": [],
+       "warnings": [
+        {
+         "code": "val_is_train",
+         "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+        },
+        {
+         "code": "class_without_labels",
+         "class": "rb",
+         "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+        }
        ]
       },
+      "warnings": [
+       {
+        "code": "val_is_train",
+        "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."
+       },
+       {
+        "code": "class_without_labels",
+        "class": "rb",
+        "message": "Class rb has 0 labelled boxes in the package: the model cannot learn it."
+       }
+      ],
       "next_steps": [
        "Download the zip.",
        "Open train.ipynb in Google Colab (Runtime > Change runtime type > GPU).",

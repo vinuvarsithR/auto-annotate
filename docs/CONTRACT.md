@@ -1260,6 +1260,8 @@ names, descriptions and `input_schema`s (JSON Schema, `additionalProperties: fal
 `get_hook`) and 9 write tools (`add_class`, `run_detection`, `rerun_examples`, `set_annotation_status`,
 `update_annotation`, `delete_annotation`, `set_hook_point`, `make_train_package`, `push_to_roboflow`).
 Since 2026-11-14: **19 tools**, `start_training` and `import_weights` added (see *Teammates + training routes*).
+Since 2026-11-15: **21 tools**, `set_review_status` and `add_annotation` added, `list_images` limit max 50 (see
+*E2E gaps*).
 
 | Rule | Value |
 |---|---|
@@ -1275,7 +1277,7 @@ Since 2026-11-14: **19 tools**, `start_training` and `import_weights` added (see
 |---|---|---|
 | `list_projects` | #2 | #2 response |
 | `project_summary` | #3 + counts | `{"project": Project (#3), "images_by_review_status": {"todo", "done", "empty"}, "boxes_by_class": {class name: {each of the 5 statuses: n}}, "latest_job": Job or null}`; classes in project order, every class listed (zeros too); `latest_job` = the project's job with the highest id |
-| `list_images` | #5 (`limit` max 200 here) | #5 response |
+| `list_images` | #5 (`limit` max 50 here, since 2026-11-15) | #5 response |
 | `get_annotations` | #11 | #11 response |
 | `list_classes` | #7 | #7 response |
 | `get_job` | #10 | Job |
@@ -1665,6 +1667,86 @@ host's LAN address in their copy. Nobody builds anything for it.
 | ui | Train panel: optional metrics `.json` file next to the `.pt` upload (#24) and `bad_metrics` shown; model list shows source, date, box/mask mAP50 and mAP50-95 (from #25; "-" when null); a "Train on this PC (GPU)" button calling #37 `target: "local"` that shows the error message as is; same in `?mock=1` | manual check |
 | models | nothing | - |
 | integrator | this section; `tools.json` (19 tools + examples), `api_samples.json` (TrainedModel fields, #16 `trained`, #37, #38, 401/403 samples); `.env.example` (`AUTOLABEL_IMPORT_DIRS=`, `AUTOLABEL_MCP_USERS_FILE=`); README teammate + firewall steps; `docs/claude_panel/index.html` copy | full `pytest` at merge |
+
+### E2E gaps (2026-11-15; found by the project 6 end-to-end test)
+
+#### 1. Tool `set_review_status` (write)
+Maps to #20 per image. Input:
+```json
+{"image_ids": [10, 11], "review_status": "done", "confirm": false}
+```
+`image_ids`: 1-500 unique ints >= 1; `review_status`: `todo`, `done` or `empty`.
+
+| Rule | Value |
+|---|---|
+| Checks | #20 for every image: unknown id -> `not_found`; `empty` on an image with a box that is not `rejected` -> `conflict` (message names the image ids). **All or nothing** in one transaction: any failing image -> error, nothing changes. Ids may come from different projects (like `set_annotation_status`). |
+| Risky | more than **10** images -> `needs_confirmation`, `details` = `{"images": n, "review_status": "done", "from": {"todo": n, "done": n, "empty": n}}` (current values of those images; all three keys, zeros too) |
+| `data` | `{"images": [Image, ...]}` (#20 response per image) in input order. Setting the current value is a no-op for that image, as #20. |
+| Who | `assistant_actions` row as every write; `#20` stores no reviewer, so neither does this tool |
+
+#### 2. Tool `add_annotation` (write)
+Maps to #12. Input:
+```json
+{"image_id": 10, "class_name": "person", "bbox": [100, 200, 40, 50], "polygon": null, "status": "accepted"}
+```
+| Field | Rule |
+|---|---|
+| `image_id` | required, int >= 1 |
+| `class_name` | required; a class of **the image's project** (exact name), else `bad_class_id` (as `update_annotation`) |
+| `bbox` | `[x, y, w, h]` px, 4 numbers; required unless `polygon` is given; ignored when `polygon` is given (#12) |
+| `polygon` | optional, normalized `[[x, y], ...]`, same validation as #12 (`bad_request`); `null` = none |
+| `status` | `accepted` (default) or `needs_review`; anything else fails the schema (`bad_request`) |
+
+Same rules as #12: unknown image -> `not_found`; image `review_status` `empty` -> `conflict`; bad bbox / polygon ->
+`bad_request`. The row gets `source` `human`, `score` null, `reviewer` `claude:<name>`. `needs_review` = the #12 row
+then the #13 status rule in the **same transaction** (one row, no `edited`). Never risky. `data` = Annotation (#12
+response).
+
+#### 3. `list_images` limit
+Schema: `limit` maximum **50** (was 200), default 50. A larger value -> `bad_request` from the input check. The
+50,000-character result cap is unchanged.
+
+#### 4. Training package warnings (#23, #37, `make_train_package`, `start_training`)
+Export computes a `warnings` list and puts it in `split.json` (new key, always present, `[]` when none):
+
+| Order | When | Warning |
+|---|---|---|
+| 1 | `val_is_train` is true (one sequence only) | `{"code": "val_is_train", "message": "Only one video (sequence) in the package: there is no separate validation set, so validation mAP is measured on the training images and will look better than it is."}` |
+| 2.. | a project class (#7, project order) has **0 exported boxes** (approved statuses, `done`/`empty` images; for `segment` after the yolo-seg rule) | `{"code": "class_without_labels", "class": "sb", "message": "Class sb has 0 labelled boxes in the package: the model cannot learn it."}` |
+
+`message` wording may change; `code` and `class` are exact.
+
+Export adds `plan_train_package(project_name, task, images, classes, annotations) -> dict`: the `split.json` dict
+(with `warnings`) **without reading image files or building the zip**; same `NothingToExport` / `NoPolygons` as
+`build_train_package`, whose `split.json` must equal it.
+
+| Entry | Change |
+|---|---|
+| #23 | zip unchanged except `split.json.warnings`. Also the response header `X-Autolabel-Warnings: <n>` (count). |
+| #37 `colab` | response gets `"warnings"` (= `split.warnings`), right after `split` |
+| `make_train_package`, `start_training` (`colab`) | **risky when `warnings` is not empty**: after the entry's own checks, without `confirm` -> `needs_confirmation` with `details` = `{"warnings": [...], "split": {...}, "task": "segment"}` and an `effect` that lists every warning message; nothing is built. With `confirm: true` -> built as before; `data` also has `warnings`. No warnings -> never risky (unchanged). |
+| Claude | the tool descriptions say: "If the result is needs_confirmation, show every warning to the human and call again with confirm=true only after they agree." The sidebar's `SYSTEM` text already covers confirmations. |
+| UI (optional, not required here) | none in this contract |
+
+#### Tools: 21
+`tools.json` order: ... `update_annotation`, `add_annotation` (after it), `delete_annotation`, `set_hook_point`,
+`set_review_status` (after it), `make_train_package`, `start_training`, `import_weights`, `push_to_roboflow`.
+MCP annotations: both new tools `read_only_hint: false, destructive_hint: false`. `chat_fake.json` `tool_names` = the
+21 names.
+
+Final list: **read (8)** `list_projects`, `project_summary`, `list_images`, `get_annotations`, `list_classes`,
+`get_job`, `list_models`, `get_hook`; **write (13)** `add_class`, `run_detection`, `rerun_examples`,
+`set_annotation_status`, `update_annotation`, `add_annotation`, `delete_annotation`, `set_hook_point`,
+`set_review_status`, `make_train_package`, `start_training`, `import_weights`, `push_to_roboflow`.
+
+#### Who builds what (E2E gaps)
+| Role | Builds | Tests (must pass) |
+|---|---|---|
+| export | `warnings` in `split.json` (rules above); `plan_train_package`; #23 header `X-Autolabel-Warnings` | `tests/test_export_train_package.py`: one sequence -> `val_is_train` warning first; a class with 0 boxes (and one with boxes only on `todo` images) -> `class_without_labels` in project order; no warnings -> `[]`; `plan_train_package` == the zip's `split.json`; header count |
+| backend | tools `set_review_status`, `add_annotation` (rules above, all-or-nothing, `claude:<name>`); `list_images` max 50; #37 `warnings`; `make_train_package` / `start_training` risky on warnings (via `plan_train_package`, before building) | `tests/test_assistant_tools.py`: every new `tools.json` example; 11 images -> confirmation with `from` counts; an `empty` conflict changes nothing; `add_annotation` on an `empty` image -> `conflict`, other project's class -> `bad_class_id`, `needs_review` row; `list_images` `limit` 51 -> `bad_request`; warnings package -> `needs_confirmation`, nothing written to downloads; `test_api_training.py`: #37 `warnings`; MCP/chat tool lists = 21 |
+| ui | nothing | - |
+| models | nothing | - |
+| integrator | this section; `tools.json` (21 tools + examples), `chat_fake.json` `tool_names`, `api_samples.json` (`split.warnings`, #37 `warnings`) | full `pytest` at merge |
 
 ## 3. Detector interface (Python)
 
