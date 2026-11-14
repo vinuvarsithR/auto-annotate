@@ -472,7 +472,7 @@ def test_reviewer_is_claude_name_for_both_writers(started):
 
 def test_train_package_download(started):
     app, c = started
-    got = call(app, "make_train_package", {"project_id": 1, "task": "segment"})
+    got = call(app, "make_train_package", {"project_id": 1, "task": "segment", "confirm": True})
     data = got["data"]
     assert data["file_name"] == "eot_crane_train_segment.zip"
     assert data["download_url"].startswith("http://localhost:8000/api/assistant/downloads/")
@@ -507,7 +507,7 @@ def test_unknown_download_is_404(started, token):
 
 def test_expired_download_is_404_and_deleted(started):
     app, c = started
-    data = call(app, "make_train_package", {"project_id": 1, "task": "detect"})["data"]
+    data = call(app, "make_train_package", {"project_id": 1, "task": "detect", "confirm": True})["data"]
     token = data["download_url"].rsplit("/", 1)[1]
     meta = downloads.folder(app.state.data_dir) / f"{token}.json"
     m = json.loads(meta.read_text(encoding="utf-8"))
@@ -521,13 +521,13 @@ def test_old_downloads_deleted_on_new_package_and_at_startup(tmp_path, env):
     app = make_app(tmp_path)
     with open_client(app):
         load_fixture_data(app)
-        first = call(app, "make_train_package", {"project_id": 1})["data"]
+        first = call(app, "make_train_package", {"project_id": 1, "confirm": True})["data"]
         token = first["download_url"].rsplit("/", 1)[1]
         meta = downloads.folder(app.state.data_dir) / f"{token}.json"
         m = json.loads(meta.read_text(encoding="utf-8"))
         m["expires_at"] = "2020-01-01T00:00:00Z"
         meta.write_text(json.dumps(m), encoding="utf-8")
-        second = call(app, "make_train_package", {"project_id": 1})["data"]
+        second = call(app, "make_train_package", {"project_id": 1, "confirm": True})["data"]
         assert not meta.exists()
         token2 = second["download_url"].rsplit("/", 1)[1]
         meta2 = downloads.folder(app.state.data_dir) / f"{token2}.json"
@@ -566,7 +566,7 @@ def test_start_training_checks(tmp_path, env, monkeypatch):
         assert got["error"]["code"] == "bad_request"
         assert call(app, "start_training", {"project_id": 1, "target": "colab", "imgsz": 330}
                     )["error"]["code"] == "bad_request"
-        got = call(app, "start_training", {"project_id": 1, "target": "colab"})
+        got = call(app, "start_training", {"project_id": 1, "target": "colab", "confirm": True})
         assert got["ok"] and got["data"]["package"]["download_url"].startswith(
             "http://localhost:8000/api/assistant/downloads/")
         row = rows(app, "SELECT tool, outcome, summary FROM assistant_actions")[-1]
@@ -717,25 +717,22 @@ def test_add_annotation_rules(started):
     assert rows(app, "SELECT COUNT(*) AS n FROM annotations WHERE image_id=2000")[0]["n"] == 0
 
 
-WARNINGS = [{"code": "val_is_train", "message": "No validation set."},
-            {"code": "class_without_train_labels", "class": "rb", "boxes_in_package": 0,
-             "message": "Class rb has no labelled boxes."}]
-
-
 @pytest.fixture
 def warned(started, monkeypatch):
-    """export's plan_train_package faked to report two warnings; yields (app, client, calls)."""
+    """export's REAL plan_train_package, wrapped to count calls. On the fixture data (only image 11,
+    one video, is done) it warns val_is_train + class_without_train_labels; yields (app, client, calls)."""
     import autolabel.export as export_pkg
+    from autolabel.export import train_package as tp
 
+    real = tp.plan_train_package
     calls = []
 
     def plan(project_name, task, images, classes, annotations):
         calls.append((project_name, task))
-        if not any(im["review_status"] in ("done", "empty") for im in images):
-            raise export_pkg.NothingToExport()
-        return {"rule": "val_is_train", "warnings": WARNINGS}
+        return real(project_name, task, images, classes, annotations)
 
-    monkeypatch.setattr(export_pkg, "plan_train_package", plan, raising=False)
+    monkeypatch.setattr(export_pkg, "plan_train_package", plan)
+    monkeypatch.setattr(tp, "plan_train_package", plan)
     app, c = started
     yield app, c, calls
 
@@ -748,10 +745,11 @@ def test_package_warnings_need_confirmation_and_build_nothing(warned, tool, args
     app, _, calls = warned
     got = call(app, tool, args)
     nc = got["needs_confirmation"]
-    assert nc["details"] == {"warnings": WARNINGS, "split": {"rule": "val_is_train",
-                                                             "warnings": WARNINGS},
-                             "task": "segment"}
-    assert "No validation set." in nc["effect"] and "Class rb has no labelled boxes." in nc["effect"]
+    split = nc["details"]["split"]
+    assert split["rule"] == "val_is_train"
+    assert [w["code"] for w in split["warnings"]] == ["val_is_train", "class_without_train_labels"]
+    assert nc["details"] == {"warnings": split["warnings"], "split": split, "task": "segment"}
+    assert all(w["message"] in nc["effect"] for w in split["warnings"])
     assert calls == [("eot_crane", "segment")]
     assert list(downloads.folder(app.state.data_dir).glob("*.zip")) == []
     got = call(app, tool, {**args, "confirm": True}, user="dhyan")
@@ -779,7 +777,7 @@ def test_public_url_wins_for_web_url_and_download_url(tmp_path, monkeypatch):
         ctx = ToolContext(app.state, "mcp", "dhyan", base_url="http://127.0.0.1:8000")
         got = call_tool(ctx, "list_projects", {})
         assert got["data"]["projects"][0]["web_url"] == "http://192.168.1.20:8000/#project-1"
-        got = call_tool(ctx, "make_train_package", {"project_id": 1})
+        got = call_tool(ctx, "make_train_package", {"project_id": 1, "confirm": True})
         assert got["data"]["download_url"].startswith(
             "http://192.168.1.20:8000/api/assistant/downloads/")
 

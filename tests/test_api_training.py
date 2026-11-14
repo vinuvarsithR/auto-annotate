@@ -61,7 +61,8 @@ def test_colab_defaults_match_the_fixture(colab):
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         assert json.loads(zf.read("split.json")) == got["split"]
         notebook = zf.read("train.ipynb").decode("utf-8")
-    assert got["split"]["rule"] == "by_sequence"
+    assert got["split"]["rule"] == "val_is_train"  # fixture data: one video, 1 done image
+    assert [w["code"] for w in got["warnings"]] == ["val_is_train", "class_without_train_labels"]
     assert any("eot_crane_segment_best.pt" in s and "eot_crane_segment_metrics.json" in s
                for s in got["next_steps"])
     assert "yolo11s-seg.pt" in notebook

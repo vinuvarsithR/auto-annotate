@@ -209,7 +209,8 @@ def rows(app, sql: str, args=()) -> list[dict]:
 
 
 def same_keys(real, sample, where="$"):
-    """The two JSON values have the same dict keys everywhere (lists: every item vs sample[0])."""
+    """The two JSON values have the same dict keys everywhere (lists: item i vs sample[i], or
+    sample[0] past the sample's end)."""
     if isinstance(sample, dict) and isinstance(real, dict):
         assert set(real) == set(sample), f"{where}: {sorted(set(real) ^ set(sample))}"
         for k in sample:
@@ -217,4 +218,4 @@ def same_keys(real, sample, where="$"):
     elif isinstance(sample, list) and isinstance(real, list):
         if sample:
             for i, item in enumerate(real):
-                same_keys(item, sample[0], f"{where}[{i}]")
+                same_keys(item, sample[i] if i < len(sample) else sample[0], f"{where}[{i}]")
