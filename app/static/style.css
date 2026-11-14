@@ -506,7 +506,8 @@ table.grid .c-del:hover { color: var(--rejected); }
 .p-panel .seg label, .p-panel label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; }
 /* Train panel (#23 - #26) */
 .p-train-panel .t-steps { margin: 12px 0; padding-left: 20px; font-size: 12px; color: var(--muted); line-height: 1.6; }
-.p-train-panel .t-up .t-fname { font-size: 12px; }
+.p-train-panel .t-up .t-fname, .p-train-panel .t-up .t-mname { font-size: 12px; }
+.run-row .model-info { font-size: 12px; align-self: center; }
 .p-train-panel .t-prog { margin: 8px 0 0; }
 .p-train-panel .t-head { margin: 16px 0 0; font-size: 13px; font-weight: 500; }
 .p-train-panel .t-list > .muted, .p-train-panel .t-list > .err { margin-top: 6px; font-size: 12px; }

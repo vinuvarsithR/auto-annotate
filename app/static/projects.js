@@ -308,6 +308,7 @@ function trainState(pid) {
       task: "detect",
       weights: null,     // null = loading, [TrainedModel], or {error}
       file: null,        // the chosen .pt File
+      metrics: null,     // the chosen <run>_metrics.json File (optional, #24 `metrics` part)
       upload: null,      // fraction 0..1 while uploading
       building: false,   // #23 request running
       pkgMsg: null,      // {text, err}
@@ -360,12 +361,15 @@ function trainPanel(p) {
     <ol class="t-steps">
       <li>Download the training package (only images marked done or empty, with their approved boxes).</li>
       <li>Open <code>train.ipynb</code> from the zip in Colab; Runtime &gt; Change runtime type &gt; GPU.</li>
-      <li>Run the 3 cells: upload (pick the zip), train, download (saves <code>best.pt</code>).</li>
-      <li>Upload <code>best.pt</code> below with the same task. It then shows up as a model in Setup &gt; Run detection.</li>
+      <li>Run the 3 cells: upload (pick the zip), train, download (saves <code>&lt;run&gt;_best.pt</code> and <code>&lt;run&gt;_metrics.json</code>).</li>
+      <li>Upload the <code>.pt</code> below with the same task, and the metrics <code>.json</code> if you have it. It then shows up as a model in Setup &gt; Run detection.</li>
     </ol>
     <div class="row t-up">
       <label class="field">Weights (.pt) <input type="file" accept=".pt" class="t-file"></label>
       <span class="muted t-fname"></span>
+      <label class="field">Metrics (.json, optional) <input type="file" accept=".json,application/json" class="t-mfile"></label>
+      <span class="muted t-mname"></span>
+      <button type="button" class="ghost t-mclear" hidden>Remove</button>
       <span class="spacer"></span>
       <button type="button" class="primary t-upload">Upload weights</button>
     </div>
@@ -431,6 +435,26 @@ function trainPanel(p) {
     }
     rerenderTrain(p.id);
   });
+  // optional metrics file (#24 `metrics`: .json, 1 byte .. 1 MB; contents checked by the server)
+  const mInput = f.querySelector(".t-mfile");
+  f.querySelector(".t-mname").textContent = st.metrics ? `${st.metrics.name} (${fmtBytes(st.metrics.size)})` : "";
+  mInput.disabled = st.upload != null;
+  mInput.addEventListener("change", () => {
+    const file = mInput.files && mInput.files[0];
+    mInput.value = "";
+    st.metrics = file || null;
+    st.upMsg = null;
+    if (file && !/\.json$/i.test(file.name)) { st.upMsg = { text: `${file.name} is not a .json file.`, err: true }; st.metrics = null; }
+    else if (file && !file.size) { st.upMsg = { text: `${file.name} is empty.`, err: true }; st.metrics = null; }
+    else if (file && file.size > METRICS_MAX_BYTES) {
+      st.upMsg = { text: `${file.name} is ${fmtBytes(file.size)}; the limit is 1 MB.`, err: true };
+      st.metrics = null;
+    }
+    rerenderTrain(p.id);
+  });
+  const mClear = f.querySelector(".t-mclear");
+  mClear.hidden = !st.metrics || st.upload != null;
+  mClear.addEventListener("click", () => { st.metrics = null; rerenderTrain(p.id); });
   const up = f.querySelector(".t-upload");
   up.disabled = !st.file || st.upload != null;
   up.textContent = st.upload != null ? "Uploading..." : "Upload weights";
@@ -486,10 +510,11 @@ async function uploadTrainWeights(pid) {
     const w = await api.uploadWeights(pid, st.file, st.task, (frac) => {
       st.upload = frac;
       if (frac === 1 || frac - last >= 0.05) { last = frac; rerenderTrain(pid); }
-    });
+    }, st.metrics);
     st.file = null;
-    st.upMsg = { text: `Uploaded as model "${w.name}" (${w.task}, ${w.class_names.length} classes). ` +
-                       `Pick it in Setup > Run detection.` };
+    st.metrics = null;
+    st.upMsg = { text: `Uploaded as model "${w.name}" (${w.task}, ${w.class_names.length} classes, ` +
+                       `${fmtMetrics(w.metrics)}). Pick it in Setup > Run detection.` };
     showBanner(`Model ${w.name} uploaded.`, "info");
     await modelsChanged(pid);
   } catch (err) {
@@ -515,16 +540,21 @@ function weightsList(pid, st) {
   const t = document.createElement("table");
   t.className = "grid t-models";
   t.innerHTML = "<thead><tr><th>Model</th><th>Task</th><th>Classes</th><th>Image size</th><th>File</th>" +
-                "<th>Uploaded</th><th></th></tr></thead><tbody></tbody>";
+                "<th>Source</th><th>Date</th><th title=\"mAP50 / mAP50-95 on the validation images\">Metrics (mAP50 / 50-95)</th>" +
+                "<th></th></tr></thead><tbody></tbody>";
   for (const w of st.weights) {
     const tr = document.createElement("tr");
     const cells = [w.name, w.task, w.class_names.join(", "), w.imgsz != null ? String(w.imgsz) : "-",
-                   `${w.file_name} (${fmtBytes(w.size_bytes)})`, fmtDate(w.uploaded_at)];
+                   `${w.file_name} (${fmtBytes(w.size_bytes)})`, SOURCE_LABELS[w.source] || w.source || "-",
+                   fmtDate(w.uploaded_at), w.metrics ? fmtMetrics(w.metrics) : "-"];
     for (const c of cells) {
       const td = document.createElement("td");
       td.textContent = c;
       tr.appendChild(td);
     }
+    const mtd = tr.lastChild;
+    mtd.className = "num-tab";
+    mtd.title = metricsTitle(w.metrics);
     const td = document.createElement("td");
     td.className = "t-act";
     if (st.confirmDel === w.id) {
